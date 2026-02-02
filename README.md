@@ -268,7 +268,7 @@ These principles guide every design decision.
 **Outcome**
 
 - Semantic + Lexical scoring under 10ms
-  -AI without latency guilt
+- AI without latency guilt
 - Suitable for real-time products
 
 ---
