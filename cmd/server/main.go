@@ -1,49 +1,37 @@
 package main
 
 import (
-	"fmt"
-	"math/rand"
-	"time"
+	"log"
+	"net"
 
+	"github.com/shramanb113/ZENITH/gen/go/zenithproto"
 	"github.com/shramanb113/ZENITH/internal/analysis"
 	"github.com/shramanb113/ZENITH/internal/index"
+	"github.com/shramanb113/ZENITH/internal/server"
+	"google.golang.org/grpc"
 )
 
 func main() {
-	tokenizer := analysis.NewStandardTokenizer()
-	engine := index.NewInMemoryIndex()
+	lis, err := net.Listen("tcp", ":8080")
 
-	words := []string{"gopher", "zenith", "search", "engine", "fast", "blazing", "go", "high", "performance", "system"}
-	docCount := 1000
-
-	fmt.Printf("--- ZENITH STRESS TEST: INDEXING %d DOCUMENTS ---\n", docCount)
-	start := time.Now()
-
-	for i := 0; i < docCount; i++ {
-		id := fmt.Sprintf("DOC-%d", i)
-		content := ""
-		for j := 0; j < 20; j++ {
-			content += words[rand.Intn(len(words))] + " "
-		}
-
-		tokens := tokenizer.Tokenize(content)
-		engine.Add(id, tokens)
+	if err != nil {
+		log.Fatalf("Error occurred : %s", err)
 	}
 
-	fmt.Printf("Indexing complete in: %v\n", time.Since(start))
+	idx := index.NewInMemoryIndex()
+	tkz := analysis.NewStandardTokenizer()
 
-	query := "fast gopher engine"
-	iterations := 5000
-	fmt.Printf("\n--- ZENITH STRESS TEST: %d SEARCHES FOR '%s' ---\n", iterations, query)
-
-	searchStart := time.Now()
-	queryTokens := tokenizer.Tokenize(query)
-
-	for i := 0; i < iterations; i++ {
-		_ = engine.Search(queryTokens)
+	grpcServer := grpc.NewServer()
+	zenithServer := &server.ZenithServer{
+		Index:     idx,
+		Tokenizer: tkz,
 	}
 
-	duration := time.Since(searchStart)
-	fmt.Printf("Total search time: %v\n", duration)
-	fmt.Printf("Average search time: %v\n", duration/time.Duration(iterations))
+	zenithproto.RegisterSearchServiceServer(grpcServer, zenithServer)
+
+	log.Printf("ZENITH engine is live on %w", lis.Addr())
+
+	if err := grpcServer.Serve(lis); err != nil {
+		log.Fatalf("failed to serve: %v", err)
+	}
 }
