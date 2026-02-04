@@ -61,3 +61,50 @@ func (idx *InMemoryIndex) Search(queryTokens []string) []string {
 
 	return results
 }
+
+func (idx *InMemoryIndex) SearchAND(queryTokens []string) []string {
+	if len(queryTokens) == 0 {
+		return nil
+	}
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	candidate, ok := idx.data[queryTokens[0]]
+	if !ok {
+		return nil
+	}
+
+	for i := 1; i < len(queryTokens); i++ {
+		nextList, ok := idx.data[queryTokens[i]]
+		if !ok || len(candidate) == 0 {
+			return nil
+		}
+
+		var commonList []uint32
+		j, k := 0, 0
+
+		for j < len(candidate) && k < len(nextList) {
+			if candidate[j] == nextList[k] {
+				commonList = append(commonList, candidate[j])
+				j++
+				k++
+			} else if candidate[j] < nextList[k] {
+				j++
+			} else if candidate[j] > nextList[k] {
+				k++
+			}
+
+		}
+
+		candidate = commonList
+	}
+
+	results := []string{}
+
+	for _, ids := range candidate {
+		results = append(results, idx.idMapping[uint32(ids)])
+	}
+
+	return results
+}
