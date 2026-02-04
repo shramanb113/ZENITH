@@ -29,7 +29,7 @@ func main() {
 
 	zenithproto.RegisterSearchServiceServer(grpcServer, zenithServer)
 
-	log.Printf("ZENITH engine is live on %w", lis.Addr())
+	log.Printf("ZENITH engine is live on %v", lis.Addr())
 
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
