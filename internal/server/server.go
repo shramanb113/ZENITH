@@ -26,7 +26,7 @@ func (s *ZenithServer) IndexDocuments(ctx context.Context, req *zenithproto.Inde
 	}, nil
 }
 
-func (s *ZenithServer) SearchDocuments(ctx context.Context, req *zenithproto.SearchRequest) (*zenithproto.SearchResponse, error) {
+func (s *ZenithServer) Search(ctx context.Context, req *zenithproto.SearchRequest) (*zenithproto.SearchResponse, error) {
 
 	tokens := s.Tokenizer.Tokenize(req.Query)
 
