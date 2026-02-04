@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v6.33.4
-// source: document.proto
+// source: internal/proto/document.proto
 
 package zenithproto
 
@@ -21,6 +21,250 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type IndexRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Data          string                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IndexRequest) Reset() {
+	*x = IndexRequest{}
+	mi := &file_internal_proto_document_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IndexRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IndexRequest) ProtoMessage() {}
+
+func (x *IndexRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_document_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IndexRequest.ProtoReflect.Descriptor instead.
+func (*IndexRequest) Descriptor() ([]byte, []int) {
+	return file_internal_proto_document_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *IndexRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *IndexRequest) GetData() string {
+	if x != nil {
+		return x.Data
+	}
+	return ""
+}
+
+type IndexResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Status        bool                   `protobuf:"varint,1,opt,name=status,proto3" json:"status,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IndexResponse) Reset() {
+	*x = IndexResponse{}
+	mi := &file_internal_proto_document_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IndexResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IndexResponse) ProtoMessage() {}
+
+func (x *IndexResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_document_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IndexResponse.ProtoReflect.Descriptor instead.
+func (*IndexResponse) Descriptor() ([]byte, []int) {
+	return file_internal_proto_document_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *IndexResponse) GetStatus() bool {
+	if x != nil {
+		return x.Status
+	}
+	return false
+}
+
+func (x *IndexResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+type SearchRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Query         string                 `protobuf:"bytes,1,opt,name=query,proto3" json:"query,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SearchRequest) Reset() {
+	*x = SearchRequest{}
+	mi := &file_internal_proto_document_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SearchRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SearchRequest) ProtoMessage() {}
+
+func (x *SearchRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_document_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SearchRequest.ProtoReflect.Descriptor instead.
+func (*SearchRequest) Descriptor() ([]byte, []int) {
+	return file_internal_proto_document_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *SearchRequest) GetQuery() string {
+	if x != nil {
+		return x.Query
+	}
+	return ""
+}
+
+type SearchResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Score         float64                `protobuf:"fixed64,2,opt,name=score,proto3" json:"score,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SearchResult) Reset() {
+	*x = SearchResult{}
+	mi := &file_internal_proto_document_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SearchResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SearchResult) ProtoMessage() {}
+
+func (x *SearchResult) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_document_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SearchResult.ProtoReflect.Descriptor instead.
+func (*SearchResult) Descriptor() ([]byte, []int) {
+	return file_internal_proto_document_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *SearchResult) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *SearchResult) GetScore() float64 {
+	if x != nil {
+		return x.Score
+	}
+	return 0
+}
+
+type SearchResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Results       []*SearchResult        `protobuf:"bytes,1,rep,name=results,proto3" json:"results,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SearchResponse) Reset() {
+	*x = SearchResponse{}
+	mi := &file_internal_proto_document_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SearchResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SearchResponse) ProtoMessage() {}
+
+func (x *SearchResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_document_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SearchResponse.ProtoReflect.Descriptor instead.
+func (*SearchResponse) Descriptor() ([]byte, []int) {
+	return file_internal_proto_document_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *SearchResponse) GetResults() []*SearchResult {
+	if x != nil {
+		return x.Results
+	}
+	return nil
+}
+
 type DocumentProto struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -35,7 +279,7 @@ type DocumentProto struct {
 
 func (x *DocumentProto) Reset() {
 	*x = DocumentProto{}
-	mi := &file_document_proto_msgTypes[0]
+	mi := &file_internal_proto_document_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -47,7 +291,7 @@ func (x *DocumentProto) String() string {
 func (*DocumentProto) ProtoMessage() {}
 
 func (x *DocumentProto) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[0]
+	mi := &file_internal_proto_document_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -60,7 +304,7 @@ func (x *DocumentProto) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocumentProto.ProtoReflect.Descriptor instead.
 func (*DocumentProto) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{0}
+	return file_internal_proto_document_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *DocumentProto) GetId() string {
@@ -114,7 +358,7 @@ type Vector struct {
 
 func (x *Vector) Reset() {
 	*x = Vector{}
-	mi := &file_document_proto_msgTypes[1]
+	mi := &file_internal_proto_document_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -126,7 +370,7 @@ func (x *Vector) String() string {
 func (*Vector) ProtoMessage() {}
 
 func (x *Vector) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[1]
+	mi := &file_internal_proto_document_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -139,7 +383,7 @@ func (x *Vector) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Vector.ProtoReflect.Descriptor instead.
 func (*Vector) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{1}
+	return file_internal_proto_document_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Vector) GetElements() []float32 {
@@ -149,11 +393,24 @@ func (x *Vector) GetElements() []float32 {
 	return nil
 }
 
-var File_document_proto protoreflect.FileDescriptor
+var File_internal_proto_document_proto protoreflect.FileDescriptor
 
-const file_document_proto_rawDesc = "" +
+const file_internal_proto_document_proto_rawDesc = "" +
 	"\n" +
-	"\x0edocument.proto\x12\x06zenith\"\xed\x02\n" +
+	"\x1dinternal/proto/document.proto\x12\x06zenith\"2\n" +
+	"\fIndexRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04data\x18\x02 \x01(\tR\x04data\"A\n" +
+	"\rIndexResponse\x12\x16\n" +
+	"\x06status\x18\x01 \x01(\bR\x06status\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"%\n" +
+	"\rSearchRequest\x12\x14\n" +
+	"\x05query\x18\x01 \x01(\tR\x05query\"4\n" +
+	"\fSearchResult\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05score\x18\x02 \x01(\x01R\x05score\"@\n" +
+	"\x0eSearchResponse\x12.\n" +
+	"\aresults\x18\x01 \x03(\v2\x14.zenith.SearchResultR\aresults\"\xed\x02\n" +
 	"\rDocumentProto\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x129\n" +
 	"\x06fields\x18\x02 \x03(\v2!.zenith.DocumentProto.FieldsEntryR\x06fields\x12<\n" +
@@ -168,58 +425,71 @@ const file_document_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12$\n" +
 	"\x05value\x18\x02 \x01(\v2\x0e.zenith.VectorR\x05value:\x028\x01\"$\n" +
 	"\x06Vector\x12\x1a\n" +
-	"\belements\x18\x01 \x03(\x02R\belementsB2Z0github.com/shramanb113/ZENITH/gen/go/zenithprotob\x06proto3"
+	"\belements\x18\x01 \x03(\x02R\belements2\x87\x01\n" +
+	"\rSearchService\x12=\n" +
+	"\x0eIndexDocuments\x12\x14.zenith.IndexRequest\x1a\x15.zenith.IndexResponse\x127\n" +
+	"\x06Search\x12\x15.zenith.SearchRequest\x1a\x16.zenith.SearchResponseB\x14Z\x12gen/go/zenithprotob\x06proto3"
 
 var (
-	file_document_proto_rawDescOnce sync.Once
-	file_document_proto_rawDescData []byte
+	file_internal_proto_document_proto_rawDescOnce sync.Once
+	file_internal_proto_document_proto_rawDescData []byte
 )
 
-func file_document_proto_rawDescGZIP() []byte {
-	file_document_proto_rawDescOnce.Do(func() {
-		file_document_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_document_proto_rawDesc), len(file_document_proto_rawDesc)))
+func file_internal_proto_document_proto_rawDescGZIP() []byte {
+	file_internal_proto_document_proto_rawDescOnce.Do(func() {
+		file_internal_proto_document_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_internal_proto_document_proto_rawDesc), len(file_internal_proto_document_proto_rawDesc)))
 	})
-	return file_document_proto_rawDescData
+	return file_internal_proto_document_proto_rawDescData
 }
 
-var file_document_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
-var file_document_proto_goTypes = []any{
-	(*DocumentProto)(nil), // 0: zenith.DocumentProto
-	(*Vector)(nil),        // 1: zenith.Vector
-	nil,                   // 2: zenith.DocumentProto.FieldsEntry
-	nil,                   // 3: zenith.DocumentProto.VectorsEntry
+var file_internal_proto_document_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_internal_proto_document_proto_goTypes = []any{
+	(*IndexRequest)(nil),   // 0: zenith.IndexRequest
+	(*IndexResponse)(nil),  // 1: zenith.IndexResponse
+	(*SearchRequest)(nil),  // 2: zenith.SearchRequest
+	(*SearchResult)(nil),   // 3: zenith.SearchResult
+	(*SearchResponse)(nil), // 4: zenith.SearchResponse
+	(*DocumentProto)(nil),  // 5: zenith.DocumentProto
+	(*Vector)(nil),         // 6: zenith.Vector
+	nil,                    // 7: zenith.DocumentProto.FieldsEntry
+	nil,                    // 8: zenith.DocumentProto.VectorsEntry
 }
-var file_document_proto_depIdxs = []int32{
-	2, // 0: zenith.DocumentProto.fields:type_name -> zenith.DocumentProto.FieldsEntry
-	3, // 1: zenith.DocumentProto.vectors:type_name -> zenith.DocumentProto.VectorsEntry
-	1, // 2: zenith.DocumentProto.VectorsEntry.value:type_name -> zenith.Vector
-	3, // [3:3] is the sub-list for method output_type
-	3, // [3:3] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+var file_internal_proto_document_proto_depIdxs = []int32{
+	3, // 0: zenith.SearchResponse.results:type_name -> zenith.SearchResult
+	7, // 1: zenith.DocumentProto.fields:type_name -> zenith.DocumentProto.FieldsEntry
+	8, // 2: zenith.DocumentProto.vectors:type_name -> zenith.DocumentProto.VectorsEntry
+	6, // 3: zenith.DocumentProto.VectorsEntry.value:type_name -> zenith.Vector
+	0, // 4: zenith.SearchService.IndexDocuments:input_type -> zenith.IndexRequest
+	2, // 5: zenith.SearchService.Search:input_type -> zenith.SearchRequest
+	1, // 6: zenith.SearchService.IndexDocuments:output_type -> zenith.IndexResponse
+	4, // 7: zenith.SearchService.Search:output_type -> zenith.SearchResponse
+	6, // [6:8] is the sub-list for method output_type
+	4, // [4:6] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
-func init() { file_document_proto_init() }
-func file_document_proto_init() {
-	if File_document_proto != nil {
+func init() { file_internal_proto_document_proto_init() }
+func file_internal_proto_document_proto_init() {
+	if File_internal_proto_document_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_document_proto_rawDesc), len(file_document_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_proto_document_proto_rawDesc), len(file_internal_proto_document_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   9,
 			NumExtensions: 0,
-			NumServices:   0,
+			NumServices:   1,
 		},
-		GoTypes:           file_document_proto_goTypes,
-		DependencyIndexes: file_document_proto_depIdxs,
-		MessageInfos:      file_document_proto_msgTypes,
+		GoTypes:           file_internal_proto_document_proto_goTypes,
+		DependencyIndexes: file_internal_proto_document_proto_depIdxs,
+		MessageInfos:      file_internal_proto_document_proto_msgTypes,
 	}.Build()
-	File_document_proto = out.File
-	file_document_proto_goTypes = nil
-	file_document_proto_depIdxs = nil
+	File_internal_proto_document_proto = out.File
+	file_internal_proto_document_proto_goTypes = nil
+	file_internal_proto_document_proto_depIdxs = nil
 }

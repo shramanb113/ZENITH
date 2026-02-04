@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package zenith;
+
+option go_package = "gen/go/zenithproto";
+
+service SearchService {
+    rpc IndexDocuments(IndexRequest) returns (IndexResponse);
+    rpc Search(SearchRequest) returns (SearchResponse);
+}
+
+message IndexRequest {
+    string id = 1;
+    string data = 2;
+}
+
+message IndexResponse {
+    bool status = 1;
+    string message = 2;
+}
+
+message SearchRequest{
+    string query = 1 ;
+}
+
+message SearchResult {
+    string id = 1;
+    double score = 2;
+}
+
+message SearchResponse {
+    repeated SearchResult results = 1;
+}
+
+message DocumentProto {
+
+    string id = 1;
+    map<string,string> fields = 2;
+    map<string,Vector> vectors = 3;
+
+    bytes metadata = 4;
+    int64 version = 5;
+    string status = 6;
+}
+
+message Vector {
+    repeated float elements = 1;
+}
