@@ -34,7 +34,7 @@ func (t *StandardTokenizer) Tokenize(text string) []string {
 
 	for _, token := range tokens {
 		if _, ok := t.stopWords[token]; !ok {
-			filtered = append(filtered, token)
+			filtered = append(filtered, Stem(token))
 		}
 	}
 	return filtered
