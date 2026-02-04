@@ -1,12 +1,20 @@
 package index
 
-import "sync"
+import (
+	"slices"
+	"sync"
+)
 
 type InMemoryIndex struct {
 	mu              sync.RWMutex
 	data            map[string][]uint32
 	idMapping       map[uint32]string
 	internalCounter uint32
+}
+
+type SearchResult struct {
+	ID    string
+	Score float64
 }
 
 func NewInMemoryIndex() *InMemoryIndex {
@@ -39,25 +47,39 @@ func (idx *InMemoryIndex) Add(originalID string, tokens []string) {
 
 }
 
-func (idx *InMemoryIndex) Search(queryTokens []string) []string {
+func (idx *InMemoryIndex) Search(queryTokens []string) []SearchResult {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	foundIDs := make(map[uint32]struct{})
+	scores := make(map[uint32]float64)
 
 	for _, queryToken := range queryTokens {
 		if ids, ok := idx.data[queryToken]; ok {
 			for _, id := range ids {
-				foundIDs[id] = struct{}{}
+				scores[id] += 1.0
 			}
 		}
 	}
 
-	results := []string{}
+	results := make([]SearchResult, 0)
 
-	for ids, _ := range foundIDs {
-		results = append(results, idx.idMapping[ids])
+	for id, score := range scores {
+		searchResult := &SearchResult{
+			ID:    idx.idMapping[id],
+			Score: score,
+		}
+		results = append(results, *searchResult)
 	}
+
+	slices.SortFunc(results, func(a SearchResult, b SearchResult) int {
+		if a.Score > b.Score {
+			return -1
+		}
+		if a.Score < b.Score {
+			return 1
+		}
+		return 0
+	})
 
 	return results
 }
