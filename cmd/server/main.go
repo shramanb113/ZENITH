@@ -3,6 +3,9 @@ package main
 import (
 	"log"
 	"net"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/shramanb113/ZENITH/gen/go/zenithproto"
 	"github.com/shramanb113/ZENITH/internal/analysis"
@@ -29,9 +32,20 @@ func main() {
 
 	zenithproto.RegisterSearchServiceServer(grpcServer, zenithServer)
 
-	log.Printf("ZENITH engine is live on %v", lis.Addr())
+	stop := make(chan os.Signal, 1)
 
-	if err := grpcServer.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
-	}
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		log.Printf("ZENITH engine is live on %v", lis.Addr())
+
+		if err := grpcServer.Serve(lis); err != nil {
+			log.Fatalf("failed to serve: %v", err)
+		}
+	}()
+
+	<-stop
+
+	grpcServer.GracefulStop()
+
 }
