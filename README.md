@@ -293,3 +293,13 @@ These principles guide every design decision.
 - [x] **08-09:** Thread-safety implementation using sync.RWMutex.
 - [x] **10:** Concurrent Indexing via Worker Pools & Load Generation.
 - [x] **11:** The Vault – Binary persistence with encoding/gob & Graceful Shutdown. ✅
+
+## 🧠 Phase 2: Neural Intelligence (The Brain)
+
+- [] **12: The Great Split**- Distributed Coordinator & Modulo Sharding.
+- [] **13: Neural Storage** - Vector map integration & High-dimensional schema.
+- [] **14: Linear Algebra** - Implementing Dot Product and Magnitude in pure Go.
+- [] **15: The Similarity Engine** - Implementing Cosine Similarity & L2 Distance.
+- [] **16: Deterministic Embeddings** - Creating a "Concept-to-Vector" hash transformer.
+- [] **17: Hybrid Ranking** - Score normalization and Weighted Fusion (Keyword + Vector).
+- [] **18: Reciprocal Rank Fusion (RRF)** - Advanced rank-merging for multi-modal search.
