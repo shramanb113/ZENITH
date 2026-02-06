@@ -280,3 +280,16 @@ These principles guide every design decision.
 
 - This project is not about replacing a tool.
 - It is about **advancing the dsicipline of search itself.**
+
+---
+
+## 🏔️ The ZENITH 50-Step Ascent:: The Definitive Roadmap
+
+## 🧱 Phase 1: The Core Foundation (The Skeleton)
+
+- [x] **01-03:** Inverted Index architecture & Map-based postings lists.
+- [x] **04-05:** Standard Tokenization, Stop-word filtering, and Lowercasing.
+- [x] **06-07:** gRPC Service definition and Protobuf contract design.
+- [x] **08-09:** Thread-safety implementation using sync.RWMutex.
+- [x] **10:** Concurrent Indexing via Worker Pools & Load Generation.
+- [x] **11:** The Vault – Binary persistence with encoding/gob & Graceful Shutdown. ✅
