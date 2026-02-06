@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/shramanb113/ZENITH/gen/go/zenithproto"
@@ -11,52 +14,68 @@ import (
 )
 
 func main() {
+	mode := flag.String("mode", "index", "Mode to run: 'index' or 'search'")
+	count := flag.Int("count", 1000, "Number of documents to index in stress test")
+	flag.Parse()
 
-	conn, err := grpc.NewClient("localhost:8080", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.Dial("localhost:8080", grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		log.Fatalf("Did not connect: %v", err)
+		log.Fatalf("did not connect: %v", err)
 	}
 	defer conn.Close()
-
 	client := zenithproto.NewSearchServiceClient(conn)
 
-	docs := []struct {
-		ID   string
-		Text string
-	}{
-		{"DOC-1", "The gopher is a fast animal and great for search engines."},
-		{"DOC-2", "Zenith provides blazingly fast engine performance."},
-		{"DOC-3", "A king was cycling across the glass bridge."},
+	if *mode == "index" {
+		runStressIndex(client, *count)
+	} else {
+		runSearch(client, "document")
+	}
+}
+
+func runStressIndex(client zenithproto.SearchServiceClient, totalDocs int) {
+	var wg sync.WaitGroup
+	start := time.Now()
+
+	fmt.Printf("🚀 Starting Stress Test: Indexing %d documents...\n", totalDocs)
+
+	for i := 0; i < totalDocs; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+
+			docID := fmt.Sprintf("STRESS-%d", id)
+			text := fmt.Sprintf("This is document number %d which contains specific keywords for the search engine stress test", id)
+
+			_, err := client.IndexDocuments(ctx, &zenithproto.IndexRequest{
+				Id:   docID,
+				Data: text,
+			})
+			if err != nil {
+				log.Printf("Error indexing %s: %v", docID, err)
+			}
+		}(i)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	wg.Wait()
+	duration := time.Since(start)
+	fmt.Printf("✅ Finished! Total Time: %v | Avg per doc: %v\n", duration, duration/time.Duration(totalDocs))
+}
+
+func runSearch(client zenithproto.SearchServiceClient, query string) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	log.Println("--- 📨 INDEXING PHASE ---")
-	for _, d := range docs {
-		res, err := client.IndexDocuments(ctx, &zenithproto.IndexRequest{
-			Id:   d.ID,
-			Data: d.Text,
-		})
-		if err != nil {
-			log.Printf("Could not index %s: %v", d.ID, err)
-		} else {
-			log.Printf("Server Response: %s (Success: %v)", res.Message, res.Status)
-		}
-	}
-
-	log.Println("\n--- 🔍 SEARCH PHASE ---")
-	searchQuery := "fast engine"
-
-	searchRes, err := client.Search(ctx, &zenithproto.SearchRequest{
-		Query: searchQuery,
-	})
+	start := time.Now()
+	res, err := client.Search(ctx, &zenithproto.SearchRequest{Query: query})
 	if err != nil {
 		log.Fatalf("Search failed: %v", err)
 	}
 
-	log.Printf("Results for query '%s':", searchQuery)
-	for _, r := range searchRes.Results {
-		log.Printf(" -> [%s] Score: %.4f", r.Id, r.Score)
+	fmt.Printf("🔍 Search Results for '%s':\n", query)
+	for _, doc := range res.Results {
+		fmt.Printf(" -> [%s] Score: %.4f\n", doc.Id, doc.Score)
 	}
+	fmt.Printf("\nFound %d results in %v\n", len(res.Results), time.Since(start))
 }

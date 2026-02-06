@@ -24,6 +24,12 @@ func main() {
 	idx := index.NewInMemoryIndex()
 	tkz := analysis.NewStandardTokenizer()
 
+	if err := idx.Load("zenith.db"); err != nil {
+		log.Println("No existing index found, starting fresh.")
+	} else {
+		log.Println("Successfully loaded index from disk.")
+	}
+
 	grpcServer := grpc.NewServer()
 	zenithServer := &server.ZenithServer{
 		Index:     idx,
@@ -47,5 +53,11 @@ func main() {
 	<-stop
 
 	grpcServer.GracefulStop()
+
+	if err := idx.Save("zenith.db"); err != nil {
+		log.Printf("Failed to save index: %v", err)
+	} else {
+		log.Println("Index saved successfully. Goodbye!")
+	}
 
 }

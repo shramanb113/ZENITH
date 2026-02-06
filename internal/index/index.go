@@ -1,8 +1,12 @@
 package index
 
 import (
+	"encoding/gob"
+	"log"
+	"os"
 	"slices"
 	"sync"
+	"time"
 )
 
 type InMemoryIndex struct {
@@ -129,4 +133,60 @@ func (idx *InMemoryIndex) SearchAND(queryTokens []string) []string {
 	}
 
 	return results
+}
+
+func (idx *InMemoryIndex) Save(filepath string) error {
+	start := time.Now()
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	log.Printf("💾 Saving index to %s...", filepath)
+
+	file, err := os.Create(filepath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := gob.NewEncoder(file)
+
+	if err := encoder.Encode(idx.data); err != nil {
+		return err
+	}
+
+	if err := encoder.Encode(idx.idMapping); err != nil {
+		return err
+	}
+
+	log.Printf("✅ Index saved. Entries: %d. Duration: %v", len(idx.data), time.Since(start))
+	return nil
+}
+
+func (idx *InMemoryIndex) Load(filepath string) error {
+	start := time.Now()
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	osClient, err := os.Open(filepath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("⚠️ No persistence file found at %s. Starting fresh.", filepath)
+			return err
+		}
+		return err
+	}
+	defer osClient.Close()
+
+	info := gob.NewDecoder(osClient)
+
+	if err := info.Decode(&idx.data); err != nil {
+		return err
+	}
+
+	if err := info.Decode(&idx.idMapping); err != nil {
+		return err
+	}
+
+	log.Printf("Successfully loaded %d internal IDs from disk in %v", len(idx.idMapping), time.Since(start))
+	return nil
 }
