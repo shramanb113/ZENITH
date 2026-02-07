@@ -3,6 +3,7 @@ package index
 import (
 	"encoding/gob"
 	"log"
+	"math"
 	"os"
 	"slices"
 	"sync"
@@ -20,8 +21,10 @@ type InMemoryIndex struct {
 }
 
 type SearchResult struct {
-	ID    string
-	Score float64
+	ID           string
+	KeywordScore float64
+	VectorScore  float64
+	FinalScore   float64
 }
 
 func NewInMemoryIndex() *InMemoryIndex {
@@ -62,37 +65,88 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 	defer idx.mu.RUnlock()
 
 	queryVec, _ := analysis.GetEmbedding(query)
-	scores := make(map[uint32]float64)
+	KeywordScores := make(map[uint32]float64)
 
 	for _, queryToken := range queryTokens {
 		if ids, ok := idx.data[queryToken]; ok {
 			for _, id := range ids {
-				scores[id] += 1.0
+				KeywordScores[id] += 1.0
 			}
 		}
 	}
 
+	VectorScores := make(map[uint32]float64)
+
 	for id, docVec := range idx.vectors {
 		sim := analysis.CosineSimilarity(queryVec, docVec)
 
-		scores[id] += (float64(sim) * 2.0)
+		VectorScores[id] += (float64(sim))
 	}
 
-	results := make([]SearchResult, 0)
+	allIDs := make(map[uint32]struct{})
+	for id := range KeywordScores {
+		allIDs[id] = struct{}{}
+	}
+	for id := range VectorScores {
+		allIDs[id] = struct{}{}
+	}
 
-	for id, score := range scores {
-		searchResult := &SearchResult{
-			ID:    idx.idMapping[id],
-			Score: score,
+	results := make([]SearchResult, 0, len(allIDs))
+
+	maxK, minK := -1.0, math.MaxFloat64
+	maxV, minV := -1.0, math.MaxFloat64
+
+	for id := range allIDs {
+		kScore := KeywordScores[id]
+		vScore := VectorScores[id]
+
+		// Update Keyword boundaries
+		if kScore > maxK {
+			maxK = kScore
 		}
-		results = append(results, *searchResult)
+		if kScore < minK {
+			minK = kScore
+		}
+
+		// Update Vector boundaries
+		if vScore > maxV {
+			maxV = vScore
+		}
+		if vScore < minV {
+			minV = vScore
+		}
+
+		results = append(results, SearchResult{
+			ID:           idx.idMapping[id],
+			KeywordScore: kScore,
+			VectorScore:  vScore,
+		})
+	}
+
+	alpha := 0.5
+	beta := 0.5
+
+	for i := range results {
+		normK := 0.0
+		if maxK > minK {
+			normK = (results[i].KeywordScore - minK) / (maxK - minK)
+		}
+
+		normV := 0.0
+		if maxV > minV {
+			normV = (results[i].VectorScore - minV) / (maxV - minV)
+		}
+
+		results[i].KeywordScore = normK
+		results[i].VectorScore = normV
+		results[i].FinalScore = (alpha * normK) + (beta * normV)
 	}
 
 	slices.SortFunc(results, func(a SearchResult, b SearchResult) int {
-		if a.Score > b.Score {
+		if a.FinalScore > b.FinalScore {
 			return -1
 		}
-		if a.Score < b.Score {
+		if a.FinalScore < b.FinalScore {
 			return 1
 		}
 		return 0
