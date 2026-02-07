@@ -14,124 +14,104 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "semantic", "Modes: 'index', 'search', 'semantic'")
-	count := flag.Int("count", 1000, "Number of docs for stress test")
-	query := flag.String("query", "fruit", "Search query")
+	count := flag.Int("count", 10, "Number of heavy documents")
 	flag.Parse()
 
-	// Connect to the Zenith Engine
-	conn, err := grpc.Dial("localhost:8080", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Using NewClient as per latest gRPC standards
+	conn, err := grpc.NewClient("localhost:8080", grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		log.Fatalf("❌ Did not connect: %v", err)
+		log.Fatalf("❌ gRPC Connection Failed: %v", err)
 	}
 	defer conn.Close()
 	client := zenithproto.NewSearchServiceClient(conn)
 
-	switch *mode {
-	case "index":
-		runStressIndex(client, *count)
-	case "search":
-		runSearch(client, *query)
-	case "semantic":
-		runSemanticGauntlet(client)
-	default:
-		fmt.Println("Unknown mode. Use 'index', 'search', or 'semantic'")
-	}
+	runNeuralGauntlet(client, *count)
 }
 
-// runSemanticGauntlet tests the "Brain" (Challenge 17 Hybrid Search)
-func runSemanticGauntlet(client zenithproto.SearchServiceClient) {
-	fmt.Println("🧠 PHASE 2: Testing Neural Intelligence...")
+func runNeuralGauntlet(client zenithproto.SearchServiceClient, count int) {
+	fmt.Println("🚀 PHASE 2 STRESS TEST: The Neural Gauntlet (Top 3 View)")
+	fmt.Println("--------------------------------------------------")
 
-	testDocs := []struct {
+	challengingDocs := []struct {
 		id   string
 		text string
 	}{
-		{"GO-1", "Golang is a statically typed, compiled programming language designed at Google."},
-		{"PY-1", "Python is an interpreted, high-level, general-purpose programming language."},
-		{"WEATHER-1", "The lightning flashed across the sky while the storm rumbled."},
-		{"SYS-1", "High performance systems require optimized memory management and low latency."},
-		{"FRUIT-1", "I love eating oranges and lemons in the summer."},
+		{"TECH-01", "The PageRank algorithm uses backlink structures to determine the perceived importance of web pages within a fully automated crawling ecosystem."},
+		{"MED-02", "Clinical pharmacology studies indicate that drug-drug interactions between H2 blockers and organics can lead to metabolic anomalies in water-based solvent environments."},
+		{"LEGAL-03", "The robots exclusion standard (robots.txt) acts as a hint rather than a legal directive, yet it remains the primary mechanism for preventing crawler-based indexing of sensitive directories."},
+		{"AI-04", "Transformer ensembles often over-rely on lexical overlap (surface features) instead of capturing deep semantic similarity, especially in domain-specific technical jargon."},
+		{"SYS-05", "High-performance distributed systems achieve sub-linear time complexity using Approximate Nearest Neighbor (ANN) algorithms like HNSW or FAISS to navigate high-dimensional vector spaces."},
+		{"ENV-06", "Carbon capture and sequestration technologies utilize underground storage to mitigate CO2 emissions, effectively decoupling industrial output from atmospheric pollution."},
+		{"EDU-07", "Asymmetric semantic search involves retrieving long, informative paragraphs to answer short, intent-heavy queries where keywords might not explicitly overlap."},
+		{"DATA-08", "Min-Max Normalization squashes diverse score distributions into a fixed 0.0 to 1.0 range, preventing one algorithm from drowning out others in hybrid ranking systems."},
+		{"LOG-09", "Shift logs in the process industry document incidents, maintenance activities, and product quality using proprietary industry-specific syntax and non-standard acronyms."},
+		{"META-10", "Search engine optimization (SEO) requires balancing verifiability, neutrality, and notability, ensuring that popularity does not trump accuracy in indexed results."},
 	}
 
-	for _, d := range testDocs {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_, err := client.IndexDocuments(ctx, &zenithproto.IndexRequest{Id: d.id, Data: d.text})
-		cancel()
-		if err != nil {
-			log.Printf("Failed to index %s: %v", d.id, err)
-		}
-	}
-
-	fmt.Println("✅ Semantic corpus indexed. Let's see if ZENITH can 'think'...")
-
-	// Testing Semantic Overlap (The Vector Engine)
-	// Query "fruit" doesn't exist in FRUIT-1, but the vector should find it.
-	queries := []string{"fruit", "coding", "thunderstorm", "efficiency"}
-
-	for _, q := range queries {
-		runSearch(client, q)
-		fmt.Println("--------------------------------------------------")
-	}
-}
-
-// runStressIndex tests the "Skeleton" (Challenge 10 Concurrency)
-func runStressIndex(client zenithproto.SearchServiceClient, totalDocs int) {
-	start := time.Now()
+	// Indexing
+	fmt.Printf("📦 Indexing %d documents concurrently...\n", len(challengingDocs))
 	var wg sync.WaitGroup
-	// Semaphore to prevent OS resource exhaustion
-	semaphore := make(chan struct{}, 100)
-
-	fmt.Printf("🚀 Starting Stress Test: Indexing %d documents...\n", totalDocs)
-
-	for i := 0; i < totalDocs; i++ {
-		wg.Add(1)
-		semaphore <- struct{}{} // Acquire
-
-		go func(id int) {
-			defer wg.Done()
-			defer func() { <-semaphore }() // Release
-
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-
-			docID := fmt.Sprintf("STRESS-%d", id)
-			text := "Go is a great language for building distributed systems and search engines."
-
-			_, err := client.IndexDocuments(ctx, &zenithproto.IndexRequest{
-				Id:   docID,
-				Data: text,
-			})
-			if err != nil {
-				log.Printf("Error indexing %s: %v", docID, err)
-			}
-		}(i)
-	}
-
-	wg.Wait()
-	duration := time.Since(start)
-	fmt.Printf("📊 Result: %d docs in %v | Speed: %.2f docs/sec\n",
-		totalDocs, duration, float64(totalDocs)/duration.Seconds())
-}
-
-func runSearch(client zenithproto.SearchServiceClient, query string) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
 	start := time.Now()
-	res, err := client.Search(ctx, &zenithproto.SearchRequest{Query: query})
-	if err != nil {
-		log.Printf("❌ Search failed for '%s': %v", query, err)
-		return
+
+	for _, d := range challengingDocs {
+		wg.Add(1)
+		go func(id, text string) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := client.IndexDocuments(ctx, &zenithproto.IndexRequest{Id: id, Data: text})
+			if err != nil {
+				log.Printf("❌ Failed to index %s: %v", id, err)
+			}
+		}(d.id, d.text)
+	}
+	wg.Wait()
+	fmt.Printf("✅ Indexing Complete in %v\n\n", time.Since(start))
+
+	// Semantic Queries
+	semanticTests := []string{
+		"how to rank websites",
+		"medicine mixing",
+		"preventing web spiders",
+		"neural network failure",
+		"fast search math",
+		"global warming solutions",
 	}
 
-	fmt.Printf("🔍 Results for '%s' (%v):\n", query, time.Since(start))
-	if len(res.Results) == 0 {
-		fmt.Println("   [No results found]")
-		return
-	}
+	fmt.Println("🧠 Analyzing Top 3 Hybrid Results...")
+	fmt.Println("--------------------------------------------------")
 
-	for _, doc := range res.Results {
-		fmt.Printf(" -> [%-10s] Score: %.4f\n", doc.Id, doc.Score)
+	for _, query := range semanticTests {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		res, err := client.Search(ctx, &zenithproto.SearchRequest{Query: query})
+		cancel()
+
+		if err != nil {
+			log.Printf("❌ Search Error for '%s': %v", query, err)
+			continue
+		}
+
+		fmt.Printf("🔍 Query: [%s]\n", query)
+
+		// Logic to show up to Top 3
+		displayLimit := 3
+		if len(res.Results) < displayLimit {
+			displayLimit = len(res.Results)
+		}
+
+		for i := 0; i < displayLimit; i++ {
+			r := res.Results[i]
+			medal := "  "
+			switch i {
+			case 0:
+				medal = "🥇"
+			case 1:
+				medal = "🥈"
+			case 2:
+				medal = "🥉"
+			}
+			fmt.Printf("   %s Rank %d: [%-8s] Score: %.4f\n", medal, i+1, r.Id, r.Score)
+		}
+		fmt.Println("--------------------------------------------------")
 	}
 }

@@ -18,6 +18,7 @@ type InMemoryIndex struct {
 	idMapping       map[uint32]string
 	internalCounter uint32
 	vectors         map[uint32][]float32
+	tokenCounts     map[string]int
 }
 
 type SearchResult struct {
@@ -27,12 +28,18 @@ type SearchResult struct {
 	FinalScore   float64
 }
 
+type SearchResponse struct {
+	ID    string
+	Score float64
+}
+
 func NewInMemoryIndex() *InMemoryIndex {
 	return &InMemoryIndex{
 		data:            make(map[string][]uint32),
 		idMapping:       make(map[uint32]string),
 		internalCounter: 0,
 		vectors:         make(map[uint32][]float32),
+		tokenCounts:     make(map[string]int),
 	}
 }
 
@@ -45,6 +52,7 @@ func (idx *InMemoryIndex) Add(originalID string, fullText string, tokens []strin
 	idx.idMapping[idx.internalCounter] = originalID
 
 	idx.vectors[idx.internalCounter], _ = analysis.GetEmbedding(fullText)
+	seenInDoc := make(map[string]bool)
 
 	for _, token := range tokens {
 
@@ -55,22 +63,30 @@ func (idx *InMemoryIndex) Add(originalID string, fullText string, tokens []strin
 				continue
 			}
 		}
+		if !seenInDoc[token] {
+			idx.tokenCounts[token]++
+			seenInDoc[token] = true
+		}
+
 		idx.data[token] = append(idx.data[token], idx.internalCounter)
 	}
 
 }
 
-func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchResult {
+func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchResponse {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
 	queryVec, _ := analysis.GetEmbedding(query)
 	KeywordScores := make(map[uint32]float64)
+	matchCounts := make(map[uint32]int)
 
 	for _, queryToken := range queryTokens {
 		if ids, ok := idx.data[queryToken]; ok {
 			for _, id := range ids {
-				KeywordScores[id] += 1.0
+				KeywordScores[id] += 1.0 / math.Log(1.0+float64(idx.tokenCounts[queryToken]))
+				matchCounts[id] += 1
+
 			}
 		}
 	}
@@ -99,6 +115,10 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 	for id := range allIDs {
 		kScore := KeywordScores[id]
 		vScore := VectorScores[id]
+
+		if matchCounts[id] == len(queryTokens) {
+			kScore *= 2.0
+		}
 
 		// Update Keyword boundaries
 		if kScore > maxK {
@@ -152,7 +172,16 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 		return 0
 	})
 
-	return results
+	searchResponse := make([]SearchResponse, 0, len(results))
+
+	for _, result := range results {
+		searchResponse = append(searchResponse, SearchResponse{
+			ID:    result.ID,
+			Score: result.FinalScore,
+		})
+	}
+
+	return searchResponse
 }
 
 func (idx *InMemoryIndex) SearchAND(queryTokens []string) []string {
