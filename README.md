@@ -302,4 +302,4 @@ These principles guide every design decision.
 - [x] **15: The Similarity Engine** - Implementing Cosine Similarity & L2 Distance.
 - [x] **16: Deterministic Embeddings** - Creating a "Concept-to-Vector" hash transformer.
 - [x] **17: Hybrid Ranking** - Score normalization and Weighted Fusion (Keyword + Vector).
-- [] **18: Reciprocal Rank Fusion (RRF)** - Advanced rank-merging for multi-modal search.
+- [x] **18: Reciprocal Rank Fusion (RRF)** - Advanced rank-merging for multi-modal search.
