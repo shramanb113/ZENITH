@@ -7,6 +7,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/shramanb113/ZENITH/internal/analysis"
 )
 
 type InMemoryIndex struct {
@@ -32,12 +34,14 @@ func NewInMemoryIndex() *InMemoryIndex {
 }
 
 /* internal counter is for easier mapping of any document id to just a integer and the data holds the words and the slice of document id ( which is internalcounter) appearing on*/
-func (idx *InMemoryIndex) Add(originalID string, tokens []string) {
+func (idx *InMemoryIndex) Add(originalID string, fullText string, tokens []string) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
 	idx.internalCounter += 1
 	idx.idMapping[idx.internalCounter] = originalID
+
+	idx.vectors[idx.internalCounter], _ = analysis.GetEmbedding(fullText)
 
 	for _, token := range tokens {
 
@@ -53,10 +57,11 @@ func (idx *InMemoryIndex) Add(originalID string, tokens []string) {
 
 }
 
-func (idx *InMemoryIndex) Search(queryTokens []string) []SearchResult {
+func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchResult {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
+	queryVec, _ := analysis.GetEmbedding(query)
 	scores := make(map[uint32]float64)
 
 	for _, queryToken := range queryTokens {
@@ -65,6 +70,12 @@ func (idx *InMemoryIndex) Search(queryTokens []string) []SearchResult {
 				scores[id] += 1.0
 			}
 		}
+	}
+
+	for id, docVec := range idx.vectors {
+		sim := analysis.CosineSimilarity(queryVec, docVec)
+
+		scores[id] += (float64(sim) * 2.0)
 	}
 
 	results := make([]SearchResult, 0)

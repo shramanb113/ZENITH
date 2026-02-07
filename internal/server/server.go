@@ -18,7 +18,7 @@ func (s *ZenithServer) IndexDocuments(ctx context.Context, req *zenithproto.Inde
 
 	tokens := s.Tokenizer.Tokenize(req.Data)
 
-	s.Index.Add(req.Id, tokens)
+	s.Index.Add(req.Id, req.Data, tokens)
 
 	return &zenithproto.IndexResponse{
 		Status:  true,
@@ -30,7 +30,7 @@ func (s *ZenithServer) Search(ctx context.Context, req *zenithproto.SearchReques
 
 	tokens := s.Tokenizer.Tokenize(req.Query)
 
-	results := s.Index.Search(tokens)
+	results := s.Index.Search(req.Query, tokens)
 
 	var protoResults []*zenithproto.SearchResult
 

@@ -1,24 +1,43 @@
 package analysis
 
 import (
-	"hash/fnv"
-	"log"
-	"math/rand"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"time"
 )
 
-func ConvertFromStringToVector(s string) []float32 {
-	h := fnv.New64()
-	h.Write([]byte(s))
-	uint64Hash := h.Sum64()
+type EmbedRequest struct {
+	Text string `json:"text"`
+}
 
-	vector := make([]float32, 128)
-	r := rand.New(rand.NewSource(int64(uint64Hash)))
+type EmbedResponse struct {
+	Embedding []float32 `json:"embedding"`
+}
 
-	for i := 0; i < 128; i++ {
-		vector[i] = r.Float32()
+var nerveClient = &http.Client{
+	Timeout: 10 * time.Second, // Give the AI time to think
+}
+
+func GetEmbedding(text string) ([]float32, error) {
+	reqBody, _ := json.Marshal(EmbedRequest{Text: text})
+
+	// Talk to the Python Nerve on Port 5000
+	resp, err := nerveClient.Post("http://localhost:5000/embed", "application/json", bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("nerve offline: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("nerve returned error: %d", resp.StatusCode)
 	}
 
-	log.Printf("🧠 Vectorized: '%s' into %d-dim space (Hash: %d)", s, len(vector), uint64Hash)
+	var res EmbedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return nil, fmt.Errorf("failed to decode nerve response: %w", err)
+	}
 
-	return vector
+	return res.Embedding, nil
 }
