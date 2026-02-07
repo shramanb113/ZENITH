@@ -77,6 +77,11 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
+	log.Printf("the query token is  :")
+
+	for _, word := range queryTokens {
+		log.Printf("%s\n", word)
+	}
 	queryVec, _ := analysis.GetEmbedding(query)
 	KeywordScores := make(map[uint32]float64)
 	matchCounts := make(map[uint32]int)
@@ -99,89 +104,162 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 		VectorScores[id] += (float64(sim))
 	}
 
-	allIDs := make(map[uint32]struct{})
+	/*
+
+		// NORMALIZATION
+
+			allIDs := make(map[uint32]struct{})
+			for id := range KeywordScores {
+				allIDs[id] = struct{}{}
+			}
+			for id := range VectorScores {
+				allIDs[id] = struct{}{}
+			}
+
+			results := make([]SearchResult, 0, len(allIDs))
+
+			maxK, minK := -1.0, math.MaxFloat64
+			maxV, minV := -1.0, math.MaxFloat64
+
+			for id := range allIDs {
+				kScore := KeywordScores[id]
+				vScore := VectorScores[id]
+
+				if matchCounts[id] == len(queryTokens) {
+					kScore *= 2.0
+				}
+
+				// Update Keyword boundaries
+				if kScore > maxK {
+					maxK = kScore
+				}
+				if kScore < minK {
+					minK = kScore
+				}
+
+				// Update Vector boundaries
+				if vScore > maxV {
+					maxV = vScore
+				}
+				if vScore < minV {
+					minV = vScore
+				}
+
+				results = append(results, SearchResult{
+					ID:           idx.idMapping[id],
+					KeywordScore: kScore,
+					VectorScore:  vScore,
+				})
+			}
+
+			alpha := 0.3
+			beta := 0.7
+
+			for i := range results {
+				normK := 0.0
+				if maxK > minK {
+					normK = (results[i].KeywordScore - minK) / (maxK - minK)
+				}
+
+				normV := 0.0
+				if maxV > minV {
+					normV = (results[i].VectorScore - minV) / (maxV - minV)
+				}
+
+				results[i].KeywordScore = normK
+				results[i].VectorScore = normV
+				results[i].FinalScore = (alpha * normK) + (beta * normV)
+			}
+
+			slices.SortFunc(results, func(a SearchResult, b SearchResult) int {
+				if a.FinalScore > b.FinalScore {
+					return -1
+				}
+				if a.FinalScore < b.FinalScore {
+					return 1
+				}
+				return 0
+			})
+
+	*/
+
+	// Reciprocal rank fusion
+
 	for id := range KeywordScores {
-		allIDs[id] = struct{}{}
-	}
-	for id := range VectorScores {
-		allIDs[id] = struct{}{}
-	}
-
-	results := make([]SearchResult, 0, len(allIDs))
-
-	maxK, minK := -1.0, math.MaxFloat64
-	maxV, minV := -1.0, math.MaxFloat64
-
-	for id := range allIDs {
-		kScore := KeywordScores[id]
-		vScore := VectorScores[id]
-
 		if matchCounts[id] == len(queryTokens) {
-			kScore *= 2.0
+			KeywordScores[id] += 1000
 		}
-
-		// Update Keyword boundaries
-		if kScore > maxK {
-			maxK = kScore
-		}
-		if kScore < minK {
-			minK = kScore
-		}
-
-		// Update Vector boundaries
-		if vScore > maxV {
-			maxV = vScore
-		}
-		if vScore < minV {
-			minV = vScore
-		}
-
-		results = append(results, SearchResult{
-			ID:           idx.idMapping[id],
-			KeywordScore: kScore,
-			VectorScore:  vScore,
-		})
 	}
 
-	alpha := 0.5
-	beta := 0.5
-
-	for i := range results {
-		normK := 0.0
-		if maxK > minK {
-			normK = (results[i].KeywordScore - minK) / (maxK - minK)
+	keywordIDs := make([]uint32, 0, len(KeywordScores))
+	for id, score := range KeywordScores {
+		if score > 0 {
+			keywordIDs = append(keywordIDs, id)
 		}
-
-		normV := 0.0
-		if maxV > minV {
-			normV = (results[i].VectorScore - minV) / (maxV - minV)
-		}
-
-		results[i].KeywordScore = normK
-		results[i].VectorScore = normV
-		results[i].FinalScore = (alpha * normK) + (beta * normV)
 	}
 
-	slices.SortFunc(results, func(a SearchResult, b SearchResult) int {
-		if a.FinalScore > b.FinalScore {
+	slices.SortFunc(keywordIDs, func(a, b uint32) int {
+		if KeywordScores[a] > KeywordScores[b] {
 			return -1
 		}
-		if a.FinalScore < b.FinalScore {
+		if KeywordScores[a] < KeywordScores[b] {
 			return 1
 		}
 		return 0
 	})
 
-	searchResponse := make([]SearchResponse, 0, len(results))
+	vectorIDs := make([]uint32, 0, len(VectorScores))
+	for id, score := range VectorScores {
 
-	for _, result := range results {
+		if score > 0.0 {
+			vectorIDs = append(vectorIDs, id)
+		}
+
+	}
+
+	slices.SortFunc(vectorIDs, func(a, b uint32) int {
+		if VectorScores[a] > VectorScores[b] {
+			return -1
+		}
+		if VectorScores[a] < VectorScores[b] {
+			return 1
+		}
+		return 0
+
+	})
+
+	rrfScores := make(map[uint32]float64)
+	k := 60.0
+
+	for rank, id := range keywordIDs {
+		rrfScores[id] += (1.0 / (k + float64(rank+1))) * 2.0
+	}
+
+	for rank, id := range vectorIDs {
+		rrfScores[id] += 1.0 / (k + float64(rank+1))
+	}
+
+	searchResponse := make([]SearchResponse, 0, len(rrfScores))
+
+	for id, score := range rrfScores {
 		searchResponse = append(searchResponse, SearchResponse{
-			ID:    result.ID,
-			Score: result.FinalScore,
+			ID:    idx.idMapping[id],
+			Score: score,
 		})
 	}
 
+	slices.SortFunc(searchResponse, func(a, b SearchResponse) int {
+		if a.Score > b.Score {
+			return -1
+		}
+		if a.Score < b.Score {
+			return 1
+		}
+		return 0
+	})
+
 	return searchResponse
+
 }
 
 func (idx *InMemoryIndex) SearchAND(queryTokens []string) []string {
