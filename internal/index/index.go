@@ -14,6 +14,7 @@ type InMemoryIndex struct {
 	data            map[string][]uint32
 	idMapping       map[uint32]string
 	internalCounter uint32
+	vectors         map[uint32][]float32
 }
 
 type SearchResult struct {
@@ -26,6 +27,7 @@ func NewInMemoryIndex() *InMemoryIndex {
 		data:            make(map[string][]uint32),
 		idMapping:       make(map[uint32]string),
 		internalCounter: 0,
+		vectors:         make(map[uint32][]float32),
 	}
 }
 
@@ -158,6 +160,10 @@ func (idx *InMemoryIndex) Save(filepath string) error {
 		return err
 	}
 
+	if err := encoder.Encode(idx.vectors); err != nil {
+		return err
+	}
+
 	log.Printf("✅ Index saved. Entries: %d. Duration: %v", len(idx.data), time.Since(start))
 	return nil
 }
@@ -184,6 +190,10 @@ func (idx *InMemoryIndex) Load(filepath string) error {
 	}
 
 	if err := info.Decode(&idx.idMapping); err != nil {
+		return err
+	}
+
+	if err := info.Decode(&idx.vectors); err != nil {
 		return err
 	}
 
