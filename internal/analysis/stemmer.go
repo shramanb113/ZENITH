@@ -201,8 +201,13 @@ func (s *Stemmer) step1b(runes []rune) []rune {
 }
 func (s *Stemmer) step1c(runes []rune) []rune {
 
+	if s.endsWith(runes, "y") && s.containsVowel(runes[:len(runes)-1]) {
+		return append(runes[:len(runes)-1], []rune("i")...)
+	}
+
 	return runes
 }
+
 func (s *Stemmer) step2(runes []rune) []rune {
 
 	return runes

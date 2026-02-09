@@ -31,7 +31,7 @@ func (t *StandardTokenizer) Tokenize(text string) []string {
 
 	lowerText := strings.ToLower(text)
 
-	re := regexp.MustCompile(`[a-z0-9]+`)
+	re := regexp.MustCompile(`[a-z0-9]+|[A-Z][a-z0-9]+`)
 	tokens := re.FindAllString(lowerText, -1)
 
 	var filtered []string
