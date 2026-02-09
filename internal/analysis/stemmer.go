@@ -16,21 +16,191 @@ func (s *Stemmer) Stem(word string) string {
 
 	runes := []rune(strings.ToLower(word))
 
-	runes := s.step1a(runes)
+	// handles plurals and past participles
+	runes = s.step1a(runes)
 
-	runes := s.step1b(runes)
+	// handles other endings
+	runes = s.step1b(runes)
 
-	runes := s.step1c(runes)
+	// handle words ending with 'y'
+	runes = s.step1c(runes)
 
-	runes := s.step2(runes)
+	// handling double suffixes
+	runes = s.step2(runes)
 
-	runes := s.step3(runes)
+	// handling words ending with -ic,-full,-ness maybe some more
+	runes = s.step3(runes)
 
-	runes := s.step4(runes)
+	// handling -ant , -ence , etc.
+	runes = s.step4(runes)
 
-	runes := s.step5a(runes)
+	// handling last letters which is e
+	runes = s.step5a(runes)
 
-	runes := s.step5b(runes)
+	// hanadling with double l
+	runes = s.step5b(runes)
 
 	return string(runes)
+}
+
+// Helper functions
+
+// In Porter's algorithm , y is considered a vowel if preceded by a constant
+
+func (s *Stemmer) isConsonant(runes []rune, i int) bool {
+
+	r := runes[i]
+
+	if r == 'a' || r == 'e' || r == 'i' || r == 'o' || r == 'u' {
+		return false
+	}
+
+	if r == 'y' {
+		if i == 0 {
+			return true
+		}
+
+		return !s.isConsonant(runes, i-1)
+	}
+	return true
+}
+
+func (s *Stemmer) isVowel(runes []rune, i int) bool {
+	return !s.isConsonant(runes, i)
+}
+
+// to check the Vowel - consonant sequence count
+func (s *Stemmer) m(runes []rune) int {
+
+	count := 0
+	i := 0
+	n := len(runes)
+
+	for i < n && s.isConsonant(runes, i) {
+		i++
+	}
+
+	for i < n {
+
+		for i < n && s.isVowel(runes, i) {
+			i++
+		}
+
+		if i >= n {
+			break
+		}
+
+		for i < n && s.isConsonant(runes, i) {
+			i++
+		}
+		count++
+	}
+
+	return count
+}
+
+// endsWith checks if word ends wth suffix
+
+func (s *Stemmer) endsWith(runes []rune, suffix string) bool {
+
+	suffixRune := []rune(suffix)
+
+	if len(runes) < len(suffixRune) {
+		return false
+	}
+
+	for i := 0; i < len(suffixRune); i++ {
+
+		if runes[len(runes)-len(suffixRune)+i] != suffixRune[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (s *Stemmer) replaceSuffix(runes []rune, suffix string, replacement string) []rune {
+
+	if s.endsWith(runes, suffix) {
+
+		return append(runes[:len(runes)-len([]rune(suffix))], []rune(replacement)...)
+
+	}
+
+	return runes
+}
+
+func (s *Stemmer) containsVowel(runes []rune) bool {
+
+	for i := 0; i < len(runes); i++ {
+		if s.isVowel(runes, i) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Stemmer) endsDoubleConsonant(runes []rune) bool {
+
+	if len(runes) < 2 {
+		return false
+	}
+
+	last := runes[len(runes)-1]
+	secondLast := runes[len(runes)-2]
+
+	return last == secondLast && s.isConsonant(runes, len(runes)-1)
+}
+
+// endsCVC checks if word ends with consonant-vowel-consonant where second C is not w, x, or y.
+func (s *Stemmer) endsCVC(runes []rune) bool {
+	if len(runes) < 3 {
+		return false
+	}
+
+	a := len(runes) - 3
+	b := len(runes) - 2
+	c := len(runes) - 1
+
+	if !s.isConsonant(runes, a) || !s.isVowel(runes, b) || !s.isConsonant(runes, c) {
+		return false
+	}
+
+	last := runes[c]
+	return last != 'w' && last != 'x' && last != 'y'
+}
+
+// actual steps
+
+func (s *Stemmer) step1a(runes []rune) []rune {
+
+	return runes
+}
+func (s *Stemmer) step1b(runes []rune) []rune {
+
+	return runes
+}
+func (s *Stemmer) step1c(runes []rune) []rune {
+
+	return runes
+}
+func (s *Stemmer) step2(runes []rune) []rune {
+
+	return runes
+}
+func (s *Stemmer) step3(runes []rune) []rune {
+
+	return runes
+}
+func (s *Stemmer) step4(runes []rune) []rune {
+
+	return runes
+}
+func (s *Stemmer) step5a(runes []rune) []rune {
+
+	return runes
+}
+func (s *Stemmer) step5b(runes []rune) []rune {
+
+	return runes
 }
