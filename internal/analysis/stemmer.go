@@ -230,7 +230,10 @@ func (s *Stemmer) step5a(runes []rune) []rune {
 	}
 	return runes
 }
-func (s *Stemmer) step5b(runes []rune) []rune {
 
+func (s *Stemmer) step5b(runes []rune) []rune {
+	if s.m(runes) > 1 && s.endsDoubleConsonant(runes) && runes[len(runes)-1] == 'l' {
+		return runes[:len(runes)-1]
+	}
 	return runes
 }
