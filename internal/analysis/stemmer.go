@@ -2,22 +2,35 @@ package analysis
 
 import "strings"
 
-func Stem(token string) string {
+type Stemmer struct{}
 
-	if len(token) <= 3 {
-		return token
+func New() *Stemmer {
+	return &Stemmer{}
+}
+
+func (s *Stemmer) Stem(word string) string {
+
+	if len(word) <= 2 {
+		return word
 	}
 
-	if strings.HasSuffix(token, "ing") {
-		return strings.TrimSuffix(token, "ing")
-	}
-	if strings.HasSuffix(token, "ed") {
-		return strings.TrimSuffix(token, "ed")
-	}
+	runes := []rune(strings.ToLower(word))
 
-	if strings.HasSuffix(token, "s") && !strings.HasSuffix(token, "ss") && len(token) > 3 {
-		return strings.TrimSuffix(token, "s")
-	}
+	runes := s.step1a(runes)
 
-	return token
+	runes := s.step1b(runes)
+
+	runes := s.step1c(runes)
+
+	runes := s.step2(runes)
+
+	runes := s.step3(runes)
+
+	runes := s.step4(runes)
+
+	runes := s.step5a(runes)
+
+	runes := s.step5b(runes)
+
+	return string(runes)
 }

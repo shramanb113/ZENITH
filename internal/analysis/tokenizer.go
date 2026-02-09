@@ -27,6 +27,8 @@ func NewStandardTokenizer() *StandardTokenizer {
 
 func (t *StandardTokenizer) Tokenize(text string) []string {
 
+	PorterStem := New()
+
 	lowerText := strings.ToLower(text)
 
 	re := regexp.MustCompile(`[a-z0-9]+`)
@@ -36,7 +38,7 @@ func (t *StandardTokenizer) Tokenize(text string) []string {
 
 	for _, token := range tokens {
 		if _, ok := t.stopWords[token]; !ok {
-			filtered = append(filtered, Stem(token))
+			filtered = append(filtered, PorterStem.Stem(token))
 		}
 	}
 	return filtered
