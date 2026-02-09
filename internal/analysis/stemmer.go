@@ -174,8 +174,27 @@ func (s *Stemmer) endsCVC(runes []rune) bool {
 
 func (s *Stemmer) step1a(runes []rune) []rune {
 
+	// english suffixes mappped with their plurals
+	replacements := []struct {
+		suffix      string
+		replacement string
+	}{
+		{"sses", "ss"},
+		{"s", ""},
+		{"ies", "i"},
+		{"ss", "ss"},
+	}
+
+	for _, r := range replacements {
+
+		if s.endsWith(runes, r.suffix) {
+			return s.replaceSuffix(runes, r.suffix, r.replacement)
+		}
+	}
+
 	return runes
 }
+
 func (s *Stemmer) step1b(runes []rune) []rune {
 
 	return runes
