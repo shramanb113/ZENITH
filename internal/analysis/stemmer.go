@@ -273,8 +273,45 @@ func (s *Stemmer) step3(runes []rune) []rune {
 
 	return runes
 }
-func (s *Stemmer) step4(runes []rune) []rune {
 
+func (s *Stemmer) step4(runes []rune) []rune {
+	suffixes := []string{
+		"al", "ance", "ence", "er", "ic", "able", "ible", "ant",
+		"ement", "ment", "ent", "ion", "ou", "ism", "ate", "iti",
+		"ous", "ive", "ize",
+	}
+
+	for _, suffix := range suffixes {
+		if s.endsWith(runes, suffix) {
+			stem := runes[:len(runes)-len([]rune(suffix))]
+			if s.m(stem) > 1 {
+				if suffix == "ion" {
+					if len(stem) > 0 {
+						last := stem[len(stem)-1]
+						if last == 's' || last == 't' {
+							return stem
+						}
+					}
+				} else {
+					return stem
+				}
+			}
+			break
+		}
+	}
+
+	return runes
+}
+
+// step5a handles final cleanup with 'e'.
+func (s *Stemmer) step5a(runes []rune) []rune {
+	if s.endsWith(runes, "e") {
+		stem := runes[:len(runes)-1]
+		m := s.m(stem)
+		if m > 1 || (m == 1 && !s.endsCVC(stem)) {
+			return stem
+		}
+	}
 	return runes
 }
 func (s *Stemmer) step5a(runes []rune) []rune {
