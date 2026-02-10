@@ -209,6 +209,41 @@ func (s *Stemmer) step1c(runes []rune) []rune {
 }
 
 func (s *Stemmer) step2(runes []rune) []rune {
+	suffixes := []struct {
+		suffix      string
+		replacement string
+	}{
+		{"ational", "ate"},
+		{"tional", "tion"},
+		{"enci", "ence"},
+		{"anci", "ance"},
+		{"izer", "ize"},
+		{"abli", "able"},
+		{"alli", "al"},
+		{"entli", "ent"},
+		{"eli", "e"},
+		{"ousli", "ous"},
+		{"ization", "ize"},
+		{"ation", "ate"},
+		{"ator", "ate"},
+		{"alism", "al"},
+		{"iveness", "ive"},
+		{"fulness", "ful"},
+		{"ousness", "ous"},
+		{"aliti", "al"},
+		{"iviti", "ive"},
+		{"biliti", "ble"},
+	}
+
+	for _, suffix := range suffixes {
+		if s.endsWith(runes, suffix.suffix) {
+			stem := runes[:len(runes)-len([]rune(suffix.suffix))]
+			if s.m(stem) > 0 {
+				return s.replaceSuffix(runes, suffix.suffix, suffix.replacement)
+			}
+			break
+		}
+	}
 
 	return runes
 }
