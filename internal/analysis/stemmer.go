@@ -223,8 +223,8 @@ func (s *Stemmer) step4(runes []rune) []rune {
 func (s *Stemmer) step5a(runes []rune) []rune {
 	if s.endsWith(runes, "e") {
 		stem := runes[:len(runes)-1]
-		m := s.m(stem)
-		if m > 1 || (m == 1 && !s.endsCVC(stem)) {
+		measure := s.m(runes)
+		if measure > 1 || (measure == 1 && !s.endsCVC(stem)) {
 			return stem
 		}
 	}
