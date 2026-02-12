@@ -303,3 +303,7 @@ These principles guide every design decision.
 - [x] **16: Deterministic Embeddings** - Creating a "Concept-to-Vector" hash transformer.
 - [x] **17: Hybrid Ranking** - Score normalization and Weighted Fusion (Keyword + Vector).
 - [x] **18: Reciprocal Rank Fusion (RRF)** - Advanced rank-merging for multi-modal search.
+
+## 🧪 Phase 3: Linguistic Mastery (The Linguist)
+
+- [] **19 : Porter Stemming** – Reducing words to their roots (e.g., "jumping" -> "jump").
