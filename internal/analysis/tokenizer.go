@@ -26,21 +26,24 @@ func NewStandardTokenizer() *StandardTokenizer {
 }
 
 func (t *StandardTokenizer) Tokenize(text string) []string {
-
 	PorterStem := New()
 
-	lowerText := strings.ToLower(text)
-
-	re := regexp.MustCompile(`[a-z0-9]+|[A-Z][a-z0-9]+`)
-	tokens := re.FindAllString(lowerText, -1)
+	re := regexp.MustCompile(`[A-Z][a-z0-9]*|[a-z0-9]+|[A-Z]+`)
+	rawTokens := re.FindAllString(text, -1)
 
 	var filtered []string
 
-	for _, token := range tokens {
-		if _, ok := t.stopWords[token]; !ok {
-			filtered = append(filtered, PorterStem.Stem(token))
+	for _, token := range rawTokens {
+		token = strings.ToLower(token)
+
+		if _, ok := t.stopWords[token]; ok {
+			continue
+		}
+
+		stemmed := PorterStem.Stem(token)
+		if stemmed != "" {
+			filtered = append(filtered, stemmed)
 		}
 	}
 	return filtered
-
 }

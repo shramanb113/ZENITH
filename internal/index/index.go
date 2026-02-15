@@ -51,6 +51,10 @@ func (idx *InMemoryIndex) Add(originalID string, fullText string, tokens []strin
 	idx.internalCounter += 1
 	idx.idMapping[idx.internalCounter] = originalID
 
+	if originalID == "TECH-01" {
+		log.Printf("🛠️ [INDEX DEBUG] Tokens for TECH-01: %v", tokens)
+	}
+
 	idx.vectors[idx.internalCounter], _ = analysis.GetEmbedding(fullText)
 	seenInDoc := make(map[string]bool)
 
