@@ -174,7 +174,6 @@ func (s *Stemmer) endsCVC(runes []rune) bool {
 
 func (s *Stemmer) step1a(runes []rune) []rune {
 
-	// english suffixes mappped with their plurals
 	replacements := []struct {
 		suffix      string
 		replacement string
@@ -196,9 +195,45 @@ func (s *Stemmer) step1a(runes []rune) []rune {
 }
 
 func (s *Stemmer) step1b(runes []rune) []rune {
+	if s.endsWith(runes, "eed") {
+		stem := runes[:len(runes)-3]
+		if s.m(stem) > 0 {
+			return append(stem, []rune("ee")...)
+		}
+		return runes
+	}
+
+	modified := false
+	if s.endsWith(runes, "ed") && s.containsVowel(runes[:len(runes)-2]) {
+		runes = runes[:len(runes)-2]
+		modified = true
+	} else if s.endsWith(runes, "ing") && s.containsVowel(runes[:len(runes)-3]) {
+		runes = runes[:len(runes)-3]
+		modified = true
+	}
+
+	if !modified {
+		return runes
+	}
+
+	if s.endsWith(runes, "at") {
+		return append(runes, []rune("e")...)
+	} else if s.endsWith(runes, "bl") {
+		return append(runes, []rune("e")...)
+	} else if s.endsWith(runes, "iz") {
+		return append(runes, []rune("e")...)
+	} else if s.endsDoubleConsonant(runes) {
+		last := runes[len(runes)-1]
+		if last != 'l' && last != 's' && last != 'z' {
+			return runes[:len(runes)-1]
+		}
+	} else if s.m(runes) == 1 && s.endsCVC(runes) {
+		return append(runes, []rune("e")...)
+	}
 
 	return runes
 }
+
 func (s *Stemmer) step1c(runes []rune) []rune {
 
 	if s.endsWith(runes, "y") && s.containsVowel(runes[:len(runes)-1]) {
@@ -303,17 +338,6 @@ func (s *Stemmer) step4(runes []rune) []rune {
 	return runes
 }
 
-// step5a handles final cleanup with 'e'.
-func (s *Stemmer) step5a(runes []rune) []rune {
-	if s.endsWith(runes, "e") {
-		stem := runes[:len(runes)-1]
-		m := s.m(stem)
-		if m > 1 || (m == 1 && !s.endsCVC(stem)) {
-			return stem
-		}
-	}
-	return runes
-}
 func (s *Stemmer) step5a(runes []rune) []rune {
 	if s.endsWith(runes, "e") {
 		stem := runes[:len(runes)-1]
