@@ -296,10 +296,14 @@ These principles guide every design decision.
 
 ## 🧠 Phase 2: Neural Intelligence (The Brain)
 
-- [] **12: The Great Split**- Distributed Coordinator & Modulo Sharding.
+- [x] **12: The Great Split**- Distributed Coordinator & Modulo Sharding.
 - [x] **13: Neural Storage** - Vector map integration & High-dimensional schema.
 - [x] **14: Linear Algebra** - Implementing Dot Product and Magnitude in pure Go.
 - [x] **15: The Similarity Engine** - Implementing Cosine Similarity & L2 Distance.
 - [x] **16: Deterministic Embeddings** - Creating a "Concept-to-Vector" hash transformer.
 - [x] **17: Hybrid Ranking** - Score normalization and Weighted Fusion (Keyword + Vector).
 - [x] **18: Reciprocal Rank Fusion (RRF)** - Advanced rank-merging for multi-modal search.
+
+## 🧪 Phase 3: Linguistic Mastery (The Linguist)
+
+- [] **19 : Porter Stemming** – Reducing words to their roots (e.g., "jumping" -> "jump").
