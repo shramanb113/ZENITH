@@ -306,4 +306,5 @@ These principles guide every design decision.
 
 ## 🧪 Phase 3: Linguistic Mastery (The Linguist)
 
-- [] **19 : Porter Stemming** – Reducing words to their roots (e.g., "jumping" -> "jump").
+- [x] **19 : Porter Stemming** – Reducing words to their roots (e.g., "jumping" -> "jump").
+- [] **20: Edge N-Grams** – Breaking words into sub-tokens for "Search-as-you-type.
