@@ -21,6 +21,11 @@ type InMemoryIndex struct {
 	tokenCounts     map[string]int
 }
 
+const (
+	MinGram = 3
+	MaxGram = 10
+)
+
 type SearchResult struct {
 	ID           string
 	KeywordScore float64
@@ -375,4 +380,29 @@ func (idx *InMemoryIndex) Load(filepath string) error {
 
 	log.Printf("Successfully loaded %d internal IDs from disk in %v", len(idx.idMapping), time.Since(start))
 	return nil
+}
+
+func generateEdgeNgrams(token string) []string {
+	runes := []rune(token)
+	n := len(runes)
+
+	if n < MinGram {
+		return []string{token}
+	}
+
+	limit := n
+	if limit > MaxGram {
+		limit = MaxGram
+	}
+
+	results := make([]string, 0, limit-MinGram+1)
+	for i := MinGram; i <= limit; i++ {
+		results = append(results, string(runes[0:i]))
+	}
+
+	if n > MaxGram {
+		results = append(results, token)
+	}
+
+	return results
 }
