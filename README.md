@@ -307,7 +307,7 @@ These principles guide every design decision.
 ## 🧪 Phase 3: Linguistic Mastery (The Linguist)
 
 - [x] **19 : Porter Stemming** – Reducing words to their roots (e.g., "jumping" -> "jump").
-- [] **20: Edge N-Grams** – Breaking words into sub-tokens for "Search-as-you-type.
+- [x] **20: Edge N-Grams** – Breaking words into sub-tokens for "Search-as-you-type.
 - [] **21: Phonetic Matching** - Soundex/Metaphone algorithms for "Sounds like" search.
 - [] **22: Fuzzy Matching** - Levenshtein Distance for typo-tolerant queries.
 - [] **23: Synonyms & Thesaurus** - Expanding query intent via mapping layers.
