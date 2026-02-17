@@ -56,10 +56,6 @@ func (idx *InMemoryIndex) Add(originalID string, fullText string, tokens []strin
 	idx.internalCounter += 1
 	idx.idMapping[idx.internalCounter] = originalID
 
-	if originalID == "TECH-01" {
-		log.Printf("🛠️ [INDEX DEBUG] Tokens for TECH-01: %v", tokens)
-	}
-
 	idx.vectors[idx.internalCounter], _ = analysis.GetEmbedding(fullText)
 	seenInDoc := make(map[string]bool)
 
@@ -67,17 +63,21 @@ func (idx *InMemoryIndex) Add(originalID string, fullText string, tokens []strin
 
 		// avoiding duplication
 
-		if value, ok := idx.data[token]; ok {
-			if len(value) > 0 && value[len(value)-1] == idx.internalCounter {
+		fragments := generateEdgeNgrams(token)
+
+		for _, frag := range fragments {
+			log.Printf("🔨 Indexing Fragment: %s for %s", frag, originalID)
+
+			if seenInDoc[frag] {
 				continue
 			}
-		}
-		if !seenInDoc[token] {
+
 			idx.tokenCounts[token]++
 			seenInDoc[token] = true
+
+			idx.data[frag] = append(idx.data[frag], idx.internalCounter)
 		}
 
-		idx.data[token] = append(idx.data[token], idx.internalCounter)
 	}
 
 }
@@ -96,11 +96,26 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 	matchCounts := make(map[uint32]int)
 
 	for _, queryToken := range queryTokens {
-		if ids, ok := idx.data[queryToken]; ok {
-			for _, id := range ids {
-				KeywordScores[id] += 1.0 / math.Log(1.0+float64(idx.tokenCounts[queryToken]))
-				matchCounts[id] += 1
 
+		var searchFragments []string
+
+		if len(queryToken) >= 3 {
+			searchFragments = generateEdgeNgrams(queryToken)
+		} else {
+			searchFragments = []string{queryToken}
+		}
+
+		log.Printf("DEBUG: Searching fragments for token [%s]: %v", queryToken, searchFragments)
+
+		for _, frag := range searchFragments {
+			if ids, ok := idx.data[frag]; ok {
+				idf := 1.0 / math.Log(2.0+float64(idx.tokenCounts[frag]))
+				lengthBonus := float64(len(frag)) / float64(len(queryToken))
+
+				for _, id := range ids {
+					KeywordScores[id] += idf * lengthBonus * 100.0
+					matchCounts[id] += 1
+				}
 			}
 		}
 	}
@@ -113,98 +128,30 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 		VectorScores[id] += (float64(sim))
 	}
 
-	/*
-
-		// NORMALIZATION
-
-			allIDs := make(map[uint32]struct{})
-			for id := range KeywordScores {
-				allIDs[id] = struct{}{}
-			}
-			for id := range VectorScores {
-				allIDs[id] = struct{}{}
-			}
-
-			results := make([]SearchResult, 0, len(allIDs))
-
-			maxK, minK := -1.0, math.MaxFloat64
-			maxV, minV := -1.0, math.MaxFloat64
-
-			for id := range allIDs {
-				kScore := KeywordScores[id]
-				vScore := VectorScores[id]
-
-				if matchCounts[id] == len(queryTokens) {
-					kScore *= 2.0
-				}
-
-				// Update Keyword boundaries
-				if kScore > maxK {
-					maxK = kScore
-				}
-				if kScore < minK {
-					minK = kScore
-				}
-
-				// Update Vector boundaries
-				if vScore > maxV {
-					maxV = vScore
-				}
-				if vScore < minV {
-					minV = vScore
-				}
-
-				results = append(results, SearchResult{
-					ID:           idx.idMapping[id],
-					KeywordScore: kScore,
-					VectorScore:  vScore,
-				})
-			}
-
-			alpha := 0.3
-			beta := 0.7
-
-			for i := range results {
-				normK := 0.0
-				if maxK > minK {
-					normK = (results[i].KeywordScore - minK) / (maxK - minK)
-				}
-
-				normV := 0.0
-				if maxV > minV {
-					normV = (results[i].VectorScore - minV) / (maxV - minV)
-				}
-
-				results[i].KeywordScore = normK
-				results[i].VectorScore = normV
-				results[i].FinalScore = (alpha * normK) + (beta * normV)
-			}
-
-			slices.SortFunc(results, func(a SearchResult, b SearchResult) int {
-				if a.FinalScore > b.FinalScore {
-					return -1
-				}
-				if a.FinalScore < b.FinalScore {
-					return 1
-				}
-				return 0
-			})
-
-	*/
-
 	// Reciprocal rank fusion
 
-	for id := range KeywordScores {
-		if matchCounts[id] == len(queryTokens) {
-			KeywordScores[id] += 1000
+	rrfScores := make(map[uint32]float64)
+
+	for id, count := range matchCounts {
+		KeywordScores[id] += 10000.0
+
+		if count >= len(queryTokens) {
+			rrfScores[id] += 2.0
+		}
+
+		if count > 1 {
+			KeywordScores[id] += math.Pow(float64(count), 10)
+		}
+
+		if count == len(queryTokens) {
+			KeywordScores[id] += 100000.0
 		}
 	}
 
 	keywordIDs := make([]uint32, 0, len(KeywordScores))
-	for id, score := range KeywordScores {
-		if score > 0 {
-			keywordIDs = append(keywordIDs, id)
-		}
+	for id := range KeywordScores {
+		keywordIDs = append(keywordIDs, id)
+		log.Printf("DEBUG: Keyword Match Found for DocID %d", id)
 	}
 
 	slices.SortFunc(keywordIDs, func(a, b uint32) int {
@@ -218,12 +165,8 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 	})
 
 	vectorIDs := make([]uint32, 0, len(VectorScores))
-	for id, score := range VectorScores {
-
-		if score > 0.0 {
-			vectorIDs = append(vectorIDs, id)
-		}
-
+	for id := range VectorScores {
+		vectorIDs = append(vectorIDs, id)
 	}
 
 	slices.SortFunc(vectorIDs, func(a, b uint32) int {
@@ -237,11 +180,10 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 
 	})
 
-	rrfScores := make(map[uint32]float64)
-	k := 60.0
+	k := 10.0
 
 	for rank, id := range keywordIDs {
-		rrfScores[id] += (1.0 / (k + float64(rank+1))) * 2.0
+		rrfScores[id] += (1.0 / (k + float64(rank+1))) * 10.0
 	}
 
 	for rank, id := range vectorIDs {
@@ -396,7 +338,8 @@ func generateEdgeNgrams(token string) []string {
 	}
 
 	results := make([]string, 0, limit-MinGram+1)
-	for i := MinGram; i <= limit; i++ {
+	results = append(results, token)
+	for i := MinGram; i < limit; i++ {
 		results = append(results, string(runes[0:i]))
 	}
 

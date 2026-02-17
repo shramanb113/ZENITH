@@ -66,9 +66,9 @@ func runNeuralGauntlet(client zenithproto.SearchServiceClient) {
 		reason   string
 	}{
 		{
-			query:    "how to rank websites",
+			query:    "PageRan",
 			expected: "TECH-01",
-			reason:   "CamelCase: PageRank -> rank",
+			reason:   "Edge N-Gram: PageRank (stemmed to rank) -> 'ran'",
 		},
 		{
 			query:    "rankings",
@@ -81,9 +81,9 @@ func runNeuralGauntlet(client zenithproto.SearchServiceClient) {
 			reason:   "Stemming: relational -> relat",
 		},
 		{
-			query:    "warming",
+			query:    "atmos",
 			expected: "ENV-06",
-			reason:   "Stemming: warming -> warm",
+			reason:   "Edge N-Gram: atmospheric (stemmed to atmospher) -> 'atmos'",
 		},
 	}
 
@@ -100,25 +100,34 @@ func runNeuralGauntlet(client zenithproto.SearchServiceClient) {
 			continue
 		}
 
+		// ... (after the search request) ...
+
 		fmt.Printf("🔍 Query: [%s]\n", test.query)
 		fmt.Printf("🎯 Goal:  Match %s (%s)\n", test.expected, test.reason)
 
-		displayLimit := 3
+		// Increase limit to see the whole small dataset
+		displayLimit := 5
 		if len(res.Results) < displayLimit {
 			displayLimit = len(res.Results)
+		}
+
+		if len(res.Results) == 0 {
+			fmt.Println("  🚫 NO RESULTS FOUND")
 		}
 
 		for i := 0; i < displayLimit; i++ {
 			r := res.Results[i]
 			status := "  "
-			// Check if we hit our target at Rank 1
-			if i == 0 && r.Id == test.expected {
-				status = "✅"
-			} else if r.Id == test.expected {
-				status = "⚠️" // Found, but not at the top
+
+			if r.Id == test.expected {
+				if i == 0 {
+					status = "✅" // Target is at the top!
+				} else {
+					status = "⚠️ " // Target found, but buried at Rank i+1
+				}
 			}
 
-			fmt.Printf("   %s Rank %d: [%-8s] Score: %.4f\n", status, i+1, r.Id, r.Score)
+			fmt.Printf("   %s Rank %d: [%-8s] Score: %.6f\n", status, i+1, r.Id, r.Score)
 		}
 		fmt.Println("--------------------------------------------------")
 	}
