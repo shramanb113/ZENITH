@@ -128,6 +128,15 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 				}
 			}
 		}
+
+		phonCode := analysis.Soundex(queryToken)
+
+		if ids, ok := idx.phoneticData[phonCode]; ok {
+			for _, id := range ids {
+				KeywordScores[id] += 20.0
+			}
+		}
+
 	}
 
 	VectorScores := make(map[uint32]float64)
@@ -142,19 +151,24 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 
 	rrfScores := make(map[uint32]float64)
 
-	for id, count := range matchCounts {
-		KeywordScores[id] += 10000.0
+	// Replace your rrfScores loop with this:
+	for id := range KeywordScores {
+		count := matchCounts[id]
 
-		if count >= len(queryTokens) {
-			rrfScores[id] += 2.0
-		}
+		if count > 0 {
+			KeywordScores[id] += 10000.0
 
-		if count > 1 {
-			KeywordScores[id] += math.Pow(float64(count), 10)
-		}
+			if count > 1 {
+				KeywordScores[id] += math.Pow(float64(count), 10)
+			}
 
-		if count == len(queryTokens) {
-			KeywordScores[id] += 100000.0
+			if count == len(queryTokens) {
+				KeywordScores[id] += 100000.0
+				rrfScores[id] += 2.0
+			}
+		} else {
+
+			log.Printf("DEBUG: DocID %d found via Phonetic only", id)
 		}
 	}
 
