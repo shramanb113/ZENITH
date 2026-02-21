@@ -116,6 +116,7 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 
 	for _, queryToken := range queryTokens {
 
+		Q := len(queryToken)
 		var searchFragments []string
 
 		if len(queryToken) >= 3 {
@@ -129,11 +130,13 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 		for _, frag := range searchFragments {
 			if ids, ok := idx.data[frag]; ok {
 				idf := 1.0 / math.Log(2.0+float64(idx.tokenCounts[frag]))
-				lengthBonus := float64(len(frag)) / float64(len(queryToken))
+				lengthBonus := math.Pow(float64(len(frag))/float64(len(queryToken)), 2)
 
 				for _, id := range ids {
 					KeywordScores[id] += idf * lengthBonus * 100.0
-					matchCounts[id] += 1
+					if (float64(len(frag)) / float64(len(queryToken))) >= 0.8 {
+						matchCounts[id] += 1
+					}
 				}
 			}
 		}
@@ -143,6 +146,39 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 		if ids, ok := idx.phoneticData[phonCode]; ok {
 			for _, id := range ids {
 				KeywordScores[id] += 20.0
+				matchCounts[id] += 1
+			}
+		}
+
+		minLen, maxLen := Q-2, Q+2
+
+		for size, list := range idx.vocabulary {
+
+			if size >= minLen && size <= maxLen {
+				for _, candidate := range list {
+					dist, ok := analysis.Levenshtein(queryToken, candidate)
+
+					if ok && dist > 0 && dist <= 2 && len(queryToken) > 3 {
+
+						if ids, exists := idx.data[candidate]; exists {
+							fuzzyWeight := 40.0 / float64(dist)
+
+							for _, id := range ids {
+								KeywordScores[id] += fuzzyWeight
+							}
+						}
+						log.Printf("🔮 Fuzzy Match: [%s] -> [%s] (Dist: %d)", queryToken, candidate, dist)
+					}
+
+					if ok && dist == 0 {
+						if ids, exists := idx.data[candidate]; exists {
+							for _, id := range ids {
+								matchCounts[id] += 2
+							}
+						}
+
+					}
+				}
 			}
 		}
 
@@ -160,11 +196,10 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 
 	rrfScores := make(map[uint32]float64)
 
-	// Replace your rrfScores loop with this:
-	for id := range KeywordScores {
+	for id, score := range KeywordScores {
 		count := matchCounts[id]
 
-		if count > 0 {
+		if score > 0 {
 			KeywordScores[id] += 10000.0
 
 			if count > 1 {
@@ -176,10 +211,11 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 				rrfScores[id] += 2.0
 			}
 		} else {
-
-			log.Printf("DEBUG: DocID %d found via Phonetic only", id)
+			log.Printf("DEBUG: DocID %d has a zero score and shouldn't be here", id)
 		}
 	}
+
+	k := 10.0
 
 	keywordIDs := make([]uint32, 0, len(KeywordScores))
 	for id := range KeywordScores {
@@ -213,10 +249,12 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 
 	})
 
-	k := 10.0
-
 	for rank, id := range keywordIDs {
-		rrfScores[id] += (1.0 / (k + float64(rank+1))) * 10.0
+		multiplier := 50.0
+		if rank == 0 {
+			multiplier = 150.0
+		}
+		rrfScores[id] += (1.0 / (k + float64(rank+1))) * multiplier
 	}
 
 	for rank, id := range vectorIDs {
@@ -241,6 +279,12 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 		}
 		return 0
 	})
+
+	for i, res := range searchResponse {
+		if i < 2 {
+			log.Printf("🥇 RANK %d: %s (Score: %f)", i+1, res.ID, res.Score)
+		}
+	}
 
 	return searchResponse
 

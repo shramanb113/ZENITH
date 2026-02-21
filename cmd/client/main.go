@@ -25,7 +25,7 @@ func main() {
 }
 
 func runNeuralGauntlet(client zenithproto.SearchServiceClient) {
-	fmt.Println("🚀 PHASE 4 TEST: The Linguistic Gauntlet")
+	fmt.Println("🚀 ZENITH LINGUISTIC & PHONETIC GAUNTLET")
 	fmt.Println("--------------------------------------------------")
 
 	challengingDocs := []struct {
@@ -40,10 +40,8 @@ func runNeuralGauntlet(client zenithproto.SearchServiceClient) {
 	}
 
 	// 📦 CONCURRENT INDEXING
-	fmt.Printf("📦 Indexing %d linguistic-heavy documents...\n", len(challengingDocs))
+	fmt.Printf("📦 Indexing %d documents into the Inverted & Phonetic Index...\n", len(challengingDocs))
 	var wg sync.WaitGroup
-	start := time.Now()
-
 	for _, d := range challengingDocs {
 		wg.Add(1)
 		go func(id, text string) {
@@ -57,77 +55,97 @@ func runNeuralGauntlet(client zenithproto.SearchServiceClient) {
 		}(d.id, d.text)
 	}
 	wg.Wait()
-	fmt.Printf("✅ Indexing Complete in %v\n\n", time.Since(start))
+	fmt.Println("✅ Indexing Complete.")
+	fmt.Println("--------------------------------------------------")
 
-	// 🧪 THE LINGUISTIC TRIALS
-	linguisticTests := []struct {
+	// 🧪 THE TRIALS: Stemming, N-Grams, and Phonetics
+	trials := []struct {
 		query    string
 		expected string
+		category string
 		reason   string
 	}{
 		{
 			query:    "PageRan",
 			expected: "TECH-01",
-			reason:   "Edge N-Gram: PageRank (stemmed to rank) -> 'ran'",
+			category: "LEXICAL",
+			reason:   "Edge N-Gram match (PageRank -> ran)",
 		},
 		{
 			query:    "rankings",
 			expected: "DATA-08",
-			reason:   "Stemming: rankings -> rank",
+			category: "STEMMING",
+			reason:   "Porter Stemmer (rankings -> rank)",
 		},
 		{
-			query:    "relationship",
+			query:    "PageRanc",
+			expected: "TECH-01",
+			category: "PHONETIC",
+			reason:   "Soundex: PageRanc (P265) matches PageRank (P265)",
+		},
+		{
+			query:    "relayshun",
 			expected: "LEGAL-03",
-			reason:   "Stemming: relational -> relat",
+			category: "PHONETIC",
+			reason:   "Soundex: relayshun (R425) sounds like relational (R435) - *Testing sound proximity*",
 		},
 		{
-			query:    "atmos",
+			query:    "Amospher",
 			expected: "ENV-06",
-			reason:   "Edge N-Gram: atmospheric (stemmed to atmospher) -> 'atmos'",
+			category: "PHONETIC",
+			reason:   "Soundex: Amospher (A521) matches Atmospheric (A352) anchor 'A'",
+		},
+		{
+			query:    "relat",
+			expected: "LEGAL-03",
+			category: "LEXICAL",
+			reason:   "Stemming overlap (relational -> relat)",
+		},
+		{
+			query:    "Transfomer", // Missing the 'r' (Levenshtein Distance 1)
+			expected: "AI-04",
+			category: "FUZZY",
+			reason:   "Levenshtein: Transfomer -> Transformer (Distance 1)",
+		},
+		{
+			query:    "envirmental", // Missing 'on' (Levenshtein Distance 2)
+			expected: "ENV-06",
+			category: "FUZZY",
+			reason:   "Levenshtein: envirmental -> environmental (Distance 2)",
 		},
 	}
 
-	fmt.Println("🧠 Analyzing Linguistic Accuracy...")
-	fmt.Println("--------------------------------------------------")
-
-	for _, test := range linguisticTests {
+	for _, test := range trials {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		res, err := client.Search(ctx, &zenithproto.SearchRequest{Query: test.query})
 		cancel()
 
 		if err != nil {
-			log.Printf("❌ Search Error for '%s': %v", test.query, err)
+			fmt.Printf("❌ Search Error for [%s]: %v\n", test.query, err)
 			continue
 		}
 
-		// ... (after the search request) ...
-
-		fmt.Printf("🔍 Query: [%s]\n", test.query)
+		fmt.Printf("🔍 Query: [%-10s] | Category: %-10s\n", test.query, test.category)
 		fmt.Printf("🎯 Goal:  Match %s (%s)\n", test.expected, test.reason)
 
-		// Increase limit to see the whole small dataset
-		displayLimit := 5
-		if len(res.Results) < displayLimit {
-			displayLimit = len(res.Results)
-		}
-
 		if len(res.Results) == 0 {
-			fmt.Println("  🚫 NO RESULTS FOUND")
-		}
-
-		for i := 0; i < displayLimit; i++ {
-			r := res.Results[i]
-			status := "  "
-
-			if r.Id == test.expected {
-				if i == 0 {
-					status = "✅" // Target is at the top!
-				} else {
-					status = "⚠️ " // Target found, but buried at Rank i+1
+			fmt.Println("   🚫 NO RESULTS FOUND")
+		} else {
+			foundAt := -1
+			for i, r := range res.Results {
+				if r.Id == test.expected {
+					foundAt = i + 1
+					break
 				}
 			}
 
-			fmt.Printf("   %s Rank %d: [%-8s] Score: %.6f\n", status, i+1, r.Id, r.Score)
+			if foundAt == 1 {
+				fmt.Printf("   ✅ TOP MATCH: [%s] Score: %.4f\n", res.Results[0].Id, res.Results[0].Score)
+			} else if foundAt > 1 {
+				fmt.Printf("   ⚠️  FOUND AT RANK %d: [%s] Score: %.4f\n", foundAt, test.expected, res.Results[foundAt-1].Score)
+			} else {
+				fmt.Printf("   ❌ FAIL: Target %s not in top results. Top was [%s]\n", test.expected, res.Results[0].Id)
+			}
 		}
 		fmt.Println("--------------------------------------------------")
 	}
