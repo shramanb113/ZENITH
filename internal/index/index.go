@@ -20,6 +20,8 @@ type InMemoryIndex struct {
 	vectors         map[uint32][]float32
 	tokenCounts     map[string]int
 	phoneticData    map[string][]uint32
+	vocabulary      map[int][]string
+	globalSeen      map[string]bool
 }
 
 const (
@@ -47,6 +49,8 @@ func NewInMemoryIndex() *InMemoryIndex {
 		vectors:         make(map[uint32][]float32),
 		tokenCounts:     make(map[string]int),
 		phoneticData:    make(map[string][]uint32),
+		vocabulary:      make(map[int][]string),
+		globalSeen:      make(map[string]bool),
 	}
 }
 
@@ -78,7 +82,6 @@ func (idx *InMemoryIndex) Add(originalID string, fullText string, tokens []strin
 			seenInDoc[frag] = true
 
 			idx.data[frag] = append(idx.data[frag], idx.internalCounter)
-			log.Printf("🔨 Indexing Fragment: %s for %s", frag, originalID)
 		}
 
 		phon := analysis.Soundex(token)
@@ -86,6 +89,12 @@ func (idx *InMemoryIndex) Add(originalID string, fullText string, tokens []strin
 			log.Printf("Indexing Phonetic : %s for %s", phon, originalID)
 			idx.phoneticData[phon] = append(idx.phoneticData[phon], idx.internalCounter)
 			seenInDoc[phon] = true
+		}
+
+		if !idx.globalSeen[token] {
+			L := len(token)
+			idx.vocabulary[L] = append(idx.vocabulary[L], token)
+			idx.globalSeen[token] = true
 		}
 
 	}
