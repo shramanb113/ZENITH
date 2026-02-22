@@ -310,5 +310,5 @@ These principles guide every design decision.
 - [x] **20: Edge N-Grams** – Breaking words into sub-tokens for "Search-as-you-type.
 - [x] **21: Phonetic Matching** - Soundex/Metaphone algorithms for "Sounds like" search.
 - [x] **22: Fuzzy Matching** - Levenshtein Distance for typo-tolerant queries.
-- [] **23: Synonyms & Thesaurus** - Expanding query intent via mapping layers.
+- [x] **23: Synonyms & Thesaurus** - Expanding query intent via mapping layers.
 - [] **24: Finite State Transducers (FST)** - Ultra-fast dictionary storage and prefix search.
