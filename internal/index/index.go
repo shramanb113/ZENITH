@@ -31,6 +31,11 @@ const (
 	MaxGram = 10
 )
 
+type synonymCandidate struct {
+	word  string
+	score float32
+}
+
 type SearchResult struct {
 	ID           string
 	KeywordScore float64
@@ -464,4 +469,57 @@ func (idx *InMemoryIndex) HasWordVector(t string) bool {
 	_, exists := idx.wordVectors[t]
 
 	return exists
+}
+
+func (idx *InMemoryIndex) GetSemanticNeighbors(token string, topN int, threshold float32) []string {
+	tokenVec, err := analysis.GetEmbedding(token)
+	if err != nil || tokenVec == nil {
+		return []string{}
+	}
+
+	idx.mu.RLock()
+	wordAndVec := make(map[string][]float32, len(idx.wordVectors))
+	for k, v := range idx.wordVectors {
+		wordAndVec[k] = v
+	}
+	idx.mu.RUnlock()
+
+	var candidates []synonymCandidate
+
+	for word, vec := range wordAndVec {
+		if word == token {
+			continue
+		}
+
+		score := analysis.CosineSimilarity(tokenVec, vec)
+		if score >= threshold {
+			candidates = append(candidates, synonymCandidate{
+				word:  word,
+				score: score,
+			})
+		}
+	}
+
+	if len(candidates) == 0 {
+		return []string{}
+	}
+
+	slices.SortFunc(candidates, func(a, b synonymCandidate) int {
+		if a.score > b.score {
+			return -1
+		}
+		if a.score < b.score {
+			return 1
+		}
+		return 0
+	})
+
+	limit := min(topN, len(candidates))
+
+	results := make([]string, 0, limit)
+	for i := 0; i < limit; i++ {
+		results = append(results, candidates[i].word)
+	}
+
+	return results
 }
