@@ -3,6 +3,7 @@ package index
 import (
 	"encoding/gob"
 	"log"
+	"maps"
 	"math"
 	"os"
 	"slices"
@@ -22,6 +23,7 @@ type InMemoryIndex struct {
 	phoneticData    map[string][]uint32
 	vocabulary      map[int][]string
 	globalSeen      map[string]bool
+	wordVectors     map[string][]float32
 }
 
 const (
@@ -51,18 +53,34 @@ func NewInMemoryIndex() *InMemoryIndex {
 		phoneticData:    make(map[string][]uint32),
 		vocabulary:      make(map[int][]string),
 		globalSeen:      make(map[string]bool),
+		wordVectors:     make(map[string][]float32),
 	}
 }
 
 /* internal counter is for easier mapping of any document id to just a integer and the data holds the words and the slice of document id ( which is internalcounter) appearing on*/
 func (idx *InMemoryIndex) Add(originalID string, fullText string, tokens []string) {
+
+	docVec, _ := analysis.GetEmbedding(fullText)
+	tempWordVectors := make(map[string][]float32)
+	for _, t := range tokens {
+
+		_, exists := tempWordVectors[t]
+		if !idx.HasWordVector(t) && !exists {
+			vec := idx.RegisterWordVector(t)
+			tempWordVectors[t] = vec
+		}
+	}
+
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
 	idx.internalCounter += 1
 	idx.idMapping[idx.internalCounter] = originalID
 
-	idx.vectors[idx.internalCounter], _ = analysis.GetEmbedding(fullText)
+	idx.vectors[idx.internalCounter] = docVec
+
+	maps.Copy(idx.wordVectors, tempWordVectors)
+
 	seenInDoc := make(map[string]bool)
 
 	for _, token := range tokens {
@@ -95,6 +113,7 @@ func (idx *InMemoryIndex) Add(originalID string, fullText string, tokens []strin
 			L := len(token)
 			idx.vocabulary[L] = append(idx.vocabulary[L], token)
 			idx.globalSeen[token] = true
+
 		}
 
 	}
@@ -425,4 +444,24 @@ func generateEdgeNgrams(token string) []string {
 	}
 
 	return results
+}
+
+func (idx *InMemoryIndex) RegisterWordVector(word string) []float32 {
+
+	vector, err := analysis.GetEmbedding(word)
+
+	if err != nil {
+		return nil
+	}
+
+	return vector
+}
+
+func (idx *InMemoryIndex) HasWordVector(t string) bool {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	_, exists := idx.wordVectors[t]
+
+	return exists
 }
