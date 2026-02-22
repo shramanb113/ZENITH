@@ -4,7 +4,6 @@ import (
 	"encoding/gob"
 	"log"
 	"maps"
-	"math"
 	"os"
 	"slices"
 	"sync"
@@ -27,8 +26,9 @@ type InMemoryIndex struct {
 }
 
 const (
-	MinGram = 3
-	MaxGram = 10
+	MinGram       = 3
+	MaxGram       = 10
+	SynonymWeight = 0.4
 )
 
 type synonymCandidate struct {
@@ -127,191 +127,192 @@ func (idx *InMemoryIndex) Add(originalID string, fullText string, tokens []strin
 
 func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchResponse {
 	idx.mu.RLock()
-	defer idx.mu.RUnlock()
 
-	log.Printf("the query token is  :")
-
-	for _, word := range queryTokens {
-		log.Printf("%s\n", word)
-	}
 	queryVec, _ := analysis.GetEmbedding(query)
-	KeywordScores := make(map[uint32]float64)
+	keywordScores := make(map[uint32]float64)
 	matchCounts := make(map[uint32]int)
 
-	for _, queryToken := range queryTokens {
+	// --- Pass 1: Lexical, Phonetic, and Fuzzy ---
+	for _, token := range queryTokens {
+		Q := len(token)
 
-		Q := len(queryToken)
+		// 1. N-Grams
 		var searchFragments []string
-
-		if len(queryToken) >= 3 {
-			searchFragments = generateEdgeNgrams(queryToken)
+		if Q >= 3 {
+			searchFragments = generateEdgeNgrams(token)
 		} else {
-			searchFragments = []string{queryToken}
+			searchFragments = []string{token}
 		}
-
-		log.Printf("DEBUG: Searching fragments for token [%s]: %v", queryToken, searchFragments)
 
 		for _, frag := range searchFragments {
 			if ids, ok := idx.data[frag]; ok {
-				idf := 1.0 / math.Log(2.0+float64(idx.tokenCounts[frag]))
-				lengthBonus := math.Pow(float64(len(frag))/float64(len(queryToken)), 2)
-
 				for _, id := range ids {
-					KeywordScores[id] += idf * lengthBonus * 100.0
-					if (float64(len(frag)) / float64(len(queryToken))) >= 0.8 {
-						matchCounts[id] += 1
-					}
+					keywordScores[id] += (float64(len(frag)) / float64(Q)) * 100.0
+					matchCounts[id]++
 				}
 			}
 		}
 
-		phonCode := analysis.Soundex(queryToken)
-
-		if ids, ok := idx.phoneticData[phonCode]; ok {
+		// 2. Phonetic
+		phon := analysis.Soundex(token)
+		if ids, ok := idx.phoneticData[phon]; ok {
 			for _, id := range ids {
-				KeywordScores[id] += 20.0
-				matchCounts[id] += 1
+				keywordScores[id] += 50.0
+				matchCounts[id]++
 			}
 		}
 
-		minLen, maxLen := Q-2, Q+2
-
-		for size, list := range idx.vocabulary {
-
-			if size >= minLen && size <= maxLen {
-				for _, candidate := range list {
-					dist, ok := analysis.Levenshtein(queryToken, candidate)
-
-					if ok && dist > 0 && dist <= 2 && len(queryToken) > 3 {
-
-						if ids, exists := idx.data[candidate]; exists {
-							fuzzyWeight := 40.0 / float64(dist)
-
-							for _, id := range ids {
-								KeywordScores[id] += fuzzyWeight
+		// 3. Fuzzy (Levenshtein)
+		if Q > 3 {
+			minL, maxL := Q-1, Q+1
+			for size, list := range idx.vocabulary {
+				if size >= minL && size <= maxL {
+					for _, candidate := range list {
+						if dist, ok := analysis.Levenshtein(token, candidate); ok && dist > 0 && dist <= 2 {
+							if ids, exists := idx.data[candidate]; exists {
+								for _, id := range ids {
+									keywordScores[id] += 60.0 / float64(dist)
+									matchCounts[id]++
+								}
 							}
 						}
-						log.Printf("🔮 Fuzzy Match: [%s] -> [%s] (Dist: %d)", queryToken, candidate, dist)
-					}
-
-					if ok && dist == 0 {
-						if ids, exists := idx.data[candidate]; exists {
-							for _, id := range ids {
-								matchCounts[id] += 2
-							}
-						}
-
 					}
 				}
 			}
 		}
-
 	}
 
-	VectorScores := make(map[uint32]float64)
-
+	// Calculate Vector Scores
+	vectorScores := make(map[uint32]float64)
 	for id, docVec := range idx.vectors {
-		sim := analysis.CosineSimilarity(queryVec, docVec)
-
-		VectorScores[id] += (float64(sim))
+		vectorScores[id] = float64(analysis.CosineSimilarity(queryVec, docVec))
 	}
 
-	// Reciprocal rank fusion
+	// Initial Anchor: Only documents with keyword/fuzzy/phonetic matches get the "Top Tier" boost
+	for id, score := range keywordScores {
+		if score > 0 {
+			keywordScores[id] += 10000.0
+			if matchCounts[id] >= len(queryTokens) {
+				keywordScores[id] += 50000.0
+			}
+		}
+	}
 
+	searchResponse := idx.finalizeRanks(keywordScores, vectorScores)
+
+	// --- Pass 2: Neural Expansion (The "Rank 5" Killer) ---
+	// If the top result is weak (Score < 5.0), it means we have no keyword matches.
+	// --- Pass 2: Neural Expansion ---
+	if len(searchResponse) == 0 || (len(searchResponse) > 0 && searchResponse[0].Score < 5.0) {
+		idx.mu.RUnlock()
+
+		expandedTerms := []string{}
+		for _, token := range queryTokens {
+			if len(token) < 3 {
+				continue
+			}
+			// Aggressive neighbor search
+			neighbors := idx.GetSemanticNeighbors(token, 5, 0.70)
+			expandedTerms = append(expandedTerms, neighbors...)
+		}
+
+		idx.mu.RLock()
+		analyzer := analysis.New() // Ensure we use the same rules as the indexer
+
+		for _, term := range expandedTerms {
+			// CRITICAL FIX: Stem the synonym to match the index keys!
+			stemmedSynonym := analyzer.Stem(term)
+
+			targets := make(map[uint32]bool)
+
+			// 1. Check the exact stemmed synonym (e.g., "environment")
+			if ids, ok := idx.data[stemmedSynonym]; ok {
+				for _, id := range ids {
+					targets[id] = true
+				}
+			}
+
+			// 2. Check the prefix fallback (e.g., "env")
+			if len(stemmedSynonym) > 3 {
+				prefix := stemmedSynonym[:3]
+				if ids, ok := idx.data[prefix]; ok {
+					for _, id := range ids {
+						targets[id] = true
+					}
+				}
+			}
+
+			for id := range targets {
+				// We give them a massive Anchor + Bonus
+				keywordScores[id] += 20000.0
+				matchCounts[id]++ // Count it so RRF sees it as a keyword hit
+			}
+		}
+
+		// RE-RANK: This forces the RRF to evaluate these "Neural Hits" as Keyword matches
+		searchResponse = idx.finalizeRanks(keywordScores, vectorScores)
+	}
+
+	idx.mu.RUnlock()
+	return searchResponse
+}
+
+func (idx *InMemoryIndex) finalizeRanks(keywordScores map[uint32]float64, vectorScores map[uint32]float64) []SearchResponse {
+	const k = 10.0
 	rrfScores := make(map[uint32]float64)
 
-	for id, score := range KeywordScores {
-		count := matchCounts[id]
-
+	// 1. Keyword Ranking (Only for those with anchor scores)
+	keywordIDs := make([]uint32, 0)
+	for id, score := range keywordScores {
 		if score > 0 {
-			KeywordScores[id] += 10000.0
-
-			if count > 1 {
-				KeywordScores[id] += math.Pow(float64(count), 10)
-			}
-
-			if count == len(queryTokens) {
-				KeywordScores[id] += 100000.0
-				rrfScores[id] += 2.0
-			}
-		} else {
-			log.Printf("DEBUG: DocID %d has a zero score and shouldn't be here", id)
+			keywordIDs = append(keywordIDs, id)
 		}
 	}
-
-	k := 10.0
-
-	keywordIDs := make([]uint32, 0, len(KeywordScores))
-	for id := range KeywordScores {
-		keywordIDs = append(keywordIDs, id)
-		log.Printf("DEBUG: Keyword Match Found for DocID %d", id)
-	}
-
 	slices.SortFunc(keywordIDs, func(a, b uint32) int {
-		if KeywordScores[a] > KeywordScores[b] {
-			return -1
-		}
-		if KeywordScores[a] < KeywordScores[b] {
-			return 1
-		}
-		return 0
+		return compareScores(keywordScores[b], keywordScores[a])
 	})
 
-	vectorIDs := make([]uint32, 0, len(VectorScores))
-	for id := range VectorScores {
+	// 2. Vector Ranking (Global)
+	vectorIDs := make([]uint32, 0, len(vectorScores))
+	for id := range vectorScores {
 		vectorIDs = append(vectorIDs, id)
 	}
-
 	slices.SortFunc(vectorIDs, func(a, b uint32) int {
-		if VectorScores[a] > VectorScores[b] {
-			return -1
-		}
-		if VectorScores[a] < VectorScores[b] {
-			return 1
-		}
-		return 0
-
+		return compareScores(vectorScores[b], vectorScores[a])
 	})
 
+	// 3. RRF Blending
+	// Boost documents that appear in the keywordIDs (which now includes synonyms)
 	for rank, id := range keywordIDs {
-		multiplier := 50.0
-		if rank == 0 {
-			multiplier = 150.0
-		}
-		rrfScores[id] += (1.0 / (k + float64(rank+1))) * multiplier
+		rrfScores[id] += (1.0 / (k + float64(rank+1))) * 100.0
 	}
-
 	for rank, id := range vectorIDs {
-		rrfScores[id] += 1.0 / (k + float64(rank+1))
+		rrfScores[id] += (1.0 / (k + float64(rank+1)))
 	}
 
-	searchResponse := make([]SearchResponse, 0, len(rrfScores))
-
+	results := make([]SearchResponse, 0, len(rrfScores))
 	for id, score := range rrfScores {
-		searchResponse = append(searchResponse, SearchResponse{
+		results = append(results, SearchResponse{
 			ID:    idx.idMapping[id],
 			Score: score,
 		})
 	}
 
-	slices.SortFunc(searchResponse, func(a, b SearchResponse) int {
-		if a.Score > b.Score {
-			return -1
-		}
-		if a.Score < b.Score {
-			return 1
-		}
-		return 0
+	slices.SortFunc(results, func(a, b SearchResponse) int {
+		return compareScores(b.Score, a.Score)
 	})
 
-	for i, res := range searchResponse {
-		if i < 2 {
-			log.Printf("🥇 RANK %d: %s (Score: %f)", i+1, res.ID, res.Score)
-		}
+	return results
+}
+
+func compareScores(a, b float64) int {
+	if a > b {
+		return 1
 	}
-
-	return searchResponse
-
+	if a < b {
+		return -1
+	}
+	return 0
 }
 
 func (idx *InMemoryIndex) SearchAND(queryTokens []string) []string {
