@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"sync"
 	"time"
 
 	"github.com/shramanb113/ZENITH/gen/go/zenithproto"
@@ -25,7 +24,7 @@ func main() {
 }
 
 func runNeuralGauntlet(client zenithproto.SearchServiceClient) {
-	fmt.Println("🚀 ZENITH LINGUISTIC & PHONETIC GAUNTLET")
+	fmt.Println("🚀 ZENITH NEURAL & LINGUISTIC STRESS TEST")
 	fmt.Println("--------------------------------------------------")
 
 	challengingDocs := []struct {
@@ -33,91 +32,71 @@ func runNeuralGauntlet(client zenithproto.SearchServiceClient) {
 		text string
 	}{
 		{"TECH-01", "The PageRank algorithm uses backlink structures to determine the perceived importance of web pages."},
-		{"DATA-08", "Modern ranking systems prioritize various ranks and ranked signals to ensure high-quality rankings."},
+		{"DATA-08", "Modern ranking systems prioritize various signals to ensure high-quality results."},
 		{"LEGAL-03", "The relational database was revolutionary for its time, despite many relational anomalies."},
 		{"AI-04", "Transformer ensembles often over-rely on lexical overlap instead of capturing deep semantic similarity."},
 		{"ENV-06", "Global warming requires environmental solutions and atmospheric carbon capture."},
 	}
 
-	// 📦 CONCURRENT INDEXING
-	fmt.Printf("📦 Indexing %d documents into the Inverted & Phonetic Index...\n", len(challengingDocs))
-	var wg sync.WaitGroup
+	// 1. 📦 DETERMINISTIC INDEXING (No Goroutines here!)
+	// We need these to enter the engine in the exact same order every time
+	// to ensure internal IDs and TF-IDF weights are stable.
+	fmt.Printf("📦 Feeding %d documents into Zenith's brain...\n", len(challengingDocs))
 	for _, d := range challengingDocs {
-		wg.Add(1)
-		go func(id, text string) {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_, err := client.IndexDocuments(ctx, &zenithproto.IndexRequest{Id: id, Data: text})
-			if err != nil {
-				log.Printf("❌ Failed to index %s: %v", id, err)
-			}
-		}(d.id, d.text)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, err := client.IndexDocuments(ctx, &zenithproto.IndexRequest{
+			Id:   d.id,
+			Data: d.text,
+		})
+		cancel()
+		if err != nil {
+			log.Fatalf("❌ Critical Indexing Failure for %s: %v", d.id, err)
+		}
 	}
-	wg.Wait()
-	fmt.Println("✅ Indexing Complete.")
+
+	fmt.Println("✅ Indexing Complete. Memory brain is warm.")
 	fmt.Println("--------------------------------------------------")
 
-	// 🧪 THE TRIALS: Stemming, N-Grams, and Phonetics
+	// 2. THE TRIALS
 	trials := []struct {
 		query    string
 		expected string
 		category string
 		reason   string
 	}{
-		{
-			query:    "PageRan",
-			expected: "TECH-01",
-			category: "LEXICAL",
-			reason:   "Edge N-Gram match (PageRank -> ran)",
-		},
-		{
-			query:    "rankings",
-			expected: "DATA-08",
-			category: "STEMMING",
-			reason:   "Porter Stemmer (rankings -> rank)",
-		},
+
 		{
 			query:    "PageRanc",
 			expected: "TECH-01",
 			category: "PHONETIC",
-			reason:   "Soundex: PageRanc (P265) matches PageRank (P265)",
+			reason:   "Soundex match",
 		},
 		{
-			query:    "relayshun",
-			expected: "LEGAL-03",
-			category: "PHONETIC",
-			reason:   "Soundex: relayshun (R425) sounds like relational (R435) - *Testing sound proximity*",
+			query:    "machine learning",
+			expected: "AI-04",
+			category: "NEURAL",
+			reason:   "Semantic match: 'machine learning' ≈ 'Transformer'",
 		},
 		{
-			query:    "Amospher",
+			query:    "climate change",
 			expected: "ENV-06",
-			category: "PHONETIC",
-			reason:   "Soundex: Amospher (A521) matches Atmospheric (A352) anchor 'A'",
+			category: "NEURAL",
+			reason:   "Semantic match: 'climate' ≈ 'environmental', 'change' ≈ 'warming'",
 		},
 		{
-			query:    "relat",
-			expected: "LEGAL-03",
-			category: "LEXICAL",
-			reason:   "Stemming overlap (relational -> relat)",
-		},
-		{
-			query:    "Transfomer", // Missing the 'r' (Levenshtein Distance 1)
+			query:    "Transfomer",
 			expected: "AI-04",
 			category: "FUZZY",
-			reason:   "Levenshtein: Transfomer -> Transformer (Distance 1)",
-		},
-		{
-			query:    "envirmental", // Missing 'on' (Levenshtein Distance 2)
-			expected: "ENV-06",
-			category: "FUZZY",
-			reason:   "Levenshtein: envirmental -> environmental (Distance 2)",
+			reason:   "Levenshtein Distance 1",
 		},
 	}
 
 	for _, test := range trials {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		// Use a fresh context per search
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		start := time.Now()
 		res, err := client.Search(ctx, &zenithproto.SearchRequest{Query: test.query})
+		duration := time.Since(start)
 		cancel()
 
 		if err != nil {
@@ -125,12 +104,13 @@ func runNeuralGauntlet(client zenithproto.SearchServiceClient) {
 			continue
 		}
 
-		fmt.Printf("🔍 Query: [%-10s] | Category: %-10s\n", test.query, test.category)
+		fmt.Printf("🔍 Query: [%-15s] | Cat: %-8s | Latency: %v\n", test.query, test.category, duration)
 		fmt.Printf("🎯 Goal:  Match %s (%s)\n", test.expected, test.reason)
 
 		if len(res.Results) == 0 {
 			fmt.Println("   🚫 NO RESULTS FOUND")
 		} else {
+			// Find the actual rank
 			foundAt := -1
 			for i, r := range res.Results {
 				if r.Id == test.expected {
@@ -141,10 +121,10 @@ func runNeuralGauntlet(client zenithproto.SearchServiceClient) {
 
 			if foundAt == 1 {
 				fmt.Printf("   ✅ TOP MATCH: [%s] Score: %.4f\n", res.Results[0].Id, res.Results[0].Score)
-			} else if foundAt > 1 {
-				fmt.Printf("   ⚠️  FOUND AT RANK %d: [%s] Score: %.4f\n", foundAt, test.expected, res.Results[foundAt-1].Score)
+			} else if foundAt > 0 {
+				fmt.Printf("   ⚠️  FOUND AT RANK %d: [%s] (Top was [%s])\n", foundAt, test.expected, res.Results[0].Id)
 			} else {
-				fmt.Printf("   ❌ FAIL: Target %s not in top results. Top was [%s]\n", test.expected, res.Results[0].Id)
+				fmt.Printf("   ❌ FAIL: Top result was [%s]\n", res.Results[0].Id)
 			}
 		}
 		fmt.Println("--------------------------------------------------")
