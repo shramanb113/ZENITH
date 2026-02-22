@@ -2,10 +2,13 @@ package index
 
 import (
 	"encoding/gob"
+	"hash/fnv"
 	"log"
 	"maps"
 	"os"
 	"slices"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,34 +16,26 @@ import (
 )
 
 type InMemoryIndex struct {
-	mu              sync.RWMutex
-	data            map[string][]uint32
-	idMapping       map[uint32]string
-	internalCounter uint32
-	vectors         map[uint32][]float32
-	tokenCounts     map[string]int
-	phoneticData    map[string][]uint32
-	vocabulary      map[int][]string
-	globalSeen      map[string]bool
-	wordVectors     map[string][]float32
+	mu           sync.RWMutex
+	data         map[string][]uint32
+	idMapping    map[uint32]string
+	vectors      map[uint32][]float32
+	tokenCounts  map[string]int
+	phoneticData map[string][]uint32
+	vocabulary   map[int][]string
+	globalSeen   map[string]bool
+	wordVectors  map[string][]float32
+	docFragments map[uint32][]string // Tracks fragments for idempotency
 }
 
 const (
-	MinGram       = 3
-	MaxGram       = 10
-	SynonymWeight = 0.4
+	MinGram = 3
+	MaxGram = 10
 )
 
 type synonymCandidate struct {
 	word  string
 	score float32
-}
-
-type SearchResult struct {
-	ID           string
-	KeywordScore float64
-	VectorScore  float64
-	FinalScore   float64
 }
 
 type SearchResponse struct {
@@ -50,15 +45,15 @@ type SearchResponse struct {
 
 func NewInMemoryIndex() *InMemoryIndex {
 	return &InMemoryIndex{
-		data:            make(map[string][]uint32),
-		idMapping:       make(map[uint32]string),
-		internalCounter: 0,
-		vectors:         make(map[uint32][]float32),
-		tokenCounts:     make(map[string]int),
-		phoneticData:    make(map[string][]uint32),
-		vocabulary:      make(map[int][]string),
-		globalSeen:      make(map[string]bool),
-		wordVectors:     make(map[string][]float32),
+		data:         make(map[string][]uint32),
+		idMapping:    make(map[uint32]string),
+		vectors:      make(map[uint32][]float32),
+		tokenCounts:  make(map[string]int),
+		phoneticData: make(map[string][]uint32),
+		vocabulary:   make(map[int][]string),
+		globalSeen:   make(map[string]bool),
+		wordVectors:  make(map[string][]float32),
+		docFragments: make(map[uint32][]string),
 	}
 }
 
@@ -76,53 +71,72 @@ func (idx *InMemoryIndex) Add(originalID string, fullText string, tokens []strin
 		}
 	}
 
+	h := fnv.New32a()
+	h.Write([]byte(originalID))
+	internalID := uint32(h.Sum32())
+
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	idx.internalCounter += 1
-	idx.idMapping[idx.internalCounter] = originalID
+	// Idempotency: Remove previous entries if document already exists
+	if oldFrags, exists := idx.docFragments[internalID]; exists {
+		for _, frag := range oldFrags {
+			if idList, ok := idx.data[frag]; ok {
+				var newList []uint32
+				for _, id := range idList {
+					if id != internalID {
+						newList = append(newList, id)
+					}
+				}
+				idx.data[frag] = newList
+			}
+			// Also clean up phonetic data if it was a phonetic fragment
+			if idList, ok := idx.phoneticData[frag]; ok {
+				var newList []uint32
+				for _, id := range idList {
+					if id != internalID {
+						newList = append(newList, id)
+					}
+				}
+				idx.phoneticData[frag] = newList
+			}
+		}
+	}
 
-	idx.vectors[idx.internalCounter] = docVec
-
+	idx.idMapping[internalID] = originalID
+	idx.vectors[internalID] = docVec
 	maps.Copy(idx.wordVectors, tempWordVectors)
 
 	seenInDoc := make(map[string]bool)
+	docFrags := []string{}
 
 	for _, token := range tokens {
-
 		idx.tokenCounts[token]++
-
-		// avoiding duplication
-
 		fragments := generateEdgeNgrams(token)
 
 		for _, frag := range fragments {
-			log.Printf("🔨 Indexing Fragment: %s for %s", frag, originalID)
-
 			if seenInDoc[frag] {
 				continue
 			}
 			seenInDoc[frag] = true
-
-			idx.data[frag] = append(idx.data[frag], idx.internalCounter)
+			idx.data[frag] = append(idx.data[frag], internalID)
+			docFrags = append(docFrags, frag)
 		}
 
 		phon := analysis.Soundex(token)
 		if phon != "" && !seenInDoc[phon] {
-			log.Printf("Indexing Phonetic : %s for %s", phon, originalID)
-			idx.phoneticData[phon] = append(idx.phoneticData[phon], idx.internalCounter)
+			idx.phoneticData[phon] = append(idx.phoneticData[phon], internalID)
 			seenInDoc[phon] = true
+			docFrags = append(docFrags, phon)
 		}
 
 		if !idx.globalSeen[token] {
 			L := len(token)
 			idx.vocabulary[L] = append(idx.vocabulary[L], token)
 			idx.globalSeen[token] = true
-
 		}
-
 	}
-
+	idx.docFragments[internalID] = docFrags
 }
 
 func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchResponse {
@@ -130,7 +144,7 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 
 	queryVec, _ := analysis.GetEmbedding(query)
 	keywordScores := make(map[uint32]float64)
-	matchCounts := make(map[uint32]int)
+	matchTokens := make(map[uint32]map[string]bool) // Tracks which unique query tokens hit
 
 	// --- Pass 1: Lexical, Phonetic, and Fuzzy ---
 	for _, token := range queryTokens {
@@ -148,7 +162,10 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 			if ids, ok := idx.data[frag]; ok {
 				for _, id := range ids {
 					keywordScores[id] += (float64(len(frag)) / float64(Q)) * 100.0
-					matchCounts[id]++
+					if matchTokens[id] == nil {
+						matchTokens[id] = make(map[string]bool)
+					}
+					matchTokens[id][token] = true
 				}
 			}
 		}
@@ -158,7 +175,10 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 		if ids, ok := idx.phoneticData[phon]; ok {
 			for _, id := range ids {
 				keywordScores[id] += 50.0
-				matchCounts[id]++
+				if matchTokens[id] == nil {
+					matchTokens[id] = make(map[string]bool)
+				}
+				matchTokens[id][token] = true
 			}
 		}
 
@@ -172,7 +192,10 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 							if ids, exists := idx.data[candidate]; exists {
 								for _, id := range ids {
 									keywordScores[id] += 60.0 / float64(dist)
-									matchCounts[id]++
+									if matchTokens[id] == nil {
+										matchTokens[id] = make(map[string]bool)
+									}
+									matchTokens[id][token] = true
 								}
 							}
 						}
@@ -188,11 +211,11 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 		vectorScores[id] = float64(analysis.CosineSimilarity(queryVec, docVec))
 	}
 
-	// Initial Anchor: Only documents with keyword/fuzzy/phonetic matches get the "Top Tier" boost
 	for id, score := range keywordScores {
 		if score > 0 {
 			keywordScores[id] += 10000.0
-			if matchCounts[id] >= len(queryTokens) {
+			// CRITICAL FIX: Only award big bonus if ALL unique query tokens matched (Issue 1)
+			if len(matchTokens[id]) >= len(queryTokens) {
 				keywordScores[id] += 50000.0
 			}
 		}
@@ -200,57 +223,63 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 
 	searchResponse := idx.finalizeRanks(keywordScores, vectorScores)
 
-	// --- Pass 2: Neural Expansion (The "Rank 5" Killer) ---
-	// If the top result is weak (Score < 5.0), it means we have no keyword matches.
 	// --- Pass 2: Neural Expansion ---
 	if len(searchResponse) == 0 || (len(searchResponse) > 0 && searchResponse[0].Score < 5.0) {
 		idx.mu.RUnlock()
+		analyzer := analysis.New()
 
-		expandedTerms := []string{}
 		for _, token := range queryTokens {
 			if len(token) < 3 {
 				continue
 			}
-			// Aggressive neighbor search
+
 			neighbors := idx.GetSemanticNeighbors(token, 5, 0.70)
-			expandedTerms = append(expandedTerms, neighbors...)
-		}
+			for _, neighbor := range neighbors {
+				stemmedNeighbor := analyzer.Stem(neighbor)
 
-		idx.mu.RLock()
-		analyzer := analysis.New() // Ensure we use the same rules as the indexer
-
-		for _, term := range expandedTerms {
-			// CRITICAL FIX: Stem the synonym to match the index keys!
-			stemmedSynonym := analyzer.Stem(term)
-
-			targets := make(map[uint32]bool)
-
-			// 1. Check the exact stemmed synonym (e.g., "environment")
-			if ids, ok := idx.data[stemmedSynonym]; ok {
-				for _, id := range ids {
-					targets[id] = true
-				}
-			}
-
-			// 2. Check the prefix fallback (e.g., "env")
-			if len(stemmedSynonym) > 3 {
-				prefix := stemmedSynonym[:3]
-				if ids, ok := idx.data[prefix]; ok {
+				idx.mu.RLock()
+				targets := make(map[uint32]bool)
+				if ids, ok := idx.data[stemmedNeighbor]; ok {
 					for _, id := range ids {
 						targets[id] = true
 					}
 				}
-			}
+				if len(stemmedNeighbor) > 3 {
+					prefix := stemmedNeighbor[:3]
+					if ids, ok := idx.data[prefix]; ok {
+						for _, id := range ids {
+							targets[id] = true
+						}
+					}
+				}
 
-			for id := range targets {
-				// We give them a massive Anchor + Bonus
-				keywordScores[id] += 20000.0
-				matchCounts[id]++ // Count it so RRF sees it as a keyword hit
+				for id := range targets {
+					keywordScores[id] += 20000.0
+					if matchTokens[id] == nil {
+						matchTokens[id] = make(map[string]bool)
+					}
+					// CRITICAL: We mark the ORIGINAL query token as satisfied
+					matchTokens[id][token] = true
+				}
+				idx.mu.RUnlock()
 			}
 		}
 
-		// RE-RANK: This forces the RRF to evaluate these "Neural Hits" as Keyword matches
+		idx.mu.RLock()
+		// RE-RANK with new bonuses
+		for id, score := range keywordScores {
+			if score > 0 {
+				if len(matchTokens[id]) >= len(queryTokens) {
+					keywordScores[id] += 50000.0
+				}
+			}
+		}
+
 		searchResponse = idx.finalizeRanks(keywordScores, vectorScores)
+	}
+
+	if len(searchResponse) > 5 {
+		searchResponse = searchResponse[:5]
 	}
 
 	idx.mu.RUnlock()
@@ -258,18 +287,32 @@ func (idx *InMemoryIndex) Search(query string, queryTokens []string) []SearchRes
 }
 
 func (idx *InMemoryIndex) finalizeRanks(keywordScores map[uint32]float64, vectorScores map[uint32]float64) []SearchResponse {
-	const k = 10.0
+	const k = 60.0 // Adjusted to standard RRF constant (Fixes Issue 2)
 	rrfScores := make(map[uint32]float64)
 
-	// 1. Keyword Ranking (Only for those with anchor scores)
 	keywordIDs := make([]uint32, 0)
 	for id, score := range keywordScores {
 		if score > 0 {
 			keywordIDs = append(keywordIDs, id)
 		}
 	}
+	// Multi-Level Tie-Breaking: Keyword Score -> Vector Score -> ID
 	slices.SortFunc(keywordIDs, func(a, b uint32) int {
-		return compareScores(keywordScores[b], keywordScores[a])
+		if keywordScores[a] != keywordScores[b] {
+			if keywordScores[b] > keywordScores[a] {
+				return 1
+			}
+			return -1
+		}
+		// Tie-breaker 1: Vector similarity (Neural context)
+		if vectorScores[a] != vectorScores[b] {
+			if vectorScores[b] > vectorScores[a] {
+				return 1
+			}
+			return -1
+		}
+		// Final tie-breaker: Alphabetical Order
+		return strings.Compare(idx.idMapping[a], idx.idMapping[b])
 	})
 
 	// 2. Vector Ranking (Global)
@@ -277,8 +320,16 @@ func (idx *InMemoryIndex) finalizeRanks(keywordScores map[uint32]float64, vector
 	for id := range vectorScores {
 		vectorIDs = append(vectorIDs, id)
 	}
+	// Stable Sort with Tie-Breaking
 	slices.SortFunc(vectorIDs, func(a, b uint32) int {
-		return compareScores(vectorScores[b], vectorScores[a])
+		if vectorScores[a] != vectorScores[b] {
+			if vectorScores[b] > vectorScores[a] {
+				return 1
+			}
+			return -1
+		}
+		// Tie-breaker: Alphabetical order of original IDs
+		return strings.Compare(idx.idMapping[a], idx.idMapping[b])
 	})
 
 	// 3. RRF Blending
@@ -298,21 +349,15 @@ func (idx *InMemoryIndex) finalizeRanks(keywordScores map[uint32]float64, vector
 		})
 	}
 
-	slices.SortFunc(results, func(a, b SearchResponse) int {
-		return compareScores(b.Score, a.Score)
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+
+		return results[i].ID < results[j].ID
 	})
 
 	return results
-}
-
-func compareScores(a, b float64) int {
-	if a > b {
-		return 1
-	}
-	if a < b {
-		return -1
-	}
-	return 0
 }
 
 func (idx *InMemoryIndex) SearchAND(queryTokens []string) []string {
@@ -377,16 +422,17 @@ func (idx *InMemoryIndex) Save(filepath string) error {
 
 	encoder := gob.NewEncoder(file)
 
-	if err := encoder.Encode(idx.data); err != nil {
-		return err
+	// Persist EVERYTHING (Fixes brain loss on restart)
+	state := []any{
+		idx.data, idx.idMapping, idx.vectors,
+		idx.tokenCounts, idx.phoneticData, idx.vocabulary,
+		idx.globalSeen, idx.wordVectors, idx.docFragments,
 	}
 
-	if err := encoder.Encode(idx.idMapping); err != nil {
-		return err
-	}
-
-	if err := encoder.Encode(idx.vectors); err != nil {
-		return err
+	for _, s := range state {
+		if err := encoder.Encode(s); err != nil {
+			return err
+		}
 	}
 
 	log.Printf("✅ Index saved. Entries: %d. Duration: %v", len(idx.data), time.Since(start))
@@ -410,16 +456,17 @@ func (idx *InMemoryIndex) Load(filepath string) error {
 
 	info := gob.NewDecoder(osClient)
 
-	if err := info.Decode(&idx.data); err != nil {
-		return err
+	// Load EVERYTHING
+	state := []any{
+		&idx.data, &idx.idMapping, &idx.vectors,
+		&idx.tokenCounts, &idx.phoneticData, &idx.vocabulary,
+		&idx.globalSeen, &idx.wordVectors, &idx.docFragments,
 	}
 
-	if err := info.Decode(&idx.idMapping); err != nil {
-		return err
-	}
-
-	if err := info.Decode(&idx.vectors); err != nil {
-		return err
+	for _, s := range state {
+		if err := info.Decode(s); err != nil {
+			return err
+		}
 	}
 
 	log.Printf("Successfully loaded %d internal IDs from disk in %v", len(idx.idMapping), time.Since(start))
@@ -506,13 +553,14 @@ func (idx *InMemoryIndex) GetSemanticNeighbors(token string, topN int, threshold
 	}
 
 	slices.SortFunc(candidates, func(a, b synonymCandidate) int {
-		if a.score > b.score {
-			return -1
-		}
-		if a.score < b.score {
+		if a.score != b.score {
+			if a.score > b.score {
+				return -1
+			}
 			return 1
 		}
-		return 0
+		// Tie-breaker: Alphabetical order
+		return strings.Compare(a.word, b.word)
 	})
 
 	limit := min(topN, len(candidates))
