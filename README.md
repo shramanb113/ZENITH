@@ -311,7 +311,7 @@ These principles guide every design decision.
 - [x] **21: Phonetic Matching** - Soundex/Metaphone algorithms for "Sounds like" search.
 - [x] **22: Fuzzy Matching** - Levenshtein Distance for typo-tolerant queries.
 - [x] **23: Synonyms & Thesaurus** - Expanding query intent via mapping layers.
-- [] **24: Finite State Transducers (FST)** - Ultra-fast dictionary storage and prefix search.
+- [] **24: Finite State Transducers (FST)** - Ultra-fast dictionary storage and prefix search.( Future enhancement)
 
 ## 💾 Phase 4: The Storage Revolution (The LSM-Tree)
 
