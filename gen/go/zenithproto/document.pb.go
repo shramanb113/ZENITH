@@ -174,6 +174,7 @@ type SearchResult struct {
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	Score         float64                `protobuf:"fixed64,2,opt,name=score,proto3" json:"score,omitempty"`
 	Fields        map[string]string      `protobuf:"bytes,3,rep,name=fields,proto3" json:"fields,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	OriginalText  string                 `protobuf:"bytes,4,opt,name=original_text,json=originalText,proto3" json:"original_text,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -227,6 +228,13 @@ func (x *SearchResult) GetFields() map[string]string {
 		return x.Fields
 	}
 	return nil
+}
+
+func (x *SearchResult) GetOriginalText() string {
+	if x != nil {
+		return x.OriginalText
+	}
+	return ""
 }
 
 type SearchResponse struct {
@@ -513,6 +521,206 @@ func (x *IndexPDFResponse) GetChunksIndexed() int32 {
 	return 0
 }
 
+type GetDocumentRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetDocumentRequest) Reset() {
+	*x = GetDocumentRequest{}
+	mi := &file_document_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetDocumentRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetDocumentRequest) ProtoMessage() {}
+
+func (x *GetDocumentRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_document_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetDocumentRequest.ProtoReflect.Descriptor instead.
+func (*GetDocumentRequest) Descriptor() ([]byte, []int) {
+	return file_document_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *GetDocumentRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+type GetDocumentResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Found         bool                   `protobuf:"varint,1,opt,name=found,proto3" json:"found,omitempty"`
+	Id            string                 `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
+	Text          string                 `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetDocumentResponse) Reset() {
+	*x = GetDocumentResponse{}
+	mi := &file_document_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetDocumentResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetDocumentResponse) ProtoMessage() {}
+
+func (x *GetDocumentResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_document_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetDocumentResponse.ProtoReflect.Descriptor instead.
+func (*GetDocumentResponse) Descriptor() ([]byte, []int) {
+	return file_document_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *GetDocumentResponse) GetFound() bool {
+	if x != nil {
+		return x.Found
+	}
+	return false
+}
+
+func (x *GetDocumentResponse) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *GetDocumentResponse) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+type DeleteDocumentRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteDocumentRequest) Reset() {
+	*x = DeleteDocumentRequest{}
+	mi := &file_document_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteDocumentRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteDocumentRequest) ProtoMessage() {}
+
+func (x *DeleteDocumentRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_document_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteDocumentRequest.ProtoReflect.Descriptor instead.
+func (*DeleteDocumentRequest) Descriptor() ([]byte, []int) {
+	return file_document_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *DeleteDocumentRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+type DeleteDocumentResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Status        bool                   `protobuf:"varint,1,opt,name=status,proto3" json:"status,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteDocumentResponse) Reset() {
+	*x = DeleteDocumentResponse{}
+	mi := &file_document_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteDocumentResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteDocumentResponse) ProtoMessage() {}
+
+func (x *DeleteDocumentResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_document_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteDocumentResponse.ProtoReflect.Descriptor instead.
+func (*DeleteDocumentResponse) Descriptor() ([]byte, []int) {
+	return file_document_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *DeleteDocumentResponse) GetStatus() bool {
+	if x != nil {
+		return x.Status
+	}
+	return false
+}
+
+func (x *DeleteDocumentResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 var File_document_proto protoreflect.FileDescriptor
 
 const file_document_proto_rawDesc = "" +
@@ -525,11 +733,12 @@ const file_document_proto_rawDesc = "" +
 	"\x06status\x18\x01 \x01(\bR\x06status\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\"%\n" +
 	"\rSearchRequest\x12\x14\n" +
-	"\x05query\x18\x01 \x01(\tR\x05query\"\xa9\x01\n" +
+	"\x05query\x18\x01 \x01(\tR\x05query\"\xce\x01\n" +
 	"\fSearchResult\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05score\x18\x02 \x01(\x01R\x05score\x128\n" +
-	"\x06fields\x18\x03 \x03(\v2 .zenith.SearchResult.FieldsEntryR\x06fields\x1a9\n" +
+	"\x06fields\x18\x03 \x03(\v2 .zenith.SearchResult.FieldsEntryR\x06fields\x12#\n" +
+	"\roriginal_text\x18\x04 \x01(\tR\foriginalText\x1a9\n" +
 	"\vFieldsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"@\n" +
@@ -557,11 +766,24 @@ const file_document_proto_rawDesc = "" +
 	"\x10IndexPDFResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\bR\x06status\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12%\n" +
-	"\x0echunks_indexed\x18\x03 \x01(\x05R\rchunksIndexed2\xc6\x01\n" +
+	"\x0echunks_indexed\x18\x03 \x01(\x05R\rchunksIndexed\"$\n" +
+	"\x12GetDocumentRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"O\n" +
+	"\x13GetDocumentResponse\x12\x14\n" +
+	"\x05found\x18\x01 \x01(\bR\x05found\x12\x0e\n" +
+	"\x02id\x18\x02 \x01(\tR\x02id\x12\x12\n" +
+	"\x04text\x18\x03 \x01(\tR\x04text\"'\n" +
+	"\x15DeleteDocumentRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"J\n" +
+	"\x16DeleteDocumentResponse\x12\x16\n" +
+	"\x06status\x18\x01 \x01(\bR\x06status\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage2\xdf\x02\n" +
 	"\rSearchService\x12=\n" +
 	"\x0eIndexDocuments\x12\x14.zenith.IndexRequest\x1a\x15.zenith.IndexResponse\x127\n" +
 	"\x06Search\x12\x15.zenith.SearchRequest\x1a\x16.zenith.SearchResponse\x12=\n" +
-	"\bIndexPDF\x12\x17.zenith.IndexPDFRequest\x1a\x18.zenith.IndexPDFResponseB\x14Z\x12gen/go/zenithprotob\x06proto3"
+	"\bIndexPDF\x12\x17.zenith.IndexPDFRequest\x1a\x18.zenith.IndexPDFResponse\x12F\n" +
+	"\vGetDocument\x12\x1a.zenith.GetDocumentRequest\x1a\x1b.zenith.GetDocumentResponse\x12O\n" +
+	"\x0eDeleteDocument\x12\x1d.zenith.DeleteDocumentRequest\x1a\x1e.zenith.DeleteDocumentResponseB\x14Z\x12gen/go/zenithprotob\x06proto3"
 
 var (
 	file_document_proto_rawDescOnce sync.Once
@@ -575,35 +797,43 @@ func file_document_proto_rawDescGZIP() []byte {
 	return file_document_proto_rawDescData
 }
 
-var file_document_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_document_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_document_proto_goTypes = []any{
-	(*IndexRequest)(nil),     // 0: zenith.IndexRequest
-	(*IndexResponse)(nil),    // 1: zenith.IndexResponse
-	(*SearchRequest)(nil),    // 2: zenith.SearchRequest
-	(*SearchResult)(nil),     // 3: zenith.SearchResult
-	(*SearchResponse)(nil),   // 4: zenith.SearchResponse
-	(*DocumentProto)(nil),    // 5: zenith.DocumentProto
-	(*Vector)(nil),           // 6: zenith.Vector
-	(*IndexPDFRequest)(nil),  // 7: zenith.IndexPDFRequest
-	(*IndexPDFResponse)(nil), // 8: zenith.IndexPDFResponse
-	nil,                      // 9: zenith.SearchResult.FieldsEntry
-	nil,                      // 10: zenith.DocumentProto.FieldsEntry
-	nil,                      // 11: zenith.DocumentProto.VectorsEntry
+	(*IndexRequest)(nil),           // 0: zenith.IndexRequest
+	(*IndexResponse)(nil),          // 1: zenith.IndexResponse
+	(*SearchRequest)(nil),          // 2: zenith.SearchRequest
+	(*SearchResult)(nil),           // 3: zenith.SearchResult
+	(*SearchResponse)(nil),         // 4: zenith.SearchResponse
+	(*DocumentProto)(nil),          // 5: zenith.DocumentProto
+	(*Vector)(nil),                 // 6: zenith.Vector
+	(*IndexPDFRequest)(nil),        // 7: zenith.IndexPDFRequest
+	(*IndexPDFResponse)(nil),       // 8: zenith.IndexPDFResponse
+	(*GetDocumentRequest)(nil),     // 9: zenith.GetDocumentRequest
+	(*GetDocumentResponse)(nil),    // 10: zenith.GetDocumentResponse
+	(*DeleteDocumentRequest)(nil),  // 11: zenith.DeleteDocumentRequest
+	(*DeleteDocumentResponse)(nil), // 12: zenith.DeleteDocumentResponse
+	nil,                            // 13: zenith.SearchResult.FieldsEntry
+	nil,                            // 14: zenith.DocumentProto.FieldsEntry
+	nil,                            // 15: zenith.DocumentProto.VectorsEntry
 }
 var file_document_proto_depIdxs = []int32{
-	9,  // 0: zenith.SearchResult.fields:type_name -> zenith.SearchResult.FieldsEntry
+	13, // 0: zenith.SearchResult.fields:type_name -> zenith.SearchResult.FieldsEntry
 	3,  // 1: zenith.SearchResponse.results:type_name -> zenith.SearchResult
-	10, // 2: zenith.DocumentProto.fields:type_name -> zenith.DocumentProto.FieldsEntry
-	11, // 3: zenith.DocumentProto.vectors:type_name -> zenith.DocumentProto.VectorsEntry
+	14, // 2: zenith.DocumentProto.fields:type_name -> zenith.DocumentProto.FieldsEntry
+	15, // 3: zenith.DocumentProto.vectors:type_name -> zenith.DocumentProto.VectorsEntry
 	6,  // 4: zenith.DocumentProto.VectorsEntry.value:type_name -> zenith.Vector
 	0,  // 5: zenith.SearchService.IndexDocuments:input_type -> zenith.IndexRequest
 	2,  // 6: zenith.SearchService.Search:input_type -> zenith.SearchRequest
 	7,  // 7: zenith.SearchService.IndexPDF:input_type -> zenith.IndexPDFRequest
-	1,  // 8: zenith.SearchService.IndexDocuments:output_type -> zenith.IndexResponse
-	4,  // 9: zenith.SearchService.Search:output_type -> zenith.SearchResponse
-	8,  // 10: zenith.SearchService.IndexPDF:output_type -> zenith.IndexPDFResponse
-	8,  // [8:11] is the sub-list for method output_type
-	5,  // [5:8] is the sub-list for method input_type
+	9,  // 8: zenith.SearchService.GetDocument:input_type -> zenith.GetDocumentRequest
+	11, // 9: zenith.SearchService.DeleteDocument:input_type -> zenith.DeleteDocumentRequest
+	1,  // 10: zenith.SearchService.IndexDocuments:output_type -> zenith.IndexResponse
+	4,  // 11: zenith.SearchService.Search:output_type -> zenith.SearchResponse
+	8,  // 12: zenith.SearchService.IndexPDF:output_type -> zenith.IndexPDFResponse
+	10, // 13: zenith.SearchService.GetDocument:output_type -> zenith.GetDocumentResponse
+	12, // 14: zenith.SearchService.DeleteDocument:output_type -> zenith.DeleteDocumentResponse
+	10, // [10:15] is the sub-list for method output_type
+	5,  // [5:10] is the sub-list for method input_type
 	5,  // [5:5] is the sub-list for extension type_name
 	5,  // [5:5] is the sub-list for extension extendee
 	0,  // [0:5] is the sub-list for field type_name
@@ -620,7 +850,7 @@ func file_document_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_document_proto_rawDesc), len(file_document_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

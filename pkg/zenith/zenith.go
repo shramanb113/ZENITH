@@ -52,7 +52,7 @@ type DB struct {
 	path     string    // absolute path; empty for :memory:
 	lock     *fileLock // nil for :memory:
 	opts     *options
-	docWAL   *wal.WAL     // nil for :memory:
+	docWAL   *wal.WAL      // nil for :memory:
 	ckptStop chan struct{} // closed to stop background checkpoint goroutine; nil if not running
 }
 
@@ -289,6 +289,33 @@ func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) (r
 	}
 
 	return buildResults(raw, so.limit), nil
+}
+
+// Get returns the original text last indexed under id, and whether a
+// document with that id currently exists.
+func (db *DB) Get(id string) (text string, found bool, err error) {
+	if db == nil {
+		return "", false, errors.New("zenith: Get called on nil DB")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			db.closed.Store(true)
+			err = fmt.Errorf("zenith: internal error: %v", r)
+		}
+	}()
+
+	if id == "" {
+		return "", false, ErrInvalidID
+	}
+
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.closed.Load() {
+		return "", false, ErrClosed
+	}
+
+	text, found = db.engine.GetText(id)
+	return text, found, nil
 }
 
 // Delete removes a document from the index. Idempotent — deleting a

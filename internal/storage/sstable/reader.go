@@ -305,38 +305,43 @@ func (r *Reader) readBlock(entry IndexEntry) ([]blockEntry, error) {
 	return entries, nil
 }
 
-func (r *Reader) Get(key []byte) ([]byte, bool) {
+// Get returns the value for key and true if found and not a tombstone.
+// Returns (nil, false, nil) if the key is genuinely absent. Returns a non-nil
+// error if the block containing the key could not be read or failed its CRC
+// check — a corrupt block must never be reported to the caller as "not
+// found", since that silently resurrects a stale or already-deleted value
+// from an older SSTable further down the read path.
+func (r *Reader) Get(key []byte) ([]byte, bool, error) {
 
 	// bloom filter search (if not found then we dont even need to scratch the disk)
 	if !r.bloom.mayContain(key) {
-		return nil, false
+		return nil, false, nil
 	}
 
 	blockIdx := r.findBlock(key)
 	if blockIdx < 0 {
-		return nil, false
+		return nil, false, nil
 	}
 
 	entries, err := r.readBlock(r.index[blockIdx])
-
 	if err != nil {
-		return nil, false
+		return nil, false, fmt.Errorf("sstable: get %q: %w", key, err)
 	}
 
 	for _, e := range entries {
 		if bytes.Equal(e.key, key) {
 			if e.deleted {
 				// Tombstone — key was deleted, do not fall through
-				return nil, false
+				return nil, false, nil
 			}
 			// Defensive copy — caller must not mutate stored data
 			val := make([]byte, len(e.value))
 			copy(val, e.value)
-			return val, true
+			return val, true, nil
 		}
 	}
 
-	return nil, false
+	return nil, false, nil
 
 }
 
@@ -398,4 +403,50 @@ func (r *Reader) MinKey() ([]byte, error) {
 	k := make([]byte, len(blocks[0].key))
 	copy(k, blocks[0].key)
 	return k, nil
+}
+
+// Iterator streams entries from an SSTable one data block at a time, instead
+// of materialising the whole file in memory the way IterateAll does. Used by
+// the compactor's k-way merge so peak memory during compaction is bounded by
+// (number of input files × one block) rather than the total size of every
+// input file combined.
+type Iterator struct {
+	r        *Reader
+	idxPos   int
+	entries  []blockEntry
+	entryPos int
+}
+
+// NewIterator returns a streaming iterator over every live and tombstoned
+// entry in the SSTable, in key order.
+func (r *Reader) NewIterator() *Iterator {
+	return &Iterator{r: r}
+}
+
+// Next returns the next entry, or ok=false once the SSTable is exhausted.
+func (it *Iterator) Next() (memtable.Entry, bool, error) {
+	for it.entryPos >= len(it.entries) {
+		if it.idxPos >= len(it.r.index) {
+			return memtable.Entry{}, false, nil
+		}
+		entries, err := it.r.readBlock(it.r.index[it.idxPos])
+		if err != nil {
+			return memtable.Entry{}, false, fmt.Errorf("sstable: iterate block %d: %w", it.idxPos, err)
+		}
+		it.idxPos++
+		it.entries = entries
+		it.entryPos = 0
+	}
+
+	be := it.entries[it.entryPos]
+	it.entryPos++
+
+	key := make([]byte, len(be.key))
+	copy(key, be.key)
+	entry := memtable.Entry{Key: key, Deleted: be.deleted}
+	if !be.deleted {
+		entry.Value = make([]byte, len(be.value))
+		copy(entry.Value, be.value)
+	}
+	return entry, true, nil
 }

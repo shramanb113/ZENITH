@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,6 +51,10 @@ type Engine struct {
 
 	// Leveled compactor — runs in the background, triggered on each flush.
 	compactor *compaction.Compactor
+
+	// manifestMu serialises persistManifest so concurrent flush/compaction
+	// goroutines can't interleave writes to the on-disk manifest.
+	manifestMu sync.Mutex
 
 	// FST dictionary — rebuilt from the term vocabulary after every flush.
 	// Provides O(log n) exact lookup and prefix search over indexed terms.
@@ -141,20 +146,10 @@ func Open(cfg EngineConfig) (*Engine, error) {
 		return nil, fmt.Errorf("storage: open wal: %w", err)
 	}
 
-	mt := memtable.NewMemTable(cfg.MemTableMaxSize)
-
-	// Replay WAL records into the fresh MemTable.
-	for _, r := range records {
-		if err := memtable.ApplyRecord(mt, r); err != nil {
-			slog.Warn("WAL replay: skipping bad record", "seq", r.Seq, "error", err)
-		}
-	}
-	slog.Info("WAL replayed", "records", len(records))
-
 	e := &Engine{
 		cfg:            cfg,
 		walFile:        walFile,
-		active:         mt,
+		active:         memtable.NewMemTable(cfg.MemTableMaxSize),
 		fst:            analysis.NewFSTDictionary(),
 		vocab:          make(map[string]struct{}),
 		closed:         make(chan struct{}),
@@ -167,6 +162,28 @@ func Open(cfg EngineConfig) (*Engine, error) {
 	// land in the same directory as flushed SSTables.
 	cfg.CompactorConfig.Dir = cfg.SSTDir
 	e.compactor = compaction.NewCompactor(cfg.CompactorConfig)
+	e.compactor.SetOnChange(e.persistManifest)
+
+	// Rediscover SSTables left behind by a previous run BEFORE replaying the
+	// WAL or starting the compactor: without this, sstCounter restarts at 0
+	// and the very next flush overwrites the previous run's first SSTable
+	// file, and the compactor has no idea those files even exist.
+	if err := e.rediscoverSSTables(); err != nil {
+		slog.Warn("storage: SSTable rediscovery failed, starting with an empty set", "error", err)
+	}
+
+	// Replay WAL records. Replay must be able to rotate the MemTable exactly
+	// like a normal write does: if a large WAL simply exceeds MemTableMaxSize
+	// partway through, the naive approach of replaying into one MemTable
+	// leaves it frozen when Open returns, and Put/Delete on a table that
+	// starts out frozen fail forever (see rotateLocked's doc comment).
+	for _, r := range records {
+		if err := e.applyReplayRecord(r); err != nil {
+			slog.Warn("WAL replay: skipping bad record", "seq", r.Seq, "error", err)
+		}
+	}
+	slog.Info("WAL replayed", "records", len(records))
+
 	e.compactor.Run()
 
 	// Load FST from disk for instant startup — no vocab rebuild needed.
@@ -181,6 +198,19 @@ func Open(cfg EngineConfig) (*Engine, error) {
 	return e, nil
 }
 
+// applyReplayRecord applies one recovered WAL record directly to the
+// MemTable stack during Open, rotating the active table first if it is
+// already frozen (see rotateLocked).
+func (e *Engine) applyReplayRecord(r wal.Record) error {
+	e.mu.Lock()
+	if e.active.IsFrozen() {
+		e.rotateLocked()
+	}
+	err := memtable.ApplyRecord(e.active, r)
+	e.mu.Unlock()
+	return err
+}
+
 // ── Write path ────────────────────────────────────────────────────────────────
 
 // Put writes key→value to the WAL and then the active MemTable.
@@ -189,6 +219,12 @@ func Open(cfg EngineConfig) (*Engine, error) {
 func (e *Engine) Put(ctx context.Context, key, value []byte) error {
 	if e.isClosed() {
 		return errors.New("storage: engine is closed")
+	}
+	if len(key) == 0 {
+		// Validate before the WAL append, not after: once a record is
+		// durable in the WAL it MUST be applicable to the MemTable, or a
+		// crash-replay will keep hitting the same unusable record forever.
+		return memtable.ErrKeyEmpty
 	}
 
 	seq, err := e.walFile.Append(ctx, &wal.Record{
@@ -202,6 +238,12 @@ func (e *Engine) Put(ctx context.Context, key, value []byte) error {
 	_ = seq
 
 	e.mu.Lock()
+	// The active MemTable may already be frozen (e.g. it started that way
+	// after a WAL replay that hit the size cap) — rotate before writing
+	// instead of failing forever. See rotateLocked.
+	if e.active.IsFrozen() {
+		e.rotateLocked()
+	}
 	err = e.active.Put(key, value)
 	frozen := e.active.IsFrozen()
 	e.mu.Unlock()
@@ -222,6 +264,9 @@ func (e *Engine) Delete(ctx context.Context, key []byte) error {
 	if e.isClosed() {
 		return errors.New("storage: engine is closed")
 	}
+	if len(key) == 0 {
+		return memtable.ErrKeyEmpty
+	}
 
 	_, err := e.walFile.Append(ctx, &wal.Record{
 		Op:  wal.OpTypeDelete,
@@ -232,6 +277,9 @@ func (e *Engine) Delete(ctx context.Context, key []byte) error {
 	}
 
 	e.mu.Lock()
+	if e.active.IsFrozen() {
+		e.rotateLocked()
+	}
 	err = e.active.Delete(key)
 	frozen := e.active.IsFrozen()
 	e.mu.Unlock()
@@ -269,14 +317,23 @@ func (e *Engine) Get(key []byte) ([]byte, bool) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	// 1. Active MemTable
-	if val, ok := e.active.Get(key); ok {
+	// 1. Active MemTable. A tombstone here must stop the search outright —
+	// it shadows whatever value an older immutable MemTable might still hold
+	// for the same key (a plain MemTable.Get can't distinguish "absent, keep
+	// looking" from "tombstoned, stop", so GetRaw is used instead).
+	if val, exists, deleted := e.active.GetRaw(key); exists {
+		if deleted {
+			return nil, false
+		}
 		return val, true
 	}
 
-	// 2. Immutable MemTables (newest first)
+	// 2. Immutable MemTables (newest first) — same tombstone-stops-the-search rule.
 	for i := len(e.immutable) - 1; i >= 0; i-- {
-		if val, ok := e.immutable[i].Get(key); ok {
+		if val, exists, deleted := e.immutable[i].GetRaw(key); exists {
+			if deleted {
+				return nil, false
+			}
 			return val, true
 		}
 	}
@@ -330,18 +387,51 @@ func (e *Engine) RebuildFST() error {
 // triggers a background flush of the frozen table.
 func (e *Engine) rotateAndFlush() {
 	e.mu.Lock()
+	e.rotateLocked()
+	e.mu.Unlock()
+}
+
+// rotateLocked swaps out the current active MemTable for a fresh one and
+// queues the old one for a background flush. Caller must hold e.mu.
+//
+// This is also called defensively from Put/Delete/applyReplay BEFORE writing
+// when the active table is already frozen (rather than only after a write
+// freezes it) — without this, a MemTable that starts out frozen (e.g. WAL
+// replay hit the size cap mid-recovery) would reject every future write
+// forever, since MemTable.Put/Delete short-circuit once frozen.
+func (e *Engine) rotateLocked() {
 	frozen := e.active
 	e.active = memtable.NewMemTable(e.cfg.MemTableMaxSize)
 	e.immutable = append(e.immutable, frozen)
-	e.mu.Unlock()
 
 	e.flushWg.Add(1)
 	go func() {
 		defer e.flushWg.Done()
-		if err := e.flushImmutable(frozen); err != nil {
-			slog.Error("SSTable flush failed", "error", err)
+		if err := e.flushImmutableWithRetry(frozen); err != nil {
+			slog.Error("SSTable flush failed after retries — table stays queued for the next flush/restart", "error", err)
 		}
 	}()
+}
+
+// flushImmutableWithRetry retries a transient flush failure (e.g. a momentary
+// disk error) a bounded number of times with backoff before giving up. On
+// total failure the MemTable is left in e.immutable (never dropped) so a
+// later ForceFlush, or a WAL replay on restart, can still recover the data.
+func (e *Engine) flushImmutableWithRetry(mt *memtable.MemTable) error {
+	const maxAttempts = 4
+	backoff := 200 * time.Millisecond
+	var err error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err = e.flushImmutable(mt); err == nil {
+			return nil
+		}
+		if attempt < maxAttempts {
+			slog.Warn("SSTable flush failed, retrying", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+		}
+	}
+	return err
 }
 
 // flushImmutable flushes a frozen MemTable to an SSTable via the group
@@ -373,12 +463,20 @@ func (e *Engine) flushImmutable(mt *memtable.MemTable) error {
 		maxKey := make([]byte, len(entries[len(entries)-1].Key))
 		copy(maxKey, entries[len(entries)-1].Key)
 
+		var seq int64
+		if m := flushFileRe.FindStringSubmatch(path); m != nil {
+			if n, perr := strconv.ParseInt(m[1], 10, 64); perr == nil {
+				seq = n
+			}
+		}
+
 		e.compactor.AddSSTable(&compaction.SSTableMeta{
 			Path:   path,
 			MinKey: minKey,
 			MaxKey: maxKey,
 			Size:   size,
 			Level:  0,
+			Seq:    seq,
 		})
 	}
 

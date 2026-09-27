@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"math"
@@ -265,11 +266,25 @@ func (w *WAL) Append(ctx context.Context, r *Record) (uint64, error) {
 // Recover reads all valid records from file, returning:
 //   - the slice of decoded records in the order they were written
 //   - the byte offset of the last valid record (use to truncate a corrupt tail)
-//   - any hard I/O error (CRC mismatches are not errors — they stop iteration)
+//   - any hard I/O error (CRC mismatches and torn tails are NOT errors — they
+//     just stop iteration and truncate; a genuine I/O error is propagated so
+//     the caller fails loudly instead of silently losing acknowledged writes)
+//
+// A "torn tail" — an incomplete final record left by a crash mid-write — is
+// distinguished from a large-but-valid record by comparing the record's
+// declared length against the bytes physically remaining in the file, not
+// against a fixed byte ceiling. A record legitimately larger than any fixed
+// ceiling (e.g. a big document) must never be treated as corruption.
 func Recover(file *os.File) ([]Record, int64, error) {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, 0, err
 	}
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	fileSize := info.Size()
 
 	var records []Record
 	var offset int64
@@ -277,36 +292,55 @@ func Recover(file *os.File) ([]Record, int64, error) {
 	reader := bufio.NewReader(file)
 
 	for {
+		remaining := fileSize - offset
+		if remaining <= 0 {
+			break
+		}
+
 		// --- CRC ---
 		crcBuf := make([]byte, crcSize)
 		_, err := io.ReadFull(reader, crcBuf)
-		if err == io.EOF {
-			break
-		}
 		if err != nil {
-			// Partial read at end of file — treat as a truncated tail.
-			return records, offset, nil
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if errors.Is(err, io.ErrUnexpectedEOF) {
+				// Torn tail: fewer bytes than a header remain.
+				return records, offset, nil
+			}
+			return records, offset, fmt.Errorf("wal: read entry header: %w", err)
 		}
 		storedCRC := binary.LittleEndian.Uint32(crcBuf)
 
 		// --- LENGTH ---
 		lenBuf := make([]byte, lenSize)
-		_, err = io.ReadFull(reader, lenBuf)
-		if err != nil {
-			return records, offset, nil
+		if _, err := io.ReadFull(reader, lenBuf); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return records, offset, nil
+			}
+			return records, offset, fmt.Errorf("wal: read entry length: %w", err)
 		}
 		length := binary.LittleEndian.Uint32(lenBuf)
 
-		if length == 0 || length > 10*1024*1024 {
-			// Sanity guard: 0-length or suspiciously large — stop here.
+		if length == 0 {
+			// A zero-length record can never be valid — torn/corrupt tail.
+			return records, offset, nil
+		}
+
+		// A record whose declared length claims more bytes than physically
+		// remain in the file cannot possibly be complete: this is a torn
+		// tail, regardless of how large the declared length is.
+		if int64(headerSize)+int64(length) > remaining {
 			return records, offset, nil
 		}
 
 		// --- BODY ---
 		body := make([]byte, length)
-		_, err = io.ReadFull(reader, body)
-		if err != nil {
-			return records, offset, nil
+		if _, err := io.ReadFull(reader, body); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return records, offset, nil
+			}
+			return records, offset, fmt.Errorf("wal: read entry body: %w", err)
 		}
 
 		// --- CRC CHECK ---
@@ -314,7 +348,9 @@ func Recover(file *os.File) ([]Record, int64, error) {
 		h.Write(lenBuf)
 		h.Write(body)
 		if h.Sum32() != storedCRC {
-			// CRC mismatch: corruption detected, stop and truncate from here.
+			// CRC mismatch on an otherwise complete-looking record: treat as
+			// a torn/corrupted tail and stop here, same as a physical torn
+			// write — only the tail of an append-only log can be corrupt.
 			return records, offset, nil
 		}
 
@@ -465,13 +501,16 @@ func (w *WAL) Reset() error {
 	if err := w.buf.Flush(); err != nil {
 		return err
 	}
-	if err := w.file.Sync(); err != nil {
-		return err
-	}
 	if err := w.file.Truncate(0); err != nil {
 		return err
 	}
 	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	// Sync AFTER truncating (not before): what must be durable is the
+	// truncation itself, so a crash right after Reset can't come back to a
+	// half-truncated WAL sitting alongside an already-durable snapshot.
+	if err := w.file.Sync(); err != nil {
 		return err
 	}
 	w.buf.Reset(w.file)

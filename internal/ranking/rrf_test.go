@@ -146,3 +146,23 @@ func TestRRFScore_DeterministicOrder(t *testing.T) {
 		}
 	}
 }
+
+// cmpFloat previously used an epsilon tolerance (1e-9) that broke
+// transitivity (a≈b, b≈c, but a>c is possible) and mishandled equal Infs.
+// It must now be an exact comparator so tiny-but-real differences (e.g.
+// coverage scores scaled to sit below BM25's range) are preserved instead of
+// being folded into a tie.
+func TestCmpFloat_ExactAndTransitive(t *testing.T) {
+	if got := cmpFloat(3e-10, 6e-10); got >= 0 {
+		t.Errorf("cmpFloat(3e-10, 6e-10) = %d, want negative", got)
+	}
+	if got := cmpFloat(1.0, 1.0); got != 0 {
+		t.Errorf("cmpFloat(1.0, 1.0) = %d, want 0", got)
+	}
+	if got := cmpFloat(math.Inf(1), math.Inf(1)); got != 0 {
+		t.Errorf("cmpFloat(+Inf, +Inf) = %d, want 0", got)
+	}
+	if got := cmpFloat(math.Inf(1), 1.0); got <= 0 {
+		t.Errorf("cmpFloat(+Inf, 1.0) = %d, want positive", got)
+	}
+}

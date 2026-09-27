@@ -91,14 +91,24 @@ func (m *MemTable) Delete(key []byte) error {
 // Get returns (value, true) for a live key, or (nil, false) if the key is
 // absent or a tombstone.
 func (m *MemTable) Get(key []byte) ([]byte, bool) {
-	if len(key) == 0 {
-		return nil, false
-	}
-	val, exists, deleted := m.list.get(key)
+	val, exists, deleted := m.GetRaw(key)
 	if !exists || deleted {
 		return nil, false
 	}
 	return val, true
+}
+
+// GetRaw returns the raw tri-state lookup result: (value, exists, deleted).
+// exists=false means the key was never written to this MemTable at all —
+// callers falling through a stack of tables (active -> immutable -> ...)
+// should keep searching older layers. exists=true, deleted=true means a
+// tombstone was found — callers MUST stop and treat the key as absent
+// without checking older layers, since a tombstone shadows any older value.
+func (m *MemTable) GetRaw(key []byte) (value []byte, exists bool, deleted bool) {
+	if len(key) == 0 {
+		return nil, false, false
+	}
+	return m.list.get(key)
 }
 
 // Iterator returns all entries in lexicographic key order. Because the

@@ -2,6 +2,7 @@ package wal
 
 import (
 	"context"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -178,6 +179,83 @@ func TestWAL_Recovery_CorruptTailTruncated(t *testing.T) {
 	}
 	if string(records[0].Key) != "good" {
 		t.Errorf("wrong key after recovery: %q", records[0].Key)
+	}
+}
+
+func TestWAL_Recovery_LargeValidRecordNotTreatedAsCorruption(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "large.wal")
+	ctx := context.Background()
+
+	w, _, err := OpenWAL(path, WALConfig{SyncMode: SyncAlways})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// >10MB value — must NOT be truncated as "corruption" (regression for C4).
+	bigVal := make([]byte, 11*1024*1024)
+	for i := range bigVal {
+		bigVal[i] = byte(i)
+	}
+	if _, err := w.Append(ctx, &Record{Op: OpTypePut, Key: []byte("big"), Value: bigVal}); err != nil {
+		t.Fatalf("append large record: %v", err)
+	}
+	if _, err := w.Append(ctx, &Record{Op: OpTypePut, Key: []byte("after"), Value: []byte("small")}); err != nil {
+		t.Fatalf("append trailing record: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	w2, records, err := OpenWAL(path, WALConfig{SyncMode: SyncAlways})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = w2.Close() })
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records recovered (large record must survive), got %d", len(records))
+	}
+	if len(records[0].Value) != len(bigVal) {
+		t.Errorf("large record value truncated: got %d bytes, want %d", len(records[0].Value), len(bigVal))
+	}
+	if string(records[1].Key) != "after" {
+		t.Errorf("record after the large one was lost: got key %q", records[1].Key)
+	}
+}
+
+func TestWAL_Recovery_TornTailDeclaredLengthExceedsFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "torn.wal")
+	ctx := context.Background()
+
+	w, _, err := OpenWAL(path, WALConfig{SyncMode: SyncAlways})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Append(ctx, &Record{Op: OpTypePut, Key: []byte("good"), Value: []byte("record")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a crash mid-write: a header claiming a huge body that was
+	// never actually written.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := make([]byte, headerSize)
+	binary.LittleEndian.PutUint32(header[crcSize:], 5*1024*1024) // claims 5MB, none follows
+	if _, err := f.Write(header); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	w2, records, err := OpenWAL(path, WALConfig{SyncMode: SyncAlways})
+	if err != nil {
+		t.Fatalf("recovery with torn declared-length tail: %v", err)
+	}
+	t.Cleanup(func() { _ = w2.Close() })
+	if len(records) != 1 || string(records[0].Key) != "good" {
+		t.Fatalf("expected only the 'good' record recovered, got %+v", records)
 	}
 }
 

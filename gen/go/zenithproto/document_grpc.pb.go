@@ -22,6 +22,8 @@ const (
 	SearchService_IndexDocuments_FullMethodName = "/zenith.SearchService/IndexDocuments"
 	SearchService_Search_FullMethodName         = "/zenith.SearchService/Search"
 	SearchService_IndexPDF_FullMethodName       = "/zenith.SearchService/IndexPDF"
+	SearchService_GetDocument_FullMethodName    = "/zenith.SearchService/GetDocument"
+	SearchService_DeleteDocument_FullMethodName = "/zenith.SearchService/DeleteDocument"
 )
 
 // SearchServiceClient is the client API for SearchService service.
@@ -31,6 +33,8 @@ type SearchServiceClient interface {
 	IndexDocuments(ctx context.Context, in *IndexRequest, opts ...grpc.CallOption) (*IndexResponse, error)
 	Search(ctx context.Context, in *SearchRequest, opts ...grpc.CallOption) (*SearchResponse, error)
 	IndexPDF(ctx context.Context, in *IndexPDFRequest, opts ...grpc.CallOption) (*IndexPDFResponse, error)
+	GetDocument(ctx context.Context, in *GetDocumentRequest, opts ...grpc.CallOption) (*GetDocumentResponse, error)
+	DeleteDocument(ctx context.Context, in *DeleteDocumentRequest, opts ...grpc.CallOption) (*DeleteDocumentResponse, error)
 }
 
 type searchServiceClient struct {
@@ -71,6 +75,26 @@ func (c *searchServiceClient) IndexPDF(ctx context.Context, in *IndexPDFRequest,
 	return out, nil
 }
 
+func (c *searchServiceClient) GetDocument(ctx context.Context, in *GetDocumentRequest, opts ...grpc.CallOption) (*GetDocumentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetDocumentResponse)
+	err := c.cc.Invoke(ctx, SearchService_GetDocument_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *searchServiceClient) DeleteDocument(ctx context.Context, in *DeleteDocumentRequest, opts ...grpc.CallOption) (*DeleteDocumentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteDocumentResponse)
+	err := c.cc.Invoke(ctx, SearchService_DeleteDocument_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SearchServiceServer is the server API for SearchService service.
 // All implementations must embed UnimplementedSearchServiceServer
 // for forward compatibility.
@@ -78,6 +102,8 @@ type SearchServiceServer interface {
 	IndexDocuments(context.Context, *IndexRequest) (*IndexResponse, error)
 	Search(context.Context, *SearchRequest) (*SearchResponse, error)
 	IndexPDF(context.Context, *IndexPDFRequest) (*IndexPDFResponse, error)
+	GetDocument(context.Context, *GetDocumentRequest) (*GetDocumentResponse, error)
+	DeleteDocument(context.Context, *DeleteDocumentRequest) (*DeleteDocumentResponse, error)
 	mustEmbedUnimplementedSearchServiceServer()
 }
 
@@ -96,6 +122,12 @@ func (UnimplementedSearchServiceServer) Search(context.Context, *SearchRequest) 
 }
 func (UnimplementedSearchServiceServer) IndexPDF(context.Context, *IndexPDFRequest) (*IndexPDFResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method IndexPDF not implemented")
+}
+func (UnimplementedSearchServiceServer) GetDocument(context.Context, *GetDocumentRequest) (*GetDocumentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetDocument not implemented")
+}
+func (UnimplementedSearchServiceServer) DeleteDocument(context.Context, *DeleteDocumentRequest) (*DeleteDocumentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteDocument not implemented")
 }
 func (UnimplementedSearchServiceServer) mustEmbedUnimplementedSearchServiceServer() {}
 func (UnimplementedSearchServiceServer) testEmbeddedByValue()                       {}
@@ -172,6 +204,42 @@ func _SearchService_IndexPDF_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SearchService_GetDocument_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetDocumentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SearchServiceServer).GetDocument(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SearchService_GetDocument_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SearchServiceServer).GetDocument(ctx, req.(*GetDocumentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SearchService_DeleteDocument_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteDocumentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SearchServiceServer).DeleteDocument(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SearchService_DeleteDocument_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SearchServiceServer).DeleteDocument(ctx, req.(*DeleteDocumentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SearchService_ServiceDesc is the grpc.ServiceDesc for SearchService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -190,6 +258,14 @@ var SearchService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "IndexPDF",
 			Handler:    _SearchService_IndexPDF_Handler,
+		},
+		{
+			MethodName: "GetDocument",
+			Handler:    _SearchService_GetDocument_Handler,
+		},
+		{
+			MethodName: "DeleteDocument",
+			Handler:    _SearchService_DeleteDocument_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

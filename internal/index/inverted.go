@@ -34,3 +34,21 @@ func (idx *InvertedIndex) GetDocFragments() map[uint64][]string { return idx.doc
 func (idx *InvertedIndex) GetDocTokens() map[uint64][]string   { return idx.docTokens }
 func (idx *InvertedIndex) GetVocabulary() map[int][]string     { return idx.vocabulary }
 func (idx *InvertedIndex) GetData() map[string][]uint64        { return idx.data }
+
+// ReplaceAll atomically swaps every backing map for freshly decoded ones.
+// Callers must hold idx.Lock() for the duration of the swap.
+func (idx *InvertedIndex) ReplaceAll(
+	data map[string][]uint64,
+	tokenCounts map[string]int,
+	vocabulary map[int][]string,
+	globalSeen map[string]int,
+	docFragments map[uint64][]string,
+	docTokens map[uint64][]string,
+) {
+	idx.data = data
+	idx.tokenCounts = tokenCounts
+	idx.vocabulary = vocabulary
+	idx.globalSeen = globalSeen
+	idx.docFragments = docFragments
+	idx.docTokens = docTokens
+}

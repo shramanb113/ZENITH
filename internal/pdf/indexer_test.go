@@ -1,6 +1,9 @@
 package pdf
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -173,6 +176,106 @@ func TestSplitChunks_LargeDocument(t *testing.T) {
 	// expected ≈ ceil((10000-300)/250) + 1 = 39 chunks
 	if len(chunks) < 30 || len(chunks) > 50 {
 		t.Errorf("got %d chunks for 10000 words, expected ~39", len(chunks))
+	}
+}
+
+// ── allowed-root path restriction ───────────────────────────────────────────
+
+func TestSetAllowedRoot_CreatesDirectory(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "pdfs")
+
+	p := NewIndexer(nil)
+	if err := p.SetAllowedRoot(root); err != nil {
+		t.Fatalf("SetAllowedRoot: %v", err)
+	}
+	if _, err := os.Stat(root); err != nil {
+		t.Fatalf("allowed root not created: %v", err)
+	}
+}
+
+func TestResolveWithinRoot_AllowsFileInsideRoot(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "doc.pdf")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveWithinRoot(resolvedRoot, target)
+	if err != nil {
+		t.Fatalf("resolveWithinRoot: unexpected error: %v", err)
+	}
+	if filepath.Base(got) != "doc.pdf" {
+		t.Errorf("resolved path = %q, want basename doc.pdf", got)
+	}
+}
+
+func TestResolveWithinRoot_RejectsParentTraversal(t *testing.T) {
+	root := t.TempDir()
+	pdfDir := filepath.Join(root, "pdfs")
+	if err := os.MkdirAll(pdfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(root, "secret.pdf")
+	if err := os.WriteFile(secret, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	traversal := filepath.Join(pdfDir, "..", "secret.pdf")
+	if _, err := resolveWithinRoot(pdfDir, traversal); err == nil {
+		t.Fatalf("resolveWithinRoot: expected error for path escaping root via ..")
+	}
+}
+
+func TestResolveWithinRoot_RejectsSymlinkEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated privileges on Windows")
+	}
+	root := t.TempDir()
+	pdfDir := filepath.Join(root, "pdfs")
+	if err := os.MkdirAll(pdfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(root, "secret.pdf")
+	if err := os.WriteFile(secret, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(pdfDir, "escape.pdf")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := resolveWithinRoot(pdfDir, link); err == nil {
+		t.Fatalf("resolveWithinRoot: expected error for symlink escaping root")
+	}
+}
+
+func TestIndex_RejectsPathOutsideAllowedRoot(t *testing.T) {
+	root := t.TempDir()
+	pdfDir := filepath.Join(root, "pdfs")
+	if err := os.MkdirAll(pdfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside.pdf")
+	if err := os.WriteFile(outside, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewIndexer(nil)
+	if err := p.SetAllowedRoot(pdfDir); err != nil {
+		t.Fatalf("SetAllowedRoot: %v", err)
+	}
+
+	_, err := p.Index(nil, "doc1", filepath.Join(pdfDir, "..", "outside.pdf"))
+	if err == nil {
+		t.Fatalf("Index: expected error for path outside allowed root")
+	}
+	if !strings.Contains(err.Error(), "outside the allowed root") {
+		t.Errorf("Index error = %v, want mention of allowed root", err)
 	}
 }
 

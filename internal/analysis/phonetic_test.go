@@ -22,6 +22,11 @@ func TestSoundex(t *testing.T) {
 		{"", ""},
 		{"A", "A000"},
 		{"Go", "G000"},
+		// H/W rule: H and W don't break adjacency between the consonants
+		// on either side (unlike a true vowel), so C is treated as
+		// adjacent to S through the H.
+		{"Ashcraft", "A261"},
+		{"Ashcroft", "A261"},
 	}
 	for _, c := range cases {
 		got := Soundex(c.input)

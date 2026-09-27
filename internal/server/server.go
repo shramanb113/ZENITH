@@ -76,10 +76,12 @@ func (s *ZenithServer) Search(
 
 	protoResults := make([]*zenithproto.SearchResult, 0, len(results))
 	for _, r := range results {
+		text, _ := s.Engine.GetText(r.ID)
 		protoResults = append(protoResults, &zenithproto.SearchResult{
-			Id:     r.ID,
-			Score:  r.Score,
-			Fields: parseChunkFields(r.ID),
+			Id:           r.ID,
+			Score:        r.Score,
+			Fields:       parseChunkFields(r.ID),
+			OriginalText: text,
 		})
 	}
 
@@ -119,6 +121,48 @@ func (s *ZenithServer) IndexPDF(
 		Status:        true,
 		Message:       fmt.Sprintf("indexed %d chunks from %s", count, req.GetFilePath()),
 		ChunksIndexed: int32(count),
+	}, nil
+}
+
+func (s *ZenithServer) GetDocument(
+	ctx context.Context,
+	req *zenithproto.GetDocumentRequest,
+) (*zenithproto.GetDocumentResponse, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id must not be empty")
+	}
+
+	text, found := s.Engine.GetText(req.GetId())
+	if !found {
+		return &zenithproto.GetDocumentResponse{Found: false, Id: req.GetId()}, nil
+	}
+	return &zenithproto.GetDocumentResponse{Found: true, Id: req.GetId(), Text: text}, nil
+}
+
+func (s *ZenithServer) DeleteDocument(
+	ctx context.Context,
+	req *zenithproto.DeleteDocumentRequest,
+) (*zenithproto.DeleteDocumentResponse, error) {
+	if req.GetId() == "" {
+		return &zenithproto.DeleteDocumentResponse{Status: false, Message: "id must not be empty"},
+			status.Error(codes.InvalidArgument, "id must not be empty")
+	}
+
+	if err := s.Engine.Remove(ctx, req.GetId()); err != nil {
+		msg := fmt.Sprintf("delete failed: %v", err)
+		return &zenithproto.DeleteDocumentResponse{Status: false, Message: msg}, status.Error(codes.Internal, msg)
+	}
+
+	l := s.Logger
+	if l == nil {
+		l = activitylog.Noop()
+	}
+	l.Log("DELETE", req.GetId())
+
+	slog.Info("Document deleted", "id", req.GetId())
+	return &zenithproto.DeleteDocumentResponse{
+		Status:  true,
+		Message: fmt.Sprintf("document %s deleted", req.GetId()),
 	}, nil
 }
 

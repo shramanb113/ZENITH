@@ -2,7 +2,6 @@ package ranking
 
 import (
 	"cmp"
-	"math"
 	"slices"
 	"sort"
 	"strings"
@@ -158,17 +157,27 @@ func (r *RRFRanker) Score(
 	return results
 }
 
-// cmpFloat compares two float64s with an epsilon tolerance to avoid
-// false tie-breaks caused by floating-point arithmetic noise.
-// Returns negative, zero, or positive — same contract as cmp.Compare.
+// cmpFloat compares two float64s exactly. Returns negative, zero, or
+// positive — same contract as cmp.Compare.
+//
+// An earlier version used an epsilon tolerance (1e-9) intended to smooth
+// over floating-point noise. In practice it broke sort.Slice's ordering
+// contract: with a<eps>b<eps>c not implying a<eps>c, the comparator was
+// non-transitive, which sort.Slice assumes and can silently misorder or
+// panic over. Every value compared here is deterministically recomputed
+// per search (not measured or accumulated across independent floating
+// point paths), so exact comparison is both correct and reproducible; a
+// real difference of a few billionths between candidates is signal (e.g.
+// coverage-scaled scores for documents with no BM25 hit), not noise, and
+// exact comparison preserves it instead of discarding it into a tie that
+// falls back to alphabetical ID order.
 func cmpFloat(a, b float64) int {
-	const eps = 1e-9
-	diff := a - b
-	if math.Abs(diff) < eps {
+	switch {
+	case a > b:
+		return 1
+	case a < b:
+		return -1
+	default:
 		return 0
 	}
-	if diff > 0 {
-		return 1
-	}
-	return -1
 }

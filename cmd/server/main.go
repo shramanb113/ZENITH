@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"os"
@@ -69,7 +70,22 @@ func main() {
 	engine.SetTermStore(storageEng)
 
 	if err := engine.Load("zenith.db"); err != nil {
-		slog.Info("No existing index found, starting fresh.")
+		switch {
+		case os.IsNotExist(err):
+			slog.Info("No existing index found, starting fresh.")
+		case errors.Is(err, index.ErrIncompatibleVersion):
+			slog.Error("Index file is from an incompatible version — rebuild required", "error", err)
+			os.Exit(1)
+		case len(storageEng.Records()) == 0:
+			// The gob snapshot exists but failed to load, and there is no WAL
+			// delta to reconstruct from. Starting "fresh" here would silently
+			// discard the corrupt file's data on the next Save — surface it
+			// instead so the operator can investigate or restore a backup.
+			slog.Error("Index file exists but failed to load, and no WAL delta is available to recover from", "error", err)
+			os.Exit(1)
+		default:
+			slog.Warn("Index file failed to load; rebuilding from WAL delta only", "error", err)
+		}
 	} else {
 		slog.Info("Successfully loaded index from disk.")
 		alog.Log("LOADED", "zenith.db")
@@ -94,6 +110,14 @@ func main() {
 	engine.SetDocumentJournal(storageEng)
 
 	pdfIndexer := pdf.NewIndexer(engine, alog)
+	// IndexPDF is exposed over the network via gRPC with no authentication;
+	// file_path comes straight from the caller. Without this, any client
+	// that can reach :8080 could make the server open and index arbitrary
+	// files on the host's filesystem. Restrict it to a known directory.
+	if err := pdfIndexer.SetAllowedRoot("./data/pdfs"); err != nil {
+		slog.Error("Failed to set up PDF indexing root", "error", err)
+		os.Exit(1)
+	}
 
 	grpcServer := grpc.NewServer()
 	zenithproto.RegisterSearchServiceServer(grpcServer, &server.ZenithServer{

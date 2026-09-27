@@ -2,10 +2,25 @@ package embedding
 
 import (
 	"context"
-	"hash/fnv"
-	"math"
+	"errors"
 )
 
+// ErrEmbeddingUnavailable is returned by DeterministicEmbedder to signal that
+// no real embedding model is configured. The index engine treats any
+// Embed/EmbedBatch error as "degrade to lexical-only search" (see CLAUDE.md:
+// "Embedding failures are non-fatal — the engine degrades to lexical-only
+// search"). DeterministicEmbedder previously fabricated a hash-seeded random
+// unit vector instead of erroring; that vector carried no semantic meaning
+// but was still fused into ranking at full VectorWeight, silently wrecking
+// result quality — a document could be missing from the top 10 for its own
+// exact-match query while an unrelated document with a favourable random dot
+// product took its place.
+var ErrEmbeddingUnavailable = errors.New("embedding: no embedding model available (deterministic fallback)")
+
+// DeterministicEmbedder is a placeholder Embedder used only to satisfy the
+// Embedder interface when no real model (ONNX, Ollama, Nerve, local) is
+// configured. It never produces a vector — every call fails, so callers
+// degrade to lexical-only search instead of ranking on meaningless noise.
 type DeterministicEmbedder struct {
 	dims int
 }
@@ -14,39 +29,12 @@ func NewDeterministicEmbedder(dims int) *DeterministicEmbedder {
 	return &DeterministicEmbedder{dims: dims}
 }
 
-// Embed produces a stable, text-dependent unit vector via FNV-64a seeded xorshift.
-// Different texts produce different vectors so lexical-fallback mode still ranks results.
-func (d *DeterministicEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
-	h := fnv.New64a()
-	h.Write([]byte(text))
-	seed := h.Sum64()
-
-	result := make([]float32, d.dims)
-	var sumSq float64
-	for i := range result {
-		seed ^= seed << 13
-		seed ^= seed >> 7
-		seed ^= seed << 17
-		v := float32(int64(seed)) / float32(1<<63)
-		result[i] = v
-		sumSq += float64(v) * float64(v)
-	}
-	if sumSq > 0 {
-		norm := float32(math.Sqrt(sumSq))
-		for i := range result {
-			result[i] /= norm
-		}
-	}
-	return result, nil
+func (d *DeterministicEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
+	return nil, ErrEmbeddingUnavailable
 }
 
-func (d *DeterministicEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
-	results := make([][]float32, len(texts))
-	for i, text := range texts {
-		emb, _ := d.Embed(context.Background(), text)
-		results[i] = emb
-	}
-	return results, nil
+func (d *DeterministicEmbedder) EmbedBatch(_ context.Context, _ []string) ([][]float32, error) {
+	return nil, ErrEmbeddingUnavailable
 }
 
 func (d *DeterministicEmbedder) Dimensions() int {

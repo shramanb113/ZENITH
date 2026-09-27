@@ -2,6 +2,7 @@ package index
 
 import (
 	"context"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"slices"
@@ -595,4 +596,147 @@ func TestIndexEngine_JournalNilSafe(t *testing.T) {
 	if err := e.Remove(ctx, "doc1"); err != nil {
 		t.Fatalf("Remove without journal: %v", err)
 	}
+}
+
+// ─── Audit fix regressions ─────────────────────────────────────────────────────
+
+// The BK-tree (fuzzy search) was never persisted or rebuilt on Load, so
+// fuzzy search silently died after every restart.
+func TestEngine_Load_RebuildsBKTree(t *testing.T) {
+	e := newTestEngine()
+	ctx := context.Background()
+
+	if err := e.Add(ctx, "doc1", "kubernetes cluster deployment"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "bktree.db")
+	if err := e.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	e2 := newTestEngine()
+	if err := e2.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// "kuberntes" is a 1-edit typo of "kubernetes" — must be found via the
+	// BK-tree's fuzzy pass after Load, not just via exact/n-gram matching.
+	results, err := e2.Search(ctx, "kuberntes")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.ID == "doc1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("fuzzy match for 'kuberntes' failed after Load — BK-tree was not rebuilt")
+	}
+}
+
+// A 64-bit doc-ID hash collision must not silently overwrite an unrelated
+// document's postings, vector and BM25 state.
+func TestEngine_Add_RejectsIDHashCollision(t *testing.T) {
+	e := newTestEngine()
+	ctx := context.Background()
+
+	h := fnv.New64a()
+	h.Write([]byte("victim"))
+	internalID := h.Sum64()
+
+	// Simulate a genuine 64-bit hash collision: some other original ID
+	// already claims this internal ID.
+	e.idMapping[internalID] = "attacker-doc"
+
+	if err := e.Add(ctx, "victim", "hello world"); err == nil {
+		t.Fatal("expected an error on id hash collision, got nil")
+	}
+	if e.idMapping[internalID] != "attacker-doc" {
+		t.Error("colliding Add must not overwrite the existing id mapping")
+	}
+}
+
+// AddBatch previously used a non-stable sort for duplicate IDs within a
+// batch, so which duplicate "won" was nondeterministic. It must now be
+// deterministic: the last occurrence in the input wins.
+func TestEngine_AddBatch_DuplicateID_LastWins(t *testing.T) {
+	e := newTestEngine()
+	ctx := context.Background()
+
+	docs := []BatchDoc{
+		{ID: "dup", Text: "first version mentions alpha"},
+		{ID: "dup", Text: "second version mentions beta"},
+	}
+	if err := e.AddBatch(ctx, docs); err != nil {
+		t.Fatalf("AddBatch: %v", err)
+	}
+
+	betaResults, _ := e.Search(ctx, "beta")
+	foundBeta := false
+	for _, r := range betaResults {
+		if r.ID == "dup" {
+			foundBeta = true
+		}
+	}
+	if !foundBeta {
+		t.Error("expected the last batch entry (beta) to win for duplicate ID")
+	}
+
+	alphaResults, _ := e.Search(ctx, "alpha")
+	for _, r := range alphaResults {
+		if r.ID == "dup" {
+			t.Error("first batch entry (alpha) should have been fully overwritten")
+		}
+	}
+}
+
+// A blank query must return no results instead of embedding "" and
+// returning whatever the fallback/embedder considers "closest to nothing".
+func TestEngine_Search_EmptyQuery_ReturnsNoResults(t *testing.T) {
+	e := newTestEngine()
+	ctx := context.Background()
+	_ = e.Add(ctx, "doc1", "hello world")
+
+	results, err := e.Search(ctx, "")
+	if err != nil {
+		t.Fatalf("Search(\"\"): %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("expected no results for an empty query, got %d", len(results))
+	}
+}
+
+// Re-indexing a document while the embedder is down must drop the doc's
+// stale vector rather than leave a vector for content it no longer has.
+func TestEngine_ReIndex_DropsStaleVectorOnEmbedFailure(t *testing.T) {
+	cfg := config.DefaultConfig()
+	ana := analysis.NewStandardAnalyzer()
+	eng := NewEngine(cfg, embedding.NewDeterministicEmbedder(4), ranking.NewRRFRanker(0, 0), ana)
+	ctx := context.Background()
+
+	firstVec := []float32{1, 0, 0, 0}
+	if err := eng.AddWithVector(ctx, "doc1", "original content", firstVec); err != nil {
+		t.Fatalf("AddWithVector: %v", err)
+	}
+	if _, ok := eng.vectors.GetVectors()[docInternalID("doc1")]; !ok {
+		t.Fatal("expected doc1 to have a stored vector after AddWithVector")
+	}
+
+	// Re-index without a vector; DeterministicEmbedder always errors, so this
+	// exercises the embed-failure path.
+	if err := eng.Add(ctx, "doc1", "updated content, embedder down"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if _, ok := eng.vectors.GetVectors()[docInternalID("doc1")]; ok {
+		t.Error("stale vector from the previous version was not dropped")
+	}
+}
+
+func docInternalID(originalID string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(originalID))
+	return h.Sum64()
 }

@@ -3,11 +3,46 @@ package embedding
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"sync/atomic"
 	"testing"
 )
 
-// countingEmbedder wraps DeterministicEmbedder and counts Embed calls.
+// fakeVectorEmbedder returns a stable, text-dependent vector. Unlike the
+// production DeterministicEmbedder (which must always fail so the engine
+// never fuses meaningless noise into ranking — see ErrEmbeddingUnavailable),
+// these caching tests need an embedder that actually succeeds so cache
+// hit/miss call-counting is meaningful.
+type fakeVectorEmbedder struct{ dims int }
+
+func newFakeVectorEmbedder(dims int) *fakeVectorEmbedder { return &fakeVectorEmbedder{dims: dims} }
+
+func (f *fakeVectorEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
+	h := fnv.New64a()
+	h.Write([]byte(text))
+	seed := h.Sum64()
+	out := make([]float32, f.dims)
+	for i := range out {
+		seed ^= seed << 13
+		seed ^= seed >> 7
+		seed ^= seed << 17
+		out[i] = float32(int64(seed)) / float32(1<<63)
+	}
+	return out, nil
+}
+
+func (f *fakeVectorEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i, t := range texts {
+		v, _ := f.Embed(ctx, t)
+		out[i] = v
+	}
+	return out, nil
+}
+
+func (f *fakeVectorEmbedder) Dimensions() int { return f.dims }
+
+// countingEmbedder wraps another Embedder and counts Embed calls.
 type countingEmbedder struct {
 	inner Embedder
 	calls atomic.Int64
@@ -37,7 +72,7 @@ func (e *errorEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float
 func (e *errorEmbedder) Dimensions() int { return 4 }
 
 func TestCachingEmbedder_CacheHit(t *testing.T) {
-	base := &countingEmbedder{inner: NewDeterministicEmbedder(4)}
+	base := &countingEmbedder{inner: newFakeVectorEmbedder(4)}
 	cached, err := NewCachingEmbedder(base, 100)
 	if err != nil {
 		t.Fatal(err)
@@ -56,7 +91,7 @@ func TestCachingEmbedder_CacheHit(t *testing.T) {
 }
 
 func TestCachingEmbedder_DifferentTexts(t *testing.T) {
-	base := &countingEmbedder{inner: NewDeterministicEmbedder(4)}
+	base := &countingEmbedder{inner: newFakeVectorEmbedder(4)}
 	cached, err := NewCachingEmbedder(base, 100)
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +132,7 @@ func TestCachingEmbedder_ErrorNotCached(t *testing.T) {
 }
 
 func TestCachingEmbedder_BatchCacheMiss(t *testing.T) {
-	base := &countingEmbedder{inner: NewDeterministicEmbedder(4)}
+	base := &countingEmbedder{inner: newFakeVectorEmbedder(4)}
 	cached, err := NewCachingEmbedder(base, 100)
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +150,7 @@ func TestCachingEmbedder_BatchCacheMiss(t *testing.T) {
 }
 
 func TestCachingEmbedder_BatchPartialCacheHit(t *testing.T) {
-	base := &countingEmbedder{inner: NewDeterministicEmbedder(4)}
+	base := &countingEmbedder{inner: newFakeVectorEmbedder(4)}
 	cached, err := NewCachingEmbedder(base, 100)
 	if err != nil {
 		t.Fatal(err)

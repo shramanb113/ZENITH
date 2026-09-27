@@ -8,6 +8,8 @@ service SearchService {
     rpc IndexDocuments(IndexRequest) returns (IndexResponse);
     rpc Search(SearchRequest) returns (SearchResponse);
     rpc IndexPDF(IndexPDFRequest) returns (IndexPDFResponse);
+    rpc GetDocument(GetDocumentRequest) returns (GetDocumentResponse);
+    rpc DeleteDocument(DeleteDocumentRequest) returns (DeleteDocumentResponse);
 }
 
 message IndexRequest {
@@ -28,6 +30,7 @@ message SearchResult {
     string id = 1;
     double score = 2;
     map<string, string> fields = 3;
+    string original_text = 4;
 }
 
 message SearchResponse {
@@ -58,4 +61,23 @@ message IndexPDFResponse {
     bool   status         = 1;
     string message        = 2;
     int32  chunks_indexed = 3;
+}
+
+message GetDocumentRequest {
+    string id = 1;
+}
+
+message GetDocumentResponse {
+    bool   found = 1;
+    string id    = 2;
+    string text  = 3;
+}
+
+message DeleteDocumentRequest {
+    string id = 1;
+}
+
+message DeleteDocumentResponse {
+    bool   status  = 1;
+    string message = 2;
 }

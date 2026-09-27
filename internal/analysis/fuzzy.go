@@ -2,20 +2,29 @@ package analysis
 
 import "sort"
 
-// MAX_DISTANCE is the maximum Levenshtein edit distance considered a fuzzy match.
-// Used consistently in Levenshtein early termination AND BKTree.Search.
+// MAX_DISTANCE is the default maximum Levenshtein edit distance considered a
+// fuzzy match when a caller doesn't supply its own threshold (e.g. via
+// config.FuzzyMaxDist). It is a default, not a hard cap: Levenshtein itself
+// always computes the exact distance, however large, so callers may pass any
+// threshold they like.
 const MAX_DISTANCE = 2
 
-// Levenshtein computes the edit distance between s1 and s2.
-// Returns (distance, true) when the distance is within MAX_DISTANCE.
-// Returns (0, false) when early termination fires — distance exceeds MAX_DISTANCE.
-// Callers MUST check the bool before using the int.
-func Levenshtein(s1, s2 string) (int, bool) {
-	if len(s1) > len(s2) {
-		s1, s2 = s2, s1
+// Levenshtein computes the EXACT edit distance between s1 and s2, operating
+// on runes (not bytes) so a single multi-byte character — an accented Latin
+// letter, a Devanagari character, etc. — counts as one edit, not several.
+//
+// There is no early termination: BKTree relies on the triangle inequality to
+// prune its search, which only holds if the distances used to place and
+// search nodes are exact. Terms are short (index vocabulary, query tokens),
+// so the O(n*m) DP cost here is negligible; capping it previously broke
+// correctness for no measurable benefit.
+func Levenshtein(s1, s2 string) int {
+	r1, r2 := []rune(s1), []rune(s2)
+	if len(r1) > len(r2) {
+		r1, r2 = r2, r1
 	}
 
-	n, m := len(s1), len(s2)
+	n, m := len(r1), len(r2)
 
 	prevRow := make([]int, n+1)
 	currRow := make([]int, n+1)
@@ -28,29 +37,15 @@ func Levenshtein(s1, s2 string) (int, bool) {
 		currRow[0] = j
 		for i := 1; i <= n; i++ {
 			cost := 1
-			if s1[i-1] == s2[j-1] {
+			if r1[i-1] == r2[j-1] {
 				cost = 0
 			}
 			currRow[i] = min(prevRow[i]+1, currRow[i-1]+1, prevRow[i-1]+cost)
 		}
-
-		// Early termination: if every value in currRow exceeds MAX_DISTANCE,
-		// no further rows can bring the distance back down.
-		allOver := true
-		for _, val := range currRow {
-			if val <= MAX_DISTANCE {
-				allOver = false
-				break
-			}
-		}
-		if allOver {
-			return 0, false
-		}
-
-		copy(prevRow, currRow)
+		prevRow, currRow = currRow, prevRow
 	}
 
-	return prevRow[n], true
+	return prevRow[n]
 }
 
 // -----------------------------------------------------------------------------

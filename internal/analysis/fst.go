@@ -93,17 +93,18 @@ func (d *FSTDictionary) BuildToFile(terms []string, path string) error {
 	}
 	f.Close()
 
-	// Hold the write lock for the entire close → rename → reload sequence so
-	// readers never observe a nil FST during the swap.
+	// Hold the write lock for the entire rename → reload sequence, but keep the
+	// OLD fst/built state intact until the NEW one has loaded successfully. A
+	// rename or load failure (e.g. Windows AV holding a handle) must leave
+	// query resolution exactly as usable as before this call, not silently
+	// disabled until the next successful rebuild.
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	closeFST(d.fst)
-	d.fst = nil
-	d.built = false
-
 	// On Windows: remove the destination before rename so that no external
-	// handle (cloud sync, antivirus) can block the operation.
+	// handle (cloud sync, antivirus) can block the operation. This only
+	// touches the on-disk file; the in-memory d.fst (already fully loaded via
+	// vellum.Load on Windows, not mmap'd) is unaffected until the swap below.
 	if runtime.GOOS == "windows" {
 		_ = os.Remove(path)
 	}
@@ -117,6 +118,8 @@ func (d *FSTDictionary) BuildToFile(terms []string, path string) error {
 	if err != nil {
 		return fmt.Errorf("fst: load %s: %w", path, err)
 	}
+
+	closeFST(d.fst)
 	d.fst = newFST
 	d.built = true
 	return nil

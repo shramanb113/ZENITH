@@ -42,7 +42,7 @@ func TestExpandWithSynonyms_PreservesOriginal(t *testing.T) {
 }
 
 func TestExpandWithSynonyms_AddsSynonyms(t *testing.T) {
-	// "search" maps to ["retriev","query","find","lookup"]
+	// "search" maps to ["retriev","queri","find","lookup"]
 	expanded := ExpandWithSynonyms([]string{"search"})
 	if len(expanded) <= 1 {
 		t.Errorf("expected synonyms added for 'search', got %v", expanded)
@@ -53,5 +53,59 @@ func TestExpandWithSynonyms_Empty(t *testing.T) {
 	got := ExpandWithSynonyms(nil)
 	if len(got) != 0 {
 		t.Errorf("expected empty for nil input, got %v", got)
+	}
+}
+
+// TestSynonymKeysReachableFromNaturalWords is a regression test for H2. Each
+// of these keys used to be stored unstemmed (or with a guessed-wrong stem),
+// so a real query using the natural word could never reach it via
+// ExpandWithSynonyms — query tokens are always stem()'s OUTPUT, never the raw
+// word. Note this deliberately checks stem(naturalWord)==key, NOT
+// stem(key)==key: Porter2 is not idempotent (e.g. stem("database")=="databas"
+// but stem("databas")=="databa"), so re-stemming an already-correct key can
+// change it — that is not a bug in the table.
+func TestSynonymKeysReachableFromNaturalWords(t *testing.T) {
+	cases := map[string]string{
+		"kubernetes":  "kubernet",
+		"clusters":    "cluster",
+		"compaction":  "compact",
+		"container":   "contain",
+		"lexical":     "lexic",
+		"memory":      "memori",
+		"pipeline":    "pipelin",
+		"query":       "queri",
+		"replication": "replic",
+		"semantic":    "semant",
+		"sstable":     "sstabl",
+		"embedding":   "embed",
+		"embed":       "emb",
+	}
+	synMu.RLock()
+	defer synMu.RUnlock()
+	for natural, wantKey := range cases {
+		if got := stem(natural); got != wantKey {
+			t.Errorf("stem(%q) = %q, want %q (test assumption out of date)", natural, got, wantKey)
+			continue
+		}
+		if _, ok := synonymMap[wantKey]; !ok {
+			t.Errorf("synonymMap has no entry for %q, unreachable from query word %q", wantKey, natural)
+		}
+	}
+}
+
+func TestCommentIndexIgnoresHashInsideToken(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"a -> b # comment", 7},
+		{"# full line comment", 0},
+		{"c# -> csharp", -1},
+		{"a -> b", -1},
+	}
+	for _, c := range cases {
+		if got := commentIndex(c.in); got != c.want {
+			t.Errorf("commentIndex(%q) = %d, want %d", c.in, got, c.want)
+		}
 	}
 }

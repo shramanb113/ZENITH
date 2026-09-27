@@ -40,14 +40,7 @@ func (t *BKTree) Add(word string) {
 
 	current := t.root
 	for {
-		dist, ok := Levenshtein(word, current.word)
-		if !ok {
-			// Distance exceeds MAX_DISTANCE — treat as a large distance.
-			// We still need to place the node, so fall through with a
-			// synthetic large distance to find/create the right child slot.
-			// Use raw DP length diff as a tiebreaker slot.
-			dist = abs(len(word)-len(current.word)) + MAX_DISTANCE + 1
-		}
+		dist := Levenshtein(word, current.word)
 
 		if dist == 0 {
 			// Exact duplicate — already in tree.
@@ -68,8 +61,10 @@ func (t *BKTree) Add(word string) {
 }
 
 // Search returns all words within maxDist edits of query using BFS.
-// The ok bool from Levenshtein is checked — false means early termination
-// fired (distance > MAX_DISTANCE), so the node is never added to results.
+// dist is always the exact Levenshtein distance, so the triangle-inequality
+// pruning window below is sound: any child stored at key childDist satisfies
+// |Levenshtein(query, child.word) - childDist| <= dist, so a child outside
+// [dist-maxDist, dist+maxDist] cannot possibly be within maxDist of query.
 func (t *BKTree) Search(query string, maxDist int) []FuzzyMatch {
 	if t.root == nil {
 		return nil
@@ -82,25 +77,17 @@ func (t *BKTree) Search(query string, maxDist int) []FuzzyMatch {
 		node := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 
-		dist, ok := Levenshtein(query, node.word)
+		dist := Levenshtein(query, node.word)
 
-		// Only collect if Levenshtein completed (ok==true) and within range.
-		if ok && dist <= maxDist {
+		if dist <= maxDist {
 			results = append(results, FuzzyMatch{
 				Word:     node.word,
 				Distance: dist,
 			})
 		}
 
-		// BKTree pruning: only recurse into children whose key is within
-		// [dist-maxDist, dist+maxDist]. When ok is false we use MAX_DISTANCE+1
-		// as the effective dist so the pruning window is still computed safely.
-		effectiveDist := dist
-		if !ok {
-			effectiveDist = MAX_DISTANCE + 1
-		}
-		lo := effectiveDist - maxDist
-		hi := effectiveDist + maxDist
+		lo := dist - maxDist
+		hi := dist + maxDist
 
 		for childDist, child := range node.children {
 			if childDist >= lo && childDist <= hi {
@@ -121,11 +108,4 @@ func (t *BKTree) Size() int {
 type FuzzyMatch struct {
 	Word     string
 	Distance int // Levenshtein distance from query
-}
-
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
 }

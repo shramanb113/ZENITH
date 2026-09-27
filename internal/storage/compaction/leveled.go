@@ -2,11 +2,11 @@ package compaction
 
 import (
 	"bytes"
+	"container/heap"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,6 +44,85 @@ type SSTableMeta struct {
 	MaxKey []byte
 	Size   int64
 	Level  int
+
+	// Seq orders SSTables by true write recency, independent of which level
+	// they currently live in. It is the flush counter value the file was
+	// created with (or, for a compaction output, the max Seq among its
+	// inputs). Duplicate keys across files are resolved by Seq, not by
+	// level or by file-slice position — L0 can hold several files with
+	// overlapping key ranges, and slice/level order alone doesn't tell you
+	// which one was written last.
+	Seq int64
+}
+
+// ManifestEntry is the on-disk representation of one live SSTable, persisted
+// so a restart can rediscover the full level structure instead of starting
+// from an empty set (which would make the next flush reuse and overwrite a
+// stale file number).
+type ManifestEntry struct {
+	Path  string `json:"path"`
+	Level int    `json:"level"`
+	Seq   int64  `json:"seq"`
+}
+
+// Snapshot returns the current set of live SSTables across all levels, for persistence.
+func (c *Compactor) Snapshot() []ManifestEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []ManifestEntry
+	for lvl, metas := range c.levels {
+		for _, m := range metas {
+			out = append(out, ManifestEntry{Path: m.Path, Level: lvl, Seq: m.Seq})
+		}
+	}
+	return out
+}
+
+// LoadSnapshot repopulates level state from a previously persisted manifest.
+// Must be called before Run(). opener reads back the min/max key and size of
+// each file (Reader already exposes these; nothing needs to be duplicated
+// into the manifest itself). Entries that fail to open are skipped with a
+// warning rather than aborting startup — a single missing/corrupt SSTable
+// file must not block the engine from opening.
+func (c *Compactor) LoadSnapshot(entries []ManifestEntry, opener func(path string) (minKey, maxKey []byte, size int64, err error)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, e := range entries {
+		if e.Level < 0 || e.Level >= len(c.levels) {
+			continue
+		}
+		minKey, maxKey, size, err := opener(e.Path)
+		if err != nil {
+			slog.Warn("compaction: skipping SSTable from manifest", "path", e.Path, "error", err)
+			continue
+		}
+		c.levels[e.Level] = append(c.levels[e.Level], &SSTableMeta{
+			Path:   e.Path,
+			MinKey: minKey,
+			MaxKey: maxKey,
+			Size:   size,
+			Level:  e.Level,
+			Seq:    e.Seq,
+		})
+	}
+}
+
+// SetOnChange registers a callback invoked (without c.mu held) whenever the
+// live SSTable set changes — used by the storage Engine to persist the
+// manifest after every flush registration and every compaction pass.
+func (c *Compactor) SetOnChange(fn func()) {
+	c.mu.Lock()
+	c.onChange = fn
+	c.mu.Unlock()
+}
+
+func (c *Compactor) notifyChanged() {
+	c.mu.Lock()
+	fn := c.onChange
+	c.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 // ─── Compactor ────────────────────────────────────────────────────────────────
@@ -68,6 +147,7 @@ type Compactor struct {
 	stopOnce    sync.Once
 	wg          sync.WaitGroup
 	pathCounter atomic.Uint64
+	onChange    func()
 }
 
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
@@ -134,8 +214,9 @@ func (c *Compactor) Stop() {
 // Called by the storage engine after every MemTable flush.
 func (c *Compactor) AddSSTable(meta *SSTableMeta) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.levels[0] = append(c.levels[0], meta)
+	c.mu.Unlock()
+	c.notifyChanged()
 }
 
 // ─── Trigger Checks ───────────────────────────────────────────────────────────
@@ -282,11 +363,64 @@ func (c *Compactor) findOverlapping(level int, minKey, maxKey []byte) []*SSTable
 
 // ─── Merge Core ───────────────────────────────────────────────────────────────
 
+// mergeHeapItem is one input SSTable's current head entry in the k-way merge.
+type mergeHeapItem struct {
+	entry memtable.Entry
+	seq   int64
+	it    *sstable.Iterator
+}
+
+// mergeHeap orders by key ASC; ties broken by Seq DESC (newest write wins).
+// Seq — not level, and not slice/append order — is the source of truth for
+// recency: L0 alone can hold several files with overlapping key ranges (one
+// per MemTable flush), so two entries at the "same level" are not equally
+// new, and relying on the order they happened to be appended in silently
+// picks the OLDEST one instead of the newest.
+type mergeHeap []*mergeHeapItem
+
+func (h mergeHeap) Len() int { return len(h) }
+func (h mergeHeap) Less(i, j int) bool {
+	cmp := bytes.Compare(h[i].entry.Key, h[j].entry.Key)
+	if cmp != 0 {
+		return cmp < 0
+	}
+	return h[i].seq > h[j].seq
+}
+func (h mergeHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *mergeHeap) Push(x any)   { *h = append(*h, x.(*mergeHeapItem)) }
+func (h *mergeHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	old[n-1] = nil
+	*h = old[:n-1]
+	return item
+}
+
+// advance pulls the next entry from item's iterator and pushes it back onto
+// the heap, or drops it silently once its file is exhausted. item.seq is a
+// per-file constant (each item wraps one input file's iterator) and is left
+// untouched — only item.entry changes as the file is walked.
+func advance(h *mergeHeap, item *mergeHeapItem) error {
+	e, ok, err := item.it.Next()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	item.entry = e
+	heap.Push(h, item)
+	return nil
+}
+
 // mergeSSTableS merges the entries from all input SSTables into one new SSTable
-// at targetLevel.
+// at targetLevel, using a k-way streaming merge: only one block per input
+// file is held in memory at a time (via sstable.Iterator), instead of
+// loading every input file's full contents into memory up front.
 //
 // Merge semantics:
-//   - For duplicate keys, the entry from the lowest-numbered level wins (newest write).
+//   - For duplicate keys, the entry with the highest Seq wins (newest write) — see mergeHeap.
 //   - Tombstones are preserved in all levels except the last (where they are dropped).
 //
 // Returns the metadata of the newly written SSTables.
@@ -295,48 +429,61 @@ func (c *Compactor) mergeSSTableS(inputs []*SSTableMeta, targetLevel int) ([]*SS
 		return nil, nil
 	}
 
-	type leveledEntry struct {
-		e     memtable.Entry
-		level int
-	}
+	readers := make([]*sstable.Reader, 0, len(inputs))
+	defer func() {
+		for _, r := range readers {
+			r.Close()
+		}
+	}()
 
-	var all []leveledEntry
-
+	h := &mergeHeap{}
+	heap.Init(h)
 	for _, meta := range inputs {
 		r, err := sstable.OpenReader(meta.Path)
 		if err != nil {
 			return nil, fmt.Errorf("compaction: open %s: %w", meta.Path, err)
 		}
-		entries, err := r.IterateAll()
-		r.Close()
-		if err != nil {
-			return nil, fmt.Errorf("compaction: iterate %s: %w", meta.Path, err)
-		}
-		for _, e := range entries {
-			all = append(all, leveledEntry{e: e, level: meta.Level})
+		readers = append(readers, r)
+
+		it := r.NewIterator()
+		item := &mergeHeapItem{it: it, seq: meta.Seq}
+		if err := advance(h, item); err != nil {
+			return nil, fmt.Errorf("compaction: read %s: %w", meta.Path, err)
 		}
 	}
 
-	// Sort: key ASC; for equal keys, lower level (newer) first.
-	sort.SliceStable(all, func(i, j int) bool {
-		cmp := bytes.Compare(all[i].e.Key, all[j].e.Key)
-		if cmp != 0 {
-			return cmp < 0
-		}
-		return all[i].level < all[j].level
-	})
-
-	// Deduplicate: keep the first (lowest-level = newest) entry per key.
 	isLastLevel := targetLevel == c.cfg.MaxLevels-1
-	merged := make([]memtable.Entry, 0, len(all))
-	for i, le := range all {
-		if i > 0 && bytes.Equal(all[i-1].e.Key, le.e.Key) {
-			continue // a newer version of this key was already kept
+	var merged []memtable.Entry
+	var maxSeq int64
+
+	for h.Len() > 0 {
+		top := heap.Pop(h).(*mergeHeapItem)
+		key := top.entry.Key
+		best := top
+
+		// Among every heap item currently sharing this key, keep only the
+		// one with the highest Seq; advance every consumed iterator.
+		for h.Len() > 0 && bytes.Equal((*h)[0].entry.Key, key) {
+			cand := heap.Pop(h).(*mergeHeapItem)
+			winner, loser := best, cand
+			if cand.seq > best.seq {
+				winner, loser = cand, best
+			}
+			if err := advance(h, loser); err != nil {
+				return nil, fmt.Errorf("compaction: read next entry: %w", err)
+			}
+			best = winner
 		}
-		if le.e.Deleted && isLastLevel {
-			continue // safe to drop tombstone at the deepest level
+
+		if best.seq > maxSeq {
+			maxSeq = best.seq
 		}
-		merged = append(merged, le.e)
+		if !(best.entry.Deleted && isLastLevel) {
+			merged = append(merged, best.entry)
+		}
+		if err := advance(h, best); err != nil {
+			return nil, fmt.Errorf("compaction: read next entry: %w", err)
+		}
 	}
 
 	if len(merged) == 0 {
@@ -382,6 +529,7 @@ func (c *Compactor) mergeSSTableS(inputs []*SSTableMeta, targetLevel int) ([]*SS
 		MaxKey: maxKey,
 		Size:   size,
 		Level:  targetLevel,
+		Seq:    maxSeq,
 	}}, nil
 }
 
@@ -396,7 +544,6 @@ func (c *Compactor) replaceSSTableS(inputs []*SSTableMeta, outputs []*SSTableMet
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	// Remove every input SSTable from whatever level it lives in.
 	for lvl := range c.levels {
@@ -411,6 +558,9 @@ func (c *Compactor) replaceSSTableS(inputs []*SSTableMeta, outputs []*SSTableMet
 
 	// Insert outputs at the target level.
 	c.levels[targetLevel] = append(c.levels[targetLevel], outputs...)
+
+	c.mu.Unlock()
+	c.notifyChanged()
 }
 
 // deleteSSTableFiles removes the on-disk files for compacted-away SSTables.

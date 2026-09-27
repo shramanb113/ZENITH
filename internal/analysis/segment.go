@@ -2,7 +2,6 @@
 package analysis
 
 import (
-	"regexp"
 	"strings"
 	"unicode"
 
@@ -24,9 +23,71 @@ type Span struct {
 	Pos        int
 }
 
-// asciiWord is the pre-Z3 camelCase-aware pattern. It is applied only inside ASCII runs so English
-// tokenisation is byte-for-byte unchanged.
-var asciiWord = regexp.MustCompile(`[A-Z][a-z0-9]*|[a-z0-9]+|[A-Z]+`)
+// splitASCIIWord splits an ASCII word run into camelCase/acronym-aware sub-tokens.
+//
+// A maximal run of uppercase letters is an acronym ("HTTP", "NASA"), except that
+// when it is immediately followed by a lowercase letter, the LAST uppercase letter
+// starts a new Capitalized word instead of belonging to the acronym — this is how
+// acronym+CamelCase identifiers are conventionally written ("HTTPServer" ->
+// "HTTP","Server", not five single letters). Lowercase letters and digits share a
+// class so digits stay attached to the word they're adjacent to ("v6" in "IPv6").
+//
+// Go's RE2 engine has no lookahead, so a single regexp can't express "a run of
+// capitals that isn't immediately followed by a lowercase letter" — hence a
+// hand-written scanner instead of the old `[A-Z][a-z0-9]*|[a-z0-9]+|[A-Z]+`
+// pattern (whose first alternative always won on a single capital, so the
+// `[A-Z]+` acronym alternative could never match and "HTTP"/"NASA"/"API" were
+// shredded into single dropped letters).
+func splitASCIIWord(run string) [][2]int {
+	n := len(run)
+	isUpper := func(i int) bool { return run[i] >= 'A' && run[i] <= 'Z' }
+	isLowerOrDigit := func(i int) bool {
+		return (run[i] >= 'a' && run[i] <= 'z') || (run[i] >= '0' && run[i] <= '9')
+	}
+
+	var out [][2]int
+	for i := 0; i < n; {
+		if isLowerOrDigit(i) {
+			j := i + 1
+			for j < n && isLowerOrDigit(j) {
+				j++
+			}
+			out = append(out, [2]int{i, j})
+			i = j
+			continue
+		}
+
+		// isUpper(i) holds: run only contains ASCII letters and digits.
+		j := i + 1
+		for j < n && isUpper(j) {
+			j++
+		}
+		upperLen := j - i
+
+		switch {
+		case upperLen == 1:
+			// Single capital: consume a following lower/digit run with it
+			// as one Capitalized word ("Case", "Server").
+			k := j
+			for k < n && isLowerOrDigit(k) {
+				k++
+			}
+			out = append(out, [2]int{i, k})
+			i = k
+		case j < n && run[j] >= 'a' && run[j] <= 'z':
+			// Acronym run followed by a lowercase letter: the last capital
+			// starts the next Capitalized word ("HTTPServer" -> "HTTP","Server").
+			out = append(out, [2]int{i, j - 1})
+			i = j - 1
+		default:
+			// Acronym run not followed by a lowercase letter (end of run,
+			// or a digit): keep the whole run together ("NASA", "API").
+			out = append(out, [2]int{i, j})
+			i = j
+		}
+	}
+	return out
+}
 
 func isWordRune(r rune) bool {
 	return unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r) || r == zwj || r == zwnj
@@ -71,7 +132,7 @@ func Segment(text string) []Span {
 		}
 		run := string(runes[i:j])
 		if isASCII(run) {
-			for _, loc := range asciiWord.FindAllStringIndex(run, -1) {
+			for _, loc := range splitASCIIWord(run) {
 				out = append(out, Span{Term: run[loc[0]:loc[1]], Start: i + loc[0], End: i + loc[1]})
 			}
 		} else {

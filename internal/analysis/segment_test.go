@@ -71,7 +71,12 @@ func TestAnalyzeSpansMixedScriptOffsets(t *testing.T) {
 	}
 }
 
-// legacyTokenize is the pre-Z3 implementation, kept as an oracle for ASCII input.
+// legacyTokenize is an oracle for ASCII input that doesn't involve acronyms or
+// camelCase run boundaries (Segment's acronym-aware scanner replaced the old
+// regex `[A-Z][a-z0-9]*|[a-z0-9]+|[A-Z]+`, which shredded acronyms into single
+// letters — see TestTokenizeAcronymsNotShredded / TestTokenizeCamelCaseWithAcronymPrefix
+// below for that behavior specifically). Tokenize never resolves through the FST
+// (that only happens in AnalyzeQuery), so this oracle doesn't either.
 func legacyTokenize(a *StandardAnalyzer, text string) []string {
 	re := regexp.MustCompile(`[A-Z][a-z0-9]*|[a-z0-9]+|[A-Z]+`)
 	var out []string
@@ -81,7 +86,7 @@ func legacyTokenize(a *StandardAnalyzer, text string) []string {
 			continue
 		}
 		if s := stem(tok); s != "" {
-			out = append(out, a.resolveTerm(s))
+			out = append(out, s)
 		}
 	}
 	return out
@@ -91,13 +96,107 @@ func TestTokenizeASCIIUnchanged(t *testing.T) {
 	a := NewStandardAnalyzer()
 	for _, text := range []string{
 		"Waterlogging in the basement during heavy rains!",
-		"camelCaseTokens and HTTPServer v2 2BHK flats_near-metro",
 		"It's the builder's fault: possession delayed by 24 months (again).",
 		"",
 	} {
 		if got, want := a.Tokenize(text), legacyTokenize(a, text); !reflect.DeepEqual(got, want) {
 			t.Fatalf("Tokenize(%q) = %v, legacy %v", text, got, want)
 		}
+	}
+}
+
+func TestTokenizeNeverResolvesThroughFST(t *testing.T) {
+	// C1 regression: Analyze()/Tokenize() must never rewrite a document's own
+	// terms through the FST. Build an FST containing "card", then analyze text
+	// containing the unrelated word "car" — it must come back as "car", not
+	// silently become "card".
+	a := NewStandardAnalyzer()
+	fst := NewFSTDictionary()
+	if err := fst.Build([]string{"card"}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	a.SetFST(fst)
+
+	got := a.Tokenize("car racing")
+	want := []string{"car", "race"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Tokenize(%q) = %v, want %v (must not resolve 'car' to 'card')", "car racing", got, want)
+	}
+
+	tokens := a.Analyze("car racing")
+	for _, tok := range tokens {
+		if tok.Term == "card" {
+			t.Fatalf("Analyze() resolved a term through the FST: %v", tokens)
+		}
+	}
+}
+
+func TestTokenizeAcronymsNotShredded(t *testing.T) {
+	a := NewStandardAnalyzer()
+	cases := []struct{ word, want string }{
+		{"HTTP", "http"},
+		{"NASA", "nasa"},
+		{"API", "api"},
+		{"SQL", "sql"},
+	}
+	for _, c := range cases {
+		got := a.Tokenize(c.word)
+		if len(got) != 1 || got[0] != c.want {
+			t.Fatalf("Tokenize(%q) = %v, want [%q]", c.word, got, c.want)
+		}
+	}
+}
+
+func TestTokenizeAcronymMatchesLowercaseQuery(t *testing.T) {
+	a := NewStandardAnalyzer()
+	docTokens := a.Tokenize("Our server exposes an HTTP API.")
+	queryTokens := a.Tokenize("http api")
+
+	docSet := make(map[string]struct{}, len(docTokens))
+	for _, tok := range docTokens {
+		docSet[tok] = struct{}{}
+	}
+	for _, qt := range queryTokens {
+		if _, ok := docSet[qt]; !ok {
+			t.Fatalf("query token %q not found in doc tokens %v", qt, docTokens)
+		}
+	}
+}
+
+func TestTokenizeCamelCaseWithAcronymPrefix(t *testing.T) {
+	a := NewStandardAnalyzer()
+	got := a.Tokenize("HTTPServer")
+	want := []string{"http", "server"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Tokenize(HTTPServer) = %v, want %v", got, want)
+	}
+}
+
+func TestTokenizeIPv6AddressSplitsSensibly(t *testing.T) {
+	a := NewStandardAnalyzer()
+	got := a.Tokenize("IPv6Address")
+	for _, tok := range got {
+		if len(tok) == 1 {
+			t.Fatalf("Tokenize(IPv6Address) produced a shredded single-letter token: %v", got)
+		}
+	}
+	found := false
+	for _, tok := range got {
+		if strings.HasPrefix(tok, "address") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Tokenize(IPv6Address) = %v, expected an 'address' token", got)
+	}
+}
+
+func TestTokenize2BHKSplitsDigitFromAcronym(t *testing.T) {
+	a := NewStandardAnalyzer()
+	got := a.Tokenize("2BHK flat")
+	want := []string{"2", "bhk", "flat"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Tokenize(2BHK flat) = %v, want %v", got, want)
 	}
 }
 

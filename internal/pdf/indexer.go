@@ -3,6 +3,8 @@ package pdf
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	lpdf "github.com/ledongthuc/pdf"
@@ -18,8 +20,9 @@ const (
 // PDFIndexer extracts text from PDF files and indexes them into the engine.
 // The engine's wired embedder handles vector computation automatically.
 type PDFIndexer struct {
-	engine *index.Engine
-	logger *activitylog.Logger
+	engine      *index.Engine
+	logger      *activitylog.Logger
+	allowedRoot string // if set, Index rejects any path resolving outside this directory
 }
 
 // NewIndexer creates a PDFIndexer. An optional logger may be supplied.
@@ -33,9 +36,58 @@ func NewIndexer(e *index.Engine, logger ...*activitylog.Logger) *PDFIndexer {
 	return &PDFIndexer{engine: e, logger: l}
 }
 
+// SetAllowedRoot restricts Index to files that resolve (after following ../
+// segments and symlinks) inside root. It creates root if missing.
+//
+// This is intended for indexers reachable from an untrusted, network-facing
+// caller (e.g. the gRPC server's IndexPDF RPC), where filePath is
+// attacker-controlled and must not be able to reach arbitrary files on the
+// host. CLI-driven indexers that only ever receive local, operator-supplied
+// paths can leave this unset.
+func (p *PDFIndexer) SetAllowedRoot(root string) error {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("pdf: resolve allowed root: %w", err)
+	}
+	if err := os.MkdirAll(abs, 0o755); err != nil {
+		return fmt.Errorf("pdf: create allowed root: %w", err)
+	}
+	p.allowedRoot = filepath.Clean(abs)
+	return nil
+}
+
+// resolveWithinRoot returns filePath's real, absolute path if and only if it
+// falls inside root once symlinks are resolved. Resolving symlinks (rather
+// than just filepath.Clean-ing the ".." segments) matters because a symlink
+// placed inside an otherwise in-bounds directory could still point outside
+// root, and Clean alone would not catch that.
+func resolveWithinRoot(root, filePath string) (string, error) {
+	abs, err := filepath.Abs(filePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve path: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("resolve path: %w", err)
+	}
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q is outside the allowed root", filePath)
+	}
+	return resolved, nil
+}
+
 // Index extracts text from filePath and stores it in the engine.
 // Returns the number of chunks indexed.
 func (p *PDFIndexer) Index(ctx context.Context, docID, filePath string) (int, error) {
+	if p.allowedRoot != "" {
+		resolved, err := resolveWithinRoot(p.allowedRoot, filePath)
+		if err != nil {
+			return 0, fmt.Errorf("pdf: %w", err)
+		}
+		filePath = resolved
+	}
+
 	f, r, err := lpdf.Open(filePath)
 	if err != nil {
 		return 0, fmt.Errorf("pdf: open %s: %w", filePath, err)

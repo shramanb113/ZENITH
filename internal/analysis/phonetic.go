@@ -49,6 +49,13 @@ func Soundex(input string) string {
 	lastCode := getCode(clean[0])
 
 	for i := 1; i < len(clean) && count < 4; i++ {
+		if clean[i] == 'H' || clean[i] == 'W' {
+			// Standard Soundex H/W rule: H and W don't break adjacency between
+			// the consonants on either side of them (e.g. "Ashcraft" -> A261,
+			// not A226), unlike a true vowel which does reset lastCode below.
+			continue
+		}
+
 		currCode := getCode(clean[i])
 
 		if currCode == '0' {
