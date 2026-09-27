@@ -54,9 +54,12 @@ func (l *Lexer) Next() string {
 
 	if unicode.IsLetter(ch) {
 		raw := l.chopWhile(func(r rune) bool {
-			return unicode.IsLetter(r) || unicode.IsNumber(r)
+			return unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r)
 		})
 		lower := strings.ToLower(raw)
+		if !isASCII(lower) {
+			return FoldIndic(lower)
+		}
 		stemmed, err := snowball.Stem(lower, "english", true)
 		if err != nil {
 			return lower

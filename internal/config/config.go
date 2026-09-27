@@ -17,6 +17,9 @@ type Config struct {
 	VectorWeight    float64
 	NeuralWeight    float64
 
+	// WordVectors enables per-token embeddings at index time (used only by zero-result neural
+	// expansion). Small per-request namespaces turn it off: it is the dominant indexing cost.
+	WordVectors bool
 
 	// Performance
 	EmbeddingWorkers int
@@ -48,5 +51,6 @@ func DefaultConfig() *Config {
 		PhoneticWeight:   0.3,
 		VectorWeight:     2.0, // RRF semantic-list weight (lexical list weight is 1.0)
 		NeuralWeight:     1.0,
+		WordVectors:      true,
 	}
 }

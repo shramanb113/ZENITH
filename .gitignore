@@ -7,3 +7,4 @@ internal/localembedder/assets/libonnxruntime.so
 internal/localembedder/assets/libonnxruntime.dylib
 bench/.cache/
 bench/results/
+*.exe

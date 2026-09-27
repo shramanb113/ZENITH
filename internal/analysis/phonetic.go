@@ -33,6 +33,9 @@ func getCode(r uint8) byte {
 }
 
 func Soundex(input string) string {
+	if !isASCII(input) {
+		return "" // Soundex codes are defined for Latin script only
+	}
 
 	clean := strip(input)
 	if len(clean) == 0 {

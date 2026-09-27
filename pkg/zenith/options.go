@@ -9,6 +9,7 @@ type options struct {
 	fuzzyDistance      int
 	limit              int
 	checkpointInterval time.Duration
+	noWordVectors      bool
 }
 
 func defaultOptions() *options {
@@ -26,7 +27,8 @@ type Option func(*options) error
 type SearchOption func(*searchOptions)
 
 type searchOptions struct {
-	limit int
+	limit   int
+	explain bool
 }
 
 // WithEmbedder replaces the default embedded ONNX embedder with a custom one.
@@ -93,6 +95,24 @@ func Limit(n int) SearchOption {
 			o.limit = n
 		}
 	}
+}
+
+// WithoutWordVectors skips per-token embeddings at index time. Semantic search still uses one vector
+// per document; only zero-result neural expansion is disabled. Recommended for small, short-lived
+// indexes where indexing latency matters.
+func WithoutWordVectors() Option {
+	return func(o *options) error {
+		o.noWordVectors = true
+		return nil
+	}
+}
+
+// Explain makes Search return, for every document with a term hit or a positive semantic score,
+// the raw per-signal evidence in Result.Signals. Results are ordered by evidence (most query terms
+// matched, then BM25, then cosine). Score keeps its usual meaning (normalised hybrid score, 0 when
+// the document is not in the hybrid result list) and must not be used as a threshold.
+func Explain() SearchOption {
+	return func(o *searchOptions) { o.explain = true }
 }
 
 // WithCheckpointInterval sets how often the DB automatically saves a gob

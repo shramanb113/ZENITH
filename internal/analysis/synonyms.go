@@ -1,5 +1,15 @@
 package analysis
 
+import (
+	"bufio"
+	"fmt"
+	"io"
+	"regexp"
+	"slices"
+	"strings"
+	"sync"
+)
+
 // synonymMap is a static English synonym table for query expansion.
 // Keys are stemmed terms (post-Porter2). Values are stemmed synonyms.
 // All entries must already be stemmed — run stem() on both sides when adding.
@@ -124,8 +134,10 @@ var synonymMap = map[string][]string{
 
 // Synonyms returns the synonym list for a stemmed term.
 // Returns nil if no synonyms are registered.
-// Thread-safe — reads a package-level immutable map.
+// Thread-safe.
 func Synonyms(stemmedTerm string) []string {
+	synMu.RLock()
+	defer synMu.RUnlock()
 	return synonymMap[stemmedTerm]
 }
 
@@ -133,6 +145,8 @@ func Synonyms(stemmedTerm string) []string {
 // the original tokens plus any synonyms, deduplicated.
 // Used exclusively at query time — never during indexing.
 func ExpandWithSynonyms(tokens []string) []string {
+	synMu.RLock()
+	defer synMu.RUnlock()
 	seen := make(map[string]struct{}, len(tokens)*2)
 	result := make([]string, 0, len(tokens)*2)
 
@@ -149,4 +163,48 @@ func ExpandWithSynonyms(tokens []string) []string {
 		}
 	}
 	return result
+}
+
+var synMu sync.RWMutex
+
+var synArrow = regexp.MustCompile(`^(.+?)\s*(<->|↔|->|→)\s*(.+)$`)
+
+// LoadSynonyms merges a synonyms file into the query-time synonym table. Each side is analysed
+// with a (stemmed / Indic-folded) and must yield exactly one term. Call it before serving queries;
+// it is safe but pointless to call concurrently with searches.
+func LoadSynonyms(r io.Reader, a *StandardAnalyzer) (int, error) {
+	sc := bufio.NewScanner(r)
+	added, line := 0, 0
+	synMu.Lock()
+	defer synMu.Unlock()
+	add := func(from, to string) {
+		if slices.Contains(synonymMap[from], to) {
+			return
+		}
+		synonymMap[from] = append(synonymMap[from], to)
+		added++
+	}
+	for sc.Scan() {
+		line++
+		text := strings.TrimSpace(sc.Text())
+		if i := strings.Index(text, "#"); i >= 0 {
+			text = strings.TrimSpace(text[:i])
+		}
+		if text == "" {
+			continue
+		}
+		m := synArrow.FindStringSubmatch(text)
+		if m == nil {
+			return added, fmt.Errorf("synonyms line %d: want 'a -> b' or 'a <-> b'", line)
+		}
+		l, rt := a.TokenizeExact(m[1]), a.TokenizeExact(m[3])
+		if len(l) != 1 || len(rt) != 1 {
+			return added, fmt.Errorf("synonyms line %d: each side must be exactly one non-stop-word term", line)
+		}
+		add(l[0], rt[0])
+		if m[2] == "<->" || m[2] == "↔" {
+			add(rt[0], l[0])
+		}
+	}
+	return added, sc.Err()
 }

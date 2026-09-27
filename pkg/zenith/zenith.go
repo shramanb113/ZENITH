@@ -76,6 +76,7 @@ func Open(path string, opt ...Option) (*DB, error) {
 
 	cfg := config.DefaultConfig()
 	cfg.FuzzyMaxDist = o.fuzzyDistance
+	cfg.WordVectors = !o.noWordVectors
 
 	tkz := analysis.NewStandardAnalyzer()
 	scorer := ranking.NewWeightedRRFRanker(cfg.RRFConstant, 0, 1.0, cfg.VectorWeight)
@@ -268,6 +269,18 @@ func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) (r
 	defer db.mu.RUnlock()
 	if db.closed.Load() {
 		return nil, ErrClosed
+	}
+
+	if so.explain {
+		terms, hits, err := db.engine.Explain(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("zenith: %w", err)
+		}
+		raw, err := db.engine.Search(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("zenith: %w", err)
+		}
+		return buildExplained(terms, hits, raw, so.limit), nil
 	}
 
 	raw, err := db.engine.Search(ctx, query)
@@ -494,6 +507,27 @@ func buildResults(raw []index.SearchResponse, limit int) []Result {
 		results = results[:limit]
 	}
 	return results
+}
+
+func buildExplained(terms []string, hits []index.ExplainHit, raw []index.SearchResponse, limit int) []Result {
+	scores := make(map[string]float64, len(raw))
+	for _, r := range buildResults(raw, 0) {
+		scores[r.ID] = r.Score
+	}
+	out := make([]Result, 0, len(hits))
+	for _, h := range hits {
+		tm := make([]TermMatch, len(h.Terms))
+		for i, t := range h.Terms {
+			tm[i] = TermMatch{Term: t.Term, Matched: t.Matched, Dist: t.Dist, Synonym: t.Synonym}
+		}
+		out = append(out, Result{ID: h.ID, Score: scores[h.ID], Signals: &Signals{
+			QueryTerms: append([]string(nil), terms...), Lexical: h.Lexical, Semantic: h.Semantic, Terms: tm,
+		}})
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 func normaliseScore(score, maxScore float64) float64 {

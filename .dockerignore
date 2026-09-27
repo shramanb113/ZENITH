@@ -1,0 +1,10 @@
+.git
+.codegraph
+.superpowers
+bench
+docs
+demo
+*.exe
+zenith
+zenith.db*
+**/*_test.go

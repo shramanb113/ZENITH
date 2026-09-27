@@ -1,7 +1,6 @@
 package analysis
 
 import (
-	"regexp"
 	"strings"
 
 	"github.com/kljensen/snowball"
@@ -47,10 +46,10 @@ type QueryAnalyzer interface {
 }
 
 // StandardAnalyzer is the default analysis pipeline:
-//  1. Regex tokenisation (camelCase-aware, alphanumeric)
+//  1. Unicode-aware segmentation (Segment); ASCII runs keep the camelCase-aware pattern.
 //  2. Lowercasing
 //  3. Stop-word removal
-//  4. Snowball Porter2 stemming (kljensen/snowball, english)
+//  4. Snowball Porter2 stemming for ASCII tokens only; Devanagari is FoldIndic-normalised.
 //
 // FST integration:
 //   - The analyzer holds a reference to the shared FSTDictionary.
@@ -66,9 +65,8 @@ type QueryAnalyzer interface {
 //   - Applied at query time via AnalyzeQuery() — NOT in Analyze().
 //   - Indexing with synonyms bloats the index and breaks IDF weights.
 type StandardAnalyzer struct {
-	stopWords  map[string]struct{}
-	tokenRegex *regexp.Regexp
-	fst        *FSTDictionary // may be nil if not wired
+	stopWords map[string]struct{}
+	fst       *FSTDictionary // may be nil if not wired
 }
 
 // NewStandardAnalyzer constructs a StandardAnalyzer without FST.
@@ -91,6 +89,9 @@ func NewStandardAnalyzer() *StandardAnalyzer {
 		"up", "very", "was", "we", "were", "what", "when", "where",
 		"which", "while", "who", "whom", "why", "will", "with", "you",
 		"your", "yours", "yourself", "yourselves",
+		// Hindi / Hinglish function words (Devanagari entries are already FoldIndic-normal).
+		"hai", "hain", "ka", "ki", "ke", "ko", "se", "mein", "aur",
+		"है", "हैं", "का", "की", "के", "को", "से", "में", "और",
 	}
 
 	stopMap := make(map[string]struct{}, len(stopList))
@@ -99,8 +100,7 @@ func NewStandardAnalyzer() *StandardAnalyzer {
 	}
 
 	return &StandardAnalyzer{
-		stopWords:  stopMap,
-		tokenRegex: regexp.MustCompile(`[A-Z][a-z0-9]*|[a-z0-9]+|[A-Z]+`),
+		stopWords: stopMap,
 	}
 }
 
@@ -142,24 +142,65 @@ func (a *StandardAnalyzer) resolveTerm(stemmed string) string {
 	return stemmed
 }
 
-// Tokenize returns stemmed, filtered string tokens from text.
-// FST resolution is applied per token when the FST is built.
-// Used by BM25/TF-IDF scorers and the BKTree build path.
-func (a *StandardAnalyzer) Tokenize(text string) []string {
-	raw := a.tokenRegex.FindAllString(text, -1)
-	out := make([]string, 0, len(raw))
-	for _, tok := range raw {
-		tok = strings.ToLower(tok)
-		if _, stop := a.stopWords[tok]; stop {
+// analyseSpans is the single analysis path: segment → lowercase → (ASCII: stop, stem) /
+// (other scripts: FoldIndic, stop) → optional FST resolution. Pos numbers the kept tokens.
+func (a *StandardAnalyzer) analyseSpans(text string, resolve bool) []Span {
+	raw := Segment(text)
+	out := make([]Span, 0, len(raw))
+	for _, sp := range raw {
+		var term string
+		if isASCII(sp.Term) {
+			term = strings.ToLower(sp.Term)
+			if _, stop := a.stopWords[term]; stop {
+				continue
+			}
+			term = stem(term) // Porter2 is English-only
+		} else {
+			term = FoldIndic(strings.ToLower(sp.Term))
+			if _, stop := a.stopWords[term]; stop {
+				continue
+			}
+		}
+		if term == "" {
 			continue
 		}
-		s := stem(tok)
-		if s == "" {
-			continue
+		if resolve {
+			term = a.resolveTerm(term)
 		}
-		out = append(out, a.resolveTerm(s))
+		sp.Term, sp.Pos = term, len(out)
+		out = append(out, sp)
 	}
 	return out
+}
+
+func spanTerms(spans []Span) []string {
+	if len(spans) == 0 {
+		return nil
+	}
+	out := make([]string, len(spans))
+	for i, s := range spans {
+		out[i] = s.Term
+	}
+	return out
+}
+
+// Tokenize returns stemmed, filtered string tokens from text, with FST prefix resolution when the
+// FST is built. Used at index time and by the BM25/TF-IDF scorers.
+func (a *StandardAnalyzer) Tokenize(text string) []string {
+	return spanTerms(a.analyseSpans(text, true))
+}
+
+// TokenizeExact is Tokenize without FST prefix resolution: the exact analysed terms. Explain uses it
+// so a query term never silently becomes a longer indexed term ("fire" → "firework").
+func (a *StandardAnalyzer) TokenizeExact(text string) []string {
+	return spanTerms(a.analyseSpans(text, false))
+}
+
+// AnalyzeSpans returns the exact analysed terms (no FST resolution) with rune offsets into text.
+// On a namespace indexed in one batch (FST not yet built at index time) these terms equal the
+// indexed terms, so a TermMatch.Matched value can be located in the original document.
+func (a *StandardAnalyzer) AnalyzeSpans(text string) []Span {
+	return a.analyseSpans(text, false)
 }
 
 // Analyze implements the Analyzer interface.

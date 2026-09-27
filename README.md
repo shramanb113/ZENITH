@@ -496,3 +496,40 @@ Every component has a clear boundary and a reason to exist. See [DECISIONS.md](.
 ## License
 
 MIT
+
+## HTTP sidecar mode
+
+`zenith serve --http :7700` serves short-lived, in-memory namespaces over HTTP/JSON. Services that
+are not written in Go can use ZENITH's hybrid matching without gRPC code generation.
+
+| Route | Purpose |
+|---|---|
+| `GET /healthz` | version, embedding model id (`all-MiniLM-L6-v2`, `deterministic` or `none`), synonyms hash |
+| `PUT /v1/ns/{ns}/docs` | build (or replace) a namespace from `{"docs":[{"id","text"}]}` |
+| `POST /v1/ns/{ns}/search` | many queries at once with `explain`: raw BM25, cosine, and per-term exact / synonym / fuzzy hits with character spans |
+| `DELETE /v1/ns/{ns}` | drop a namespace (idle namespaces also expire after 10 min; max 200, LRU) |
+
+Flags:
+- `--key` (or `ZENITH_KEY`) requires `X-Zenith-Key` on `/v1/*`.
+- `--synonyms file` adds query-time bridges such as `paani <-> water`.
+
+Request bodies are capped at 1 MB, and the sidecar never logs document or query text. Explain signals are
+absolute. The fused `Score` is relative to the result set, so never threshold on it.
+
+```bash
+docker build -t zenith-sidecar .
+docker run --rm -p 127.0.0.1:7700:7700 -e ZENITH_KEY=change-me zenith-sidecar
+```
+
+## Used in Kshetra IQ
+
+[Kshetra IQ](https://github.com/shramanb113/Flat-finder) (SerpApi India Hackathon 2026) uses this sidecar to decide which
+issue a noisy review or news snippet is about. That includes misspellings, Hinglish ("paani bhar jaata hai") and
+Devanagari ("पानी भर जाता है"). SerpApi does all the fetching, ZENITH only matches, and a deterministic rule engine
+owns the verdict. These additions were built during the hackathon and are disclosed in the submission:
+- Unicode-aware analysis (Devanagari matras, nukta and ZWJ folding)
+- Explain mode
+- `WithoutWordVectors`
+- the HTTP sidecar
+- the synonyms file
+- this Dockerfile

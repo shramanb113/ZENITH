@@ -204,7 +204,9 @@ func (e *Engine) AddBatch(ctx context.Context, docs []BatchDoc) error {
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 	docs = sorted
 
-	e.warmWordVectors(ctx, docs)
+	if e.config.WordVectors {
+		e.warmWordVectors(ctx, docs)
+	}
 
 	const chunkN = 1024
 	type embChunk struct {
@@ -416,33 +418,35 @@ func (e *Engine) addInternal(ctx context.Context, originalID string, fullText st
 	}
 
 	tempWordVectors := make(map[string]VectorEntry)
-	var tokensToEmbed []string
-	for _, t := range rawTokens {
-		if _, exists := tempWordVectors[t]; !exists && !e.vectors.HasWordVector(t) {
-			tokensToEmbed = append(tokensToEmbed, t)
-			tempWordVectors[t] = VectorEntry{}
-		}
-	}
-
-	const embedBatchSize = 512
-	for i := 0; i < len(tokensToEmbed); i += embedBatchSize {
-		end := i + embedBatchSize
-		if end > len(tokensToEmbed) {
-			end = len(tokensToEmbed)
-		}
-		chunk := tokensToEmbed[i:end]
-		batchVecs, err := e.embedder.EmbedBatch(ctx, chunk)
-		if err == nil && len(batchVecs) == len(chunk) {
-			for j, t := range chunk {
-				tempWordVectors[t] = VectorEntry{
-					Vector:    FloatsToFloat16(batchVecs[j]),
-					Magnitude: ranking.Magnitude(batchVecs[j]),
-				}
+	if e.config.WordVectors {
+		var tokensToEmbed []string
+		for _, t := range rawTokens {
+			if _, exists := tempWordVectors[t]; !exists && !e.vectors.HasWordVector(t) {
+				tokensToEmbed = append(tokensToEmbed, t)
+				tempWordVectors[t] = VectorEntry{}
 			}
-		} else {
-			logger.Warn("Batch embedding failed for tokens", "error", err)
-			for _, t := range chunk {
-				delete(tempWordVectors, t)
+		}
+
+		const embedBatchSize = 512
+		for i := 0; i < len(tokensToEmbed); i += embedBatchSize {
+			end := i + embedBatchSize
+			if end > len(tokensToEmbed) {
+				end = len(tokensToEmbed)
+			}
+			chunk := tokensToEmbed[i:end]
+			batchVecs, err := e.embedder.EmbedBatch(ctx, chunk)
+			if err == nil && len(batchVecs) == len(chunk) {
+				for j, t := range chunk {
+					tempWordVectors[t] = VectorEntry{
+						Vector:    FloatsToFloat16(batchVecs[j]),
+						Magnitude: ranking.Magnitude(batchVecs[j]),
+					}
+				}
+			} else {
+				logger.Warn("Batch embedding failed for tokens", "error", err)
+				for _, t := range chunk {
+					delete(tempWordVectors, t)
+				}
 			}
 		}
 	}
@@ -578,7 +582,7 @@ func (e *Engine) Search(ctx context.Context, query string) ([]SearchResponse, er
 
 	// Neural expansion fires only when the engine finds zero results.
 	// RRF scores are in [0, ~0.033] — any threshold above that fires universally.
-	if len(ranks) == 0 {
+	if len(ranks) == 0 && e.config.WordVectors {
 		expandedTokens := e.expandTokens(rawTokens)
 
 		e.inverted.RLock()
@@ -1068,4 +1072,156 @@ func (e *Engine) load(filepath string) error {
 
 	slog.Info("Index loaded", "docs", len(e.idMapping), "duration", time.Since(start))
 	return nil
+}
+
+// ExplainHit is the raw per-signal evidence for one document (Explain mode). Unlike fused RRF scores,
+// these values are absolute and can be thresholded by callers.
+type ExplainHit struct {
+	ID       string
+	Lexical  float64   // raw BM25 for the analysed query terms plus their synonyms; 0 if none occur
+	Semantic float64   // cosine(query, doc): vectors are L2-normalised, so the dot product; 0 without vectors
+	Terms    []TermHit // best match per base query term that the document contains
+}
+
+// TermHit records how one base query term was found in a document.
+type TermHit struct {
+	Term    string // analysed base query term
+	Matched string // analysed document term that satisfied it
+	Dist    int    // 0 for exact and synonym matches; Levenshtein distance for BK-tree matches
+	Synonym bool
+}
+
+type exactTokenizer interface{ TokenizeExact(text string) []string }
+
+func dedupe(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// Explain returns the analysed base query terms and, for every document with at least one term hit or
+// a positive semantic score, its raw signals. It scans every document, so it is meant for small
+// per-request namespaces (hundreds of documents), not the persistent index.
+func (e *Engine) Explain(ctx context.Context, query string) ([]string, []ExplainHit, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	var base []string
+	if et, ok := e.analyzer.(exactTokenizer); ok {
+		base = et.TokenizeExact(query)
+	} else {
+		for _, t := range e.analyzer.Analyze(query) {
+			base = append(base, t.Term)
+		}
+	}
+	base = dedupe(base)
+
+	type cand struct {
+		tok  string
+		dist int
+		syn  bool
+	}
+	rank := func(c cand) int {
+		switch {
+		case c.dist == 0 && !c.syn:
+			return 0
+		case c.syn:
+			return 1
+		default:
+			return 1 + c.dist
+		}
+	}
+	cands := make(map[string][]cand, len(base))
+	all := append([]string(nil), base...)
+	for _, t := range base {
+		cs := []cand{{tok: t}}
+		for _, s := range analysis.Synonyms(t) {
+			cs = append(cs, cand{tok: s, syn: true})
+			all = append(all, s)
+		}
+		if len([]rune(t)) >= 2 {
+			for _, m := range e.bkTree.Search(t, e.config.FuzzyMaxDist) {
+				if m.Distance > 0 {
+					cs = append(cs, cand{tok: m.Word, dist: m.Distance})
+				}
+			}
+		}
+		sort.SliceStable(cs, func(i, j int) bool {
+			if rank(cs[i]) != rank(cs[j]) {
+				return rank(cs[i]) < rank(cs[j])
+			}
+			return cs[i].tok < cs[j].tok
+		})
+		cands[t] = cs
+	}
+
+	lex := make(map[uint64]float64)
+	for _, r := range e.bm25.Query(dedupe(all)) {
+		lex[r.DocID] = r.Score
+	}
+
+	var queryVec []float32
+	if e.embedder != nil {
+		var err error
+		queryVec, err = e.embedder.Embed(ctx, query)
+		if err != nil {
+			slog.Warn("explain: semantic signal unavailable — embedder failed", "error", err)
+			queryVec = nil
+		}
+	}
+
+	e.inverted.RLock()
+	e.vectors.RLock()
+	defer e.vectors.RUnlock()
+	defer e.inverted.RUnlock()
+	docVecs := e.vectors.GetVectors()
+
+	hits := make([]ExplainHit, 0)
+	for id, toks := range e.inverted.GetDocTokens() {
+		set := make(map[string]struct{}, len(toks))
+		for _, tk := range toks {
+			set[tk] = struct{}{}
+		}
+		var terms []TermHit
+		for _, t := range base {
+			for _, c := range cands[t] {
+				if _, ok := set[c.tok]; ok {
+					terms = append(terms, TermHit{Term: t, Matched: c.tok, Dist: c.dist, Synonym: c.syn})
+					break
+				}
+			}
+		}
+		sem := 0.0
+		if len(queryVec) > 0 {
+			if v, ok := docVecs[id]; ok {
+				if s := ranking.DotProduct(queryVec, Float16ToFloats(v.Vector)); s > 0 {
+					sem = s
+				}
+			}
+		}
+		if len(terms) == 0 && sem <= 0 {
+			continue
+		}
+		hits = append(hits, ExplainHit{ID: e.idMapping[id], Lexical: lex[id], Semantic: sem, Terms: terms})
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		a, b := hits[i], hits[j]
+		if len(a.Terms) != len(b.Terms) {
+			return len(a.Terms) > len(b.Terms)
+		}
+		if a.Lexical != b.Lexical {
+			return a.Lexical > b.Lexical
+		}
+		if a.Semantic != b.Semantic {
+			return a.Semantic > b.Semantic
+		}
+		return a.ID < b.ID
+	})
+	return base, hits, nil
 }
