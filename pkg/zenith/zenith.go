@@ -40,6 +40,12 @@ import (
 
 const maxIDBytes = 512
 
+// estimatedBytesPerDoc approximates per-document heap cost (postings,
+// BK-tree, BM25 state, vectors) for WithMemoryLimit. Derived from the
+// measured hybrid-mode heap delta in bench/BENCHMARK.md: 1,127MB / 100,000
+// docs ≈ 11KB/doc. This is an approximation, not exact accounting.
+const estimatedBytesPerDoc int64 = 11 * 1024
+
 // DB is a handle to an open ZENITH search index.
 // All methods are safe for concurrent use by multiple goroutines.
 // Use Open to obtain a *DB; never construct one directly.
@@ -79,7 +85,7 @@ func Open(path string, opt ...Option) (*DB, error) {
 	cfg.WordVectors = !o.noWordVectors
 
 	tkz := analysis.NewStandardAnalyzer()
-	scorer := ranking.NewWeightedRRFRanker(cfg.RRFConstant, 0, 1.0, cfg.VectorWeight)
+	scorer := ranking.NewWeightedRRFRanker(cfg.RRFConstant, cfg.MaxResults, 1.0, cfg.VectorWeight)
 	eng := index.NewEngine(cfg, emb, scorer, tkz)
 
 	db := &DB{
@@ -179,6 +185,16 @@ func (db *DB) Add(ctx context.Context, id, text string) (err error) {
 		return ErrClosed
 	}
 
+	if db.opts.memoryLimitBytes > 0 {
+		extra := 1
+		if _, exists := db.engine.GetText(id); exists {
+			extra = 0 // overwriting an existing document, not growing the index
+		}
+		if db.estimatedBytesLocked(extra) > db.opts.memoryLimitBytes {
+			return ErrIndexFull
+		}
+	}
+
 	if db.docWAL != nil {
 		if _, err = db.docWAL.Append(ctx, &wal.Record{
 			Op: wal.OpTypePut, Key: []byte(id), Value: []byte(text),
@@ -227,6 +243,18 @@ func (db *DB) AddBatch(ctx context.Context, docs map[string]string) (err error) 
 	defer db.mu.Unlock()
 	if db.closed.Load() {
 		return ErrClosed
+	}
+
+	if db.opts.memoryLimitBytes > 0 {
+		newDocs := 0
+		for _, d := range batch {
+			if _, exists := db.engine.GetText(d.ID); !exists {
+				newDocs++
+			}
+		}
+		if db.estimatedBytesLocked(newDocs) > db.opts.memoryLimitBytes {
+			return ErrIndexFull
+		}
 	}
 
 	if db.docWAL != nil {
@@ -289,6 +317,12 @@ func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) (r
 	}
 
 	return buildResults(raw, so.limit), nil
+}
+
+// estimatedBytesLocked returns the projected heap usage after adding
+// extraDocs new documents. Caller must hold db.mu.
+func (db *DB) estimatedBytesLocked(extraDocs int) int64 {
+	return int64(db.engine.Count()+extraDocs) * estimatedBytesPerDoc
 }
 
 // Get returns the original text last indexed under id, and whether a

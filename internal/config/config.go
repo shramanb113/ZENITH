@@ -9,6 +9,10 @@ type Config struct {
 	MemTableMaxSize int64
 
 	// Search
+	// MaxResults is the internal candidate cap the RRF ranker fuses over —
+	// not a user-facing page size. Callers (pkg/zenith's WithLimit/Limit,
+	// gRPC's SearchRequest.limit) truncate the returned slice themselves;
+	// this only needs to be large enough not to clip before that happens.
 	MaxResults      int
 	FuzzyMaxDist    int
 	BloomFPRate     float64
@@ -35,7 +39,7 @@ func DefaultConfig() *Config {
 		WALDir:           "./data/wal",
 		DataDir:          "./data/sst",
 		MemTableMaxSize:  67108864, // 64MB
-		MaxResults:       10,
+		MaxResults:       1000,
 		FuzzyMaxDist:     2,
 		BloomFPRate:      0.01,
 		// RRFConstant and VectorWeight were tuned on MS MARCO dev with all

@@ -10,6 +10,7 @@ type options struct {
 	limit              int
 	checkpointInterval time.Duration
 	noWordVectors      bool
+	memoryLimitBytes   int64
 }
 
 func defaultOptions() *options {
@@ -113,6 +114,25 @@ func WithoutWordVectors() Option {
 // the document is not in the hybrid result list) and must not be used as a threshold.
 func Explain() SearchOption {
 	return func(o *searchOptions) { o.explain = true }
+}
+
+// WithMemoryLimit rejects new documents (Add/AddBatch return ErrIndexFull)
+// once the index's estimated heap usage would exceed limitBytes, instead of
+// growing unbounded until the OS kills the process.
+//
+// The estimate is approximate, not exact accounting: it multiplies the
+// document count by a fixed per-document cost (~11KB) derived from the
+// measured hybrid-mode heap delta in bench/BENCHMARK.md (1,127MB / 100,000
+// docs). Actual usage varies with document length, vocabulary overlap, and
+// embedder mode — treat limitBytes as a safety margin, not a precise cap.
+func WithMemoryLimit(limitBytes int64) Option {
+	return func(o *options) error {
+		if limitBytes <= 0 {
+			return ErrInvalidOption
+		}
+		o.memoryLimitBytes = limitBytes
+		return nil
+	}
 }
 
 // WithCheckpointInterval sets how often the DB automatically saves a gob

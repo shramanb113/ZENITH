@@ -74,6 +74,8 @@ func (s *ZenithServer) Search(
 		return nil, status.Errorf(codes.Internal, "search failed: %v", err)
 	}
 
+	results = paginate(results, int(req.GetOffset()), int(req.GetLimit()))
+
 	protoResults := make([]*zenithproto.SearchResult, 0, len(results))
 	for _, r := range results {
 		text, _ := s.Engine.GetText(r.ID)
@@ -164,6 +166,29 @@ func (s *ZenithServer) DeleteDocument(
 		Status:  true,
 		Message: fmt.Sprintf("document %s deleted", req.GetId()),
 	}, nil
+}
+
+// defaultSearchLimit mirrors pkg/zenith's default page size so the gRPC and
+// embedded-library surfaces behave the same way when no limit is given.
+const defaultSearchLimit = 10
+
+// paginate applies offset then limit to a ranked result slice. A limit <= 0
+// falls back to defaultSearchLimit; a negative offset is treated as 0.
+func paginate(results []index.SearchResponse, offset, limit int) []index.SearchResponse {
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = defaultSearchLimit
+	}
+	if offset >= len(results) {
+		return nil
+	}
+	end := offset + limit
+	if end > len(results) {
+		end = len(results)
+	}
+	return results[offset:end]
 }
 
 // parseChunkFields parses the structured chunk ID format

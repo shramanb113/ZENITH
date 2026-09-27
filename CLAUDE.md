@@ -16,10 +16,9 @@ go test ./...
 
 # Run tests for a single package
 go test ./internal/ranking/...
-
-# Run the Nerve embedding sidecar (required for vector search)
-cd nerve && uvicorn main:app --host 0.0.0.0 --port 8000
 ```
+
+Vector search uses an in-process ONNX embedder (`internal/localembedder`) — the model ships inside the Go binary via `go:embed`, so no separate sidecar process is needed. It requires `CGO_ENABLED=1` and a C compiler (MinGW-w64 on Windows, gcc on Linux/macOS); without CGo the engine falls back to a deterministic hash-based embedder (`embedding.NewDeterministicEmbedder`), which degrades semantic search to non-semantic but keeps lexical (BM25/n-gram/fuzzy) search fully working.
 
 The gRPC server loads the index from `zenith.db` on startup and saves it on graceful shutdown (SIGINT/SIGTERM).
 
@@ -47,7 +46,7 @@ The search orchestrator — owns all sub-indexes and the scoring pipeline:
 - **PhoneticIndex** — Soundex buckets for phonetic matching
 - **BKTree** (`internal/analysis/bktree.go`) — Levenshtein-based fuzzy term lookup, O(log n) via triangle inequality pruning
 
-**Add pipeline** (per document): `Analyzer.Analyze` → embed (Nerve HTTP call) → write postings to InvertedIndex + PhoneticIndex + BKTree + BM25 + TF-IDF
+**Add pipeline** (per document): `Analyzer.Analyze` → embed (in-process ONNX call via `internal/localembedder`) → write postings to InvertedIndex + PhoneticIndex + BKTree + BM25 + TF-IDF
 
 **Search pipeline**: lexical pass (n-gram + phonetic + BK-tree fuzzy) → vector pass (dot product against all doc vectors) → `rankAndFuse` (RRF + BM25 tiebreak) → neural expansion if results are absent or weak
 
@@ -63,18 +62,20 @@ The search orchestrator — owns all sub-indexes and the scoring pipeline:
 - `BM25Scorer` — used as tiebreaker when RRF scores are within epsilon (1e-6)
 - `TFIDFScorer` — kept in sync on every Add/Remove but not used in the main ranking path
 
-### 5. Nerve (`nerve/main.py`)
+### 5. Embedding (`internal/localembedder/`)
 
-A FastAPI Python sidecar that serves `all-MiniLM-L6-v2` (384-dimensional) embeddings at `POST /embed` and `POST /embed_batch`. The Go side wraps it with a caching layer (`internal/embedding/cache.go`, LRU of 10,000 entries). Embedding failures are non-fatal — the engine degrades to lexical-only search.
+An in-process embedder that runs `all-MiniLM-L6-v2` (384-dimensional, int8-quantized, ~22MB) via ONNX Runtime. The model, tokenizer vocab, and platform-specific ONNX Runtime shared library are all bundled into the Go binary with `go:embed` (`internal/localembedder/assets/`) and extracted to a temp directory on first use — no separate process, no Python, no network call. Requires `CGO_ENABLED=1` and a C compiler.
 
-Default URL: `http://localhost:8000` (configurable via `config.NerveURL`).
+The Go side wraps it with a caching layer (`internal/embedding/cache.go`, LRU of 10,000 entries). Embedding failures — including CGo being unavailable at build time — are non-fatal: `pkg/zenith`'s `buildEmbedder` and `cmd/server/main.go` both fall back to `embedding.NewDeterministicEmbedder(384)` (a hash-based, non-semantic embedder) so lexical search keeps working.
+
+There used to be a separate FastAPI/Python sidecar (`nerve/`) serving the same model over HTTP; it was removed in favor of the in-process embedder above. `internal/sidecar/` is unrelated — it's the HTTP/JSON namespace API (see `internal/sidecar/sidecar.go`), not an embedding service.
 
 ## Key Wiring
 
 `cmd/server/main.go` is the assembly point:
 
 ```
-StandardAnalyzer → NeuralEmbedder → CachingEmbedder
+StandardAnalyzer → localembedder (ONNX) or DeterministicEmbedder → CachingEmbedder
 RRFRanker
 index.NewEngine(config, embedder, scorer, analyzer) → gRPC server
 ```
@@ -86,9 +87,21 @@ Index persistence uses `encoding/gob` (not the LSM storage engine) via `engine.S
 All tuneable parameters live in `internal/config/config.go` (`DefaultConfig()`). Notable values:
 
 - `FuzzyMaxDist` — BK-tree edit distance threshold (default 2)
-- `RRFConstant` — RRF k value (default 60.0)
+- `RRFConstant` — RRF k value (default 20.0; tuned on MS MARCO dev, see the comment in `DefaultConfig()`)
+- `MaxResults` — internal RRF candidate cap (default 1000), not a user-facing page size — see "Result limits" below
 - `PhoneticWeight`, `VectorWeight`, `NeuralWeight` — scoring blend weights
 - `MemTableMaxSize` — SSTable flush threshold (64MB)
+- `NerveGRPCAddr` — dead config left over from the removed Nerve sidecar; not read anywhere in the codebase
+
+### Result limits
+
+The RRF ranker's internal candidate cap (`Config.MaxResults`) and the user-facing page size are two different things:
+
+- **`pkg/zenith`**: `WithLimit(n)` (default 10) sets the default page size at `Open` time; `Limit(n)` overrides it per `Search` call. Both are applied in `buildResults` after the engine returns candidates — the engine itself now returns up to `MaxResults` (1000) candidates so a `Limit()` above 10 actually has something to truncate from.
+- **gRPC**: `SearchRequest.limit`/`.offset` (added to `document.proto`); `internal/server.paginate` applies them, defaulting to 10 when `limit` is unset.
+- **CLI** (`zenith search --max N`): slices the same underlying candidate list client-side.
+
+Before this was wired up, the ranker was always constructed with a fixed internal cap of 10 (`topN=0` defaulting via `ranking.defaultTopN`), so no caller-side limit above 10 could ever have an effect — `Limit(30)` silently still returned 10 results on all three surfaces.
 
 Storage engine config (`internal/storage/storage_engine.go`, `DefaultEngineConfig()`):
 

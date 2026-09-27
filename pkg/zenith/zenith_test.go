@@ -2,6 +2,7 @@ package zenith_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -489,6 +490,26 @@ func TestSearch_LimitSearchOption_OverridesDefault(t *testing.T) {
 	results, _ := db.Search(bgCtx(), "matching content", zenith.Limit(2))
 	if len(results) > 2 {
 		t.Fatalf("Limit(2) search option should cap at 2, got %d", len(results))
+	}
+}
+
+// Regression test: the RRF ranker's internal candidate cap used to be
+// hardcoded to 10 regardless of the caller's requested limit, so Limit(n)
+// for n > 10 silently still returned at most 10 results. See
+// internal/config.Config.MaxResults, which now sets a generous internal
+// candidate cap decoupled from the user-facing limit.
+func TestSearch_LimitAboveTen(t *testing.T) {
+	db := openMem(t)
+	for i := 0; i < 40; i++ {
+		mustAdd(t, db, fmt.Sprintf("doc%d", i), "matching content about widgets")
+	}
+
+	results, err := db.Search(bgCtx(), "widgets", zenith.Limit(30))
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 30 {
+		t.Fatalf("Limit(30) with 40 matching docs should return 30, got %d", len(results))
 	}
 }
 

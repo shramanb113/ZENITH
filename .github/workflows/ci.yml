@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / cgo=${{ matrix.cgo }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        cgo: ["0", "1"]
+    env:
+      CGO_ENABLED: ${{ matrix.cgo }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.1"
+          cache: true
+
+      # windows-latest has no C compiler preinstalled; the other runners do.
+      - name: Set up MinGW (Windows, cgo=1 only)
+        if: matrix.os == 'windows-latest' && matrix.cgo == '1'
+        uses: egor-tensin/setup-mingw@v2
+        with:
+          platform: x64
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # The race detector requires cgo; the cgo=0 leg runs a plain test pass instead.
+      - name: Test (race)
+        if: matrix.cgo == '1'
+        run: go test -race ./...
+
+      - name: Test
+        if: matrix.cgo == '0'
+        run: go test ./...

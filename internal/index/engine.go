@@ -464,6 +464,13 @@ func (e *Engine) GetText(originalID string) (string, bool) {
 	return text, ok
 }
 
+// Count returns the number of documents currently held in the index.
+func (e *Engine) Count() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(e.docText)
+}
+
 func (e *Engine) addInternal(ctx context.Context, originalID string, fullText string, preVec []float32) error {
 	if e.journal != nil {
 		if err := e.journal.Put(ctx, []byte(originalID), []byte(fullText)); err != nil {

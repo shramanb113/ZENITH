@@ -1,5 +1,7 @@
 # ZENITH
 
+[![CI](https://github.com/shramanb113/ZENITH/actions/workflows/ci.yml/badge.svg)](https://github.com/shramanb113/ZENITH/actions/workflows/ci.yml)
+
 > Local-first hybrid search — as a CLI tool and as a Go library.
 
 ZENITH is a search engine built from scratch in Go. It understands meaning, not just keywords — combining lexical matching, BK-tree fuzzy search, and neural vector embeddings into a single hybrid pipeline, ranked with Reciprocal Rank Fusion.
@@ -402,13 +404,15 @@ Full LSM-tree — same architecture as RocksDB and LevelDB, built from scratch.
 
 ```protobuf
 service SearchService {
-  rpc IndexDocument(IndexRequest)  returns (IndexResponse);
-  rpc Search(SearchRequest)        returns (SearchResponse);
-  rpc FuzzySearch(FuzzyRequest)    returns (SearchResponse);
-  rpc HybridSearch(HybridRequest)  returns (SearchResponse);
-  rpc GetStats(StatsRequest)       returns (StatsResponse);
+  rpc IndexDocuments(IndexRequest)         returns (IndexResponse);
+  rpc Search(SearchRequest)                returns (SearchResponse);
+  rpc IndexPDF(IndexPDFRequest)             returns (IndexPDFResponse);
+  rpc GetDocument(GetDocumentRequest)       returns (GetDocumentResponse);
+  rpc DeleteDocument(DeleteDocumentRequest) returns (DeleteDocumentResponse);
 }
 ```
+
+`Search` fuses lexical (BM25 + n-gram + phonetic + BK-tree fuzzy) and vector scoring via RRF — there's no separate `FuzzySearch`/`HybridSearch` RPC, it's all one `Search` call. `SearchRequest` takes an optional `limit`/`offset` for pagination (default limit: 10). See `internal/proto/document.proto` for the source of truth.
 
 ---
 

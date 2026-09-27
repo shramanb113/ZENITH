@@ -24,6 +24,10 @@ message IndexResponse {
 
 message SearchRequest{
     string query = 1 ;
+    // limit caps the number of results returned. 0 or unset defaults to 10.
+    int32 limit = 2;
+    // offset skips this many results from the top of the ranked list, for pagination.
+    int32 offset = 3;
 }
 
 message SearchResult {

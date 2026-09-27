@@ -63,7 +63,7 @@ func main() {
 	}
 
 	tkz := analysis.NewStandardAnalyzer()
-	scorer := ranking.NewWeightedRRFRanker(appConfig.RRFConstant, 0, 1.0, appConfig.VectorWeight)
+	scorer := ranking.NewWeightedRRFRanker(appConfig.RRFConstant, appConfig.MaxResults, 1.0, appConfig.VectorWeight)
 	engine := index.NewEngine(appConfig, emb, scorer, tkz)
 
 	engine.SetFSTPath("./data/index.fst")

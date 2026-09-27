@@ -1,6 +1,8 @@
 package zenith_test
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/shramanb113/ZENITH/internal/embedding"
@@ -138,5 +140,59 @@ func TestLimitSearchOption_Positive(t *testing.T) {
 	}
 	if len(results) > 1 {
 		t.Fatalf("Limit(1) should cap at 1 result, got %d", len(results))
+	}
+}
+
+func TestWithMemoryLimit_ZeroOrNegative(t *testing.T) {
+	if _, err := zenith.Open(":memory:", zenith.WithMemoryLimit(0)); err == nil {
+		t.Fatal("WithMemoryLimit(0) should return an error")
+	}
+	if _, err := zenith.Open(":memory:", zenith.WithMemoryLimit(-1)); err == nil {
+		t.Fatal("WithMemoryLimit(-1) should return an error")
+	}
+}
+
+func TestWithMemoryLimit_RejectsGrowthPastLimit(t *testing.T) {
+	// ~11KB/doc estimate; 30KB fits ~2 docs before Add starts returning ErrIndexFull.
+	db, err := zenith.Open(":memory:", zenith.WithBM25Only(), zenith.WithMemoryLimit(30*1024))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	ctx := bgCtx()
+	var lastErr error
+	added := 0
+	for i := 0; i < 10; i++ {
+		lastErr = db.Add(ctx, fmt.Sprintf("doc%d", i), "some content")
+		if lastErr != nil {
+			break
+		}
+		added++
+	}
+	if added == 0 || added >= 10 {
+		t.Fatalf("expected the limit to be hit partway through, added %d docs before error", added)
+	}
+	if !errors.Is(lastErr, zenith.ErrIndexFull) {
+		t.Fatalf("expected ErrIndexFull once the memory limit is exceeded, got %v", lastErr)
+	}
+}
+
+func TestWithMemoryLimit_AllowsUpdatingExistingDocAtLimit(t *testing.T) {
+	db, err := zenith.Open(":memory:", zenith.WithBM25Only(), zenith.WithMemoryLimit(30*1024))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	ctx := bgCtx()
+	for i := 0; i < 10; i++ {
+		if db.Add(ctx, fmt.Sprintf("doc%d", i), "some content") != nil {
+			break // limit reached; fine, we just need at least one doc indexed
+		}
+	}
+
+	if err := db.Add(ctx, "doc0", "updated content"); err != nil {
+		t.Fatalf("updating an existing document at the limit should not fail: %v", err)
 	}
 }
