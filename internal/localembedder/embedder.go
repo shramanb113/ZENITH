@@ -1,6 +1,8 @@
-// Package localembedder provides in-process sentence embeddings using the
-// all-MiniLM-L6-v2 ONNX model. The model and onnxruntime library are embedded
-// in the binary via go:embed and extracted to a temp directory on first use.
+// Package localembedder provides in-process sentence embeddings from ONNX
+// models (all-MiniLM-L6-v2, gte-small, bge-small-en-v1.5 — see spec.go). One
+// model and the onnxruntime library are embedded in the binary via go:embed
+// and extracted to a temp directory on first use; other registered models are
+// loaded from a models directory (see NewFromDir and `zenith models`).
 //
 // Requires CGo (CGO_ENABLED=1) and a C compiler to build. Without CGo, New()
 // returns an error and the caller should fall back to a deterministic embedder.
@@ -12,28 +14,76 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/shramanb113/ZENITH/internal/embedding"
+	"github.com/shramanb113/ZENITH/internal/modelspec"
 )
 
-//go:embed assets/model.onnx
-var modelBytes []byte
+// modelIDBytes names the registry entry the bundled model.onnx corresponds to.
+// scripts/download_assets.go writes it next to the model it downloads, so the
+// two can never disagree.
+//
+//go:embed assets/model.id
+var modelIDBytes []byte
 
-//go:embed assets/vocab.txt
-var vocabBytes []byte
+// BundledID is the registry ID of the model compiled into this binary.
+func BundledID() string {
+	if id := strings.TrimSpace(string(modelIDBytes)); id != "" {
+		return id
+	}
+	return modelspec.DefaultID
+}
 
 // Embedder implements embedding.Embedder using in-process ONNX inference.
 // All methods are safe for concurrent use.
 type Embedder struct {
+	spec  Spec
 	tok   *tokenizer
 	model *onnxModel
 }
 
-// New loads the embedded ONNX model and returns a ready Embedder.
+// New loads the bundled ONNX model and returns a ready Embedder.
 // Requires CGo (CGO_ENABLED=1). Returns an error if CGo is unavailable or
 // the onnxruntime library cannot be initialised.
 func New() (*Embedder, error) {
-	tok, err := newTokenizerFromBytes(vocabBytes)
+	spec, err := Lookup(BundledID())
+	if err != nil {
+		return nil, err
+	}
+	return newEmbedder(spec, modelBytes, vocabBytes)
+}
+
+// NewByID returns the embedder for a registered model. The bundled model is
+// used directly; any other model is read from modelsDir/<id>/model.onnx (the
+// layout `zenith models pull <id>` produces). An empty id means the bundled one.
+func NewByID(id, modelsDir string) (*Embedder, error) {
+	if id == "" || strings.EqualFold(id, BundledID()) {
+		return New()
+	}
+	spec, err := Lookup(id)
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(modelsDir, spec.ID)
+	model, err := os.ReadFile(filepath.Join(dir, "model.onnx"))
+	if err != nil {
+		return nil, fmt.Errorf("localembedder: model %q is not installed (%w) — run: zenith models pull %s", spec.ID, err, spec.ID)
+	}
+	vocab := vocabBytes // every registered model shares the BERT-uncased vocabulary
+	if v, err := os.ReadFile(filepath.Join(dir, "vocab.txt")); err == nil {
+		vocab = v
+	}
+	return newEmbedder(spec, model, vocab)
+}
+
+func newEmbedder(spec Spec, model, vocab []byte) (*Embedder, error) {
+	if err := unavailable(); err != nil {
+		return nil, err
+	}
+	tok, err := newTokenizerFromBytes(vocab)
 	if err != nil {
 		return nil, fmt.Errorf("localembedder: tokenizer: %w", err)
 	}
@@ -43,13 +93,16 @@ func New() (*Embedder, error) {
 		return nil, fmt.Errorf("localembedder: extract ort lib: %w", err)
 	}
 
-	m, err := newOnnxModel(modelBytes, libPath)
+	m, err := newOnnxModel(model, libPath)
 	if err != nil {
 		return nil, fmt.Errorf("localembedder: ort session: %w", err)
 	}
 
-	return &Embedder{tok: tok, model: m}, nil
+	return &Embedder{spec: spec, tok: tok, model: m}, nil
 }
+
+// Spec returns the model description this embedder runs.
+func (e *Embedder) Spec() Spec { return e.spec }
 
 // seqLenFor rounds n up to a multiple of 8 (efficient ONNX kernel shapes),
 // capped at maxLen. The model has dynamic sequence axes — padding every input
@@ -63,8 +116,27 @@ func seqLenFor(n int) int {
 	return l
 }
 
-// Embed returns a 384-dimensional L2-normalised vector for text.
+func (e *Embedder) pool(hidden []float32, mask []int64, seqLen int) []float32 {
+	if e.spec.Pooling == PoolCLS {
+		return l2Normalize(append([]float32(nil), hidden[:e.spec.Dims]...))
+	}
+	return l2Normalize(meanPool(hidden, mask, seqLen, e.spec.Dims))
+}
+
+// Embed returns an L2-normalised vector for a document (or any symmetric text).
 func (e *Embedder) Embed(_ context.Context, text string) ([]float32, error) {
+	return e.embedOne(e.spec.DocPrefix + text)
+}
+
+// EmbedQuery embeds a search query. For models trained with a query
+// instruction (bge) that prefix is applied; for symmetric models it is
+// identical to Embed. The engine calls this on the search path when available
+// (see embedding.QueryEmbedder).
+func (e *Embedder) EmbedQuery(_ context.Context, text string) ([]float32, error) {
+	return e.embedOne(e.spec.QueryPrefix + text)
+}
+
+func (e *Embedder) embedOne(text string) ([]float32, error) {
 	ids := e.tok.encodeIDs(text, maxLen)
 	seqLen := seqLenFor(len(ids))
 
@@ -76,12 +148,11 @@ func (e *Embedder) Embed(_ context.Context, text string) ([]float32, error) {
 		flatMask[i] = 1
 	}
 
-	hidden, err := e.model.infer(flatIDs, flatMask, flatTypeIDs, 1, seqLen)
+	hidden, err := e.model.infer(flatIDs, flatMask, flatTypeIDs, 1, seqLen, e.spec.Dims)
 	if err != nil {
 		return nil, err
 	}
-	vec := meanPool(hidden, flatMask, seqLen, hiddenSize)
-	return l2Normalize(vec), nil
+	return e.pool(hidden, flatMask, seqLen), nil
 }
 
 // EmbedBatch returns embeddings for all texts in a single ONNX forward pass.
@@ -94,7 +165,7 @@ func (e *Embedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, e
 	encoded := make([][]int64, n)
 	longest := 0
 	for i, t := range texts {
-		encoded[i] = e.tok.encodeIDs(t, maxLen)
+		encoded[i] = e.tok.encodeIDs(e.spec.DocPrefix+t, maxLen)
 		if len(encoded[i]) > longest {
 			longest = len(encoded[i])
 		}
@@ -112,27 +183,29 @@ func (e *Embedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, e
 		}
 	}
 
-	hidden, err := e.model.infer(flatIDs, flatMask, flatTypeIDs, n, seqLen)
+	hidden, err := e.model.infer(flatIDs, flatMask, flatTypeIDs, n, seqLen, e.spec.Dims)
 	if err != nil {
 		return nil, err
 	}
 
-	chunkSize := seqLen * hiddenSize
+	chunkSize := seqLen * e.spec.Dims
 	result := make([][]float32, n)
 	for i := range texts {
 		chunk := hidden[i*chunkSize : (i+1)*chunkSize]
-		vec := meanPool(chunk, flatMask[i*seqLen:(i+1)*seqLen], seqLen, hiddenSize)
-		result[i] = l2Normalize(vec)
+		result[i] = e.pool(chunk, flatMask[i*seqLen:(i+1)*seqLen], seqLen)
 	}
 	return result, nil
 }
 
-// Dimensions returns 384 — the output size of all-MiniLM-L6-v2.
-func (e *Embedder) Dimensions() int { return hiddenSize }
+// Dimensions returns the model's output size.
+func (e *Embedder) Dimensions() int { return e.spec.Dims }
 
 // Name identifies the embedding model for index-file compatibility checks
 // (see internal/embedding.Named).
-func (e *Embedder) Name() string { return "onnx:all-MiniLM-L6-v2" }
+func (e *Embedder) Name() string { return e.spec.IndexName() }
 
-// Verify implements embedding.Embedder at compile time.
-var _ embedding.Embedder = (*Embedder)(nil)
+// Verify interfaces at compile time.
+var (
+	_ embedding.Embedder      = (*Embedder)(nil)
+	_ embedding.QueryEmbedder = (*Embedder)(nil)
+)

@@ -1,5 +1,7 @@
 package analysis
 
+import "sort"
+
 // BKTree is a metric-space tree for efficient fuzzy term lookup.
 // It uses Levenshtein distance as the metric, giving O(log n) average
 // search via the triangle inequality pruning property.
@@ -96,6 +98,15 @@ func (t *BKTree) Search(query string, maxDist int) []FuzzyMatch {
 		}
 	}
 
+	// Children are stored in a map, so the walk order is random. Return a
+	// stable order (nearest first, ties alphabetical) so callers — and the FST
+	// fuzzy path, which returns the same set — see identical, reproducible output.
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Distance != results[j].Distance {
+			return results[i].Distance < results[j].Distance
+		}
+		return results[i].Word < results[j].Word
+	})
 	return results
 }
 

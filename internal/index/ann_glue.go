@@ -39,7 +39,7 @@ func (e *Engine) SetANNThreshold(n int) {
 	switch {
 	case n <= 0:
 		e.ann = nil
-	case len(e.vectors.vectors) >= n:
+	case e.vectorCount() >= n:
 		e.rebuildANNLocked()
 	default:
 		e.ann = nil
@@ -55,29 +55,65 @@ func (e *Engine) ANNActive() bool {
 
 // The *Locked helpers require Engine.mu and vectors.mu held for writing.
 
-func (e *Engine) annVec(id uint64) []uint16 { return e.vectors.vectors[id].Vector }
-
+// rebuildANNLocked builds the graph from every live vector (delta and
+// segments), in ID order so the graph is deterministic.
 func (e *Engine) rebuildANNLocked() {
-	ids := make([]uint64, 0, len(e.vectors.vectors))
-	for id := range e.vectors.vectors {
-		ids = append(ids, id)
+	type item struct {
+		id uint64
+		v  []uint16
 	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] }) // deterministic graph
-	g := ann.New(annM, annEFConstruction, e.annVec)
-	for _, id := range ids {
-		g.Insert(id, Float16ToFloats(e.vectors.vectors[id].Vector))
+	items := make([]item, 0, e.vectorCount())
+	e.eachVector(func(id uint64, v []uint16) { items = append(items, item{id, v}) })
+	sort.Slice(items, func(i, j int) bool { return items[i].id < items[j].id })
+	g := ann.New(annM, annEFConstruction)
+	for _, it := range items {
+		g.Insert(it.id, Float16ToFloats(it.v), it.v)
 	}
 	e.ann = g
 }
 
-func (e *Engine) annInsertLocked(id uint64, vec []float32) {
+// rebuildANNAfterLoadLocked builds the graph after a snapshot load if the
+// corpus is large enough; the graph itself is never persisted.
+func (e *Engine) rebuildANNAfterLoadLocked() {
+	e.ann = nil
+	if e.annMinDocs > 0 && e.vectorCount() >= e.annMinDocs {
+		e.rebuildANNLocked()
+	}
+}
+
+// rebindANNLocked repoints the graph at the vectors' new homes after a flush
+// or compaction moved them. If any vector is missing the graph is rebuilt.
+func (e *Engine) rebindANNLocked() {
 	if e.ann == nil {
-		if e.annMinDocs > 0 && len(e.vectors.vectors) >= e.annMinDocs {
+		return
+	}
+	if err := e.ann.Rebind(e.vecOf); err != nil {
+		e.rebuildANNLocked()
+	}
+}
+
+// rebindANNSomeLocked is rebindANNLocked for a flush: only the flushed
+// documents' vectors moved, so only those nodes are re-pointed. Falls back to a
+// rebuild if any is missing.
+func (e *Engine) rebindANNSomeLocked(ids []uint64) {
+	if e.ann == nil || len(ids) == 0 {
+		return
+	}
+	if err := e.ann.RebindSome(ids, e.vecOf); err != nil {
+		e.rebuildANNLocked()
+	}
+}
+
+// annInsertLocked adds a document to the graph. vec is the decoded float32
+// vector and bits the stored float16 form (retained by the graph).
+func (e *Engine) annInsertLocked(id uint64, vec []float32, bits []uint16) {
+	if e.ann == nil {
+		if e.annMinDocs > 0 && e.vectorCount() >= e.annMinDocs {
 			e.rebuildANNLocked() // already includes id: it is in the store
 		}
 		return
 	}
-	e.ann.Insert(id, vec)
+	e.ann.Insert(id, vec, bits)
 	if e.ann.NeedsRebuild() {
 		e.rebuildANNLocked()
 	}
@@ -91,21 +127,21 @@ func (e *Engine) annDeleteLocked(id uint64) {
 
 // annSearch returns the graph's nearest documents, or ok=false when an exact
 // scan should be used instead (very selective filter).
-func (e *Engine) annSearch(q []float32, pred Predicate, vecs map[uint64]VectorEntry) ([]ann.Hit, bool) {
+func (e *Engine) annSearch(q []float32, pred Predicate) ([]ann.Hit, bool) {
 	ef := annEF
 	var allow func(uint64) bool
 	if pred != nil {
-		const sample = 256
-		seen, ok := 0, 0
-		for id := range vecs {
+		sample := e.sampleVectorIDs(256)
+		ok := 0
+		for _, id := range sample {
 			if pred(e.attrs[id]) {
 				ok++
 			}
-			if seen++; seen >= sample {
-				break
-			}
 		}
-		frac := float64(ok) / float64(seen)
+		if len(sample) == 0 {
+			return nil, false
+		}
+		frac := float64(ok) / float64(len(sample))
 		if frac < annMinSelectivity {
 			return nil, false
 		}

@@ -3,10 +3,13 @@
 // search stays sub-linear as the corpus grows instead of scanning every
 // document per query.
 //
-// The index does not own vectors: it reads the float16 vectors the engine
-// already stores through a lookup callback, so ANN adds only the graph
-// (links) on top of the existing memory footprint. Similarity is the dot
-// product, which equals cosine similarity for unit vectors.
+// The index does not own vector data: each node keeps only a slice header
+// pointing at the float16 vector the engine already stores (a heap slice, or a
+// view into a memory-mapped segment), so ANN adds only the graph (links) on
+// top of the existing memory footprint. Slices handed to Insert must stay
+// valid and unmodified for as long as the index is used — drop the index
+// before unmapping a segment. Similarity is the dot product, which equals
+// cosine similarity for unit vectors.
 //
 // An Index is NOT safe for concurrent mutation. The engine serialises
 // Insert/Delete under its write lock and runs Search under its read lock;
@@ -15,6 +18,7 @@ package ann
 
 import (
 	"container/heap"
+	"fmt"
 	"math"
 	"math/rand"
 	"sort"
@@ -80,9 +84,9 @@ type Index struct {
 	m, mmax0, efConstruction int
 	ml                       float64
 	rng                      *rand.Rand
-	vec                      func(id uint64) []uint16
 
 	ids      []uint64
+	vecs     [][]uint16 // vecs[node] is the stored vector; not owned
 	idx      map[uint64]int32
 	links    [][][]int32 // links[node][layer] -> neighbour node indexes
 	dead     []bool
@@ -91,10 +95,9 @@ type Index struct {
 	maxLevel int
 }
 
-// New creates an empty index. vec must return the stored float16 vector for
-// an ID (nil if absent). m is the max links per node above layer 0
+// New creates an empty index. m is the max links per node above layer 0
 // (2*m at layer 0); efConstruction trades build time for graph quality.
-func New(m, efConstruction int, vec func(id uint64) []uint16) *Index {
+func New(m, efConstruction int) *Index {
 	if m < 4 {
 		m = 16
 	}
@@ -105,7 +108,6 @@ func New(m, efConstruction int, vec func(id uint64) []uint16) *Index {
 		m: m, mmax0: 2 * m, efConstruction: efConstruction,
 		ml:    1 / math.Log(float64(m)),
 		rng:   rand.New(rand.NewSource(1)), // fixed seed: deterministic graphs for a given insert order
-		vec:   vec,
 		idx:   make(map[uint64]int32),
 		entry: -1,
 	}
@@ -124,15 +126,16 @@ func (x *Index) randomLevel() int {
 	return int(-math.Log(1-x.rng.Float64()) * x.ml)
 }
 
-// Insert adds a document. q is the same vector as vec(id), decoded to
-// float32. Re-inserting an existing ID replaces it.
-func (x *Index) Insert(id uint64, q []float32) {
+// Insert adds a document. q is v decoded to float32; v is retained (not
+// copied). Re-inserting an existing ID replaces it.
+func (x *Index) Insert(id uint64, q []float32, v []uint16) {
 	if _, ok := x.idx[id]; ok {
 		x.Delete(id)
 	}
 	lvl := x.randomLevel()
 	n := int32(len(x.ids))
 	x.ids = append(x.ids, id)
+	x.vecs = append(x.vecs, v)
 	x.dead = append(x.dead, false)
 	x.links = append(x.links, make([][]int32, lvl+1))
 	x.idx[id] = n
@@ -182,9 +185,54 @@ func (x *Index) Delete(id uint64) {
 	delete(x.idx, id)
 	x.dead[n] = true
 	x.live--
+	// The node stays as a routing point, but the vector it points at may live
+	// in a memory-mapped segment that is about to be unmapped; own a copy.
+	x.vecs[n] = append([]uint16(nil), x.vecs[n]...)
 }
 
-func (x *Index) nodeVec(n int32) []uint16 { return x.vec(x.ids[n]) }
+// RebindSome is Rebind for just the given IDs — for a flush, which moves only
+// the flushed documents' vectors (every other node still points into an
+// unchanged mapping), so the cost is O(delta) rather than O(index). IDs not in
+// the graph are ignored.
+func (x *Index) RebindSome(ids []uint64, f func(id uint64) []uint16) error {
+	fresh := make(map[int32][]uint16, len(ids))
+	for _, id := range ids {
+		n, ok := x.idx[id]
+		if !ok {
+			continue
+		}
+		v := f(id)
+		if v == nil {
+			return fmt.Errorf("ann: rebind: no vector for id %d", id)
+		}
+		fresh[n] = v
+	}
+	for n, v := range fresh {
+		x.vecs[n] = v
+	}
+	return nil
+}
+
+// Rebind repoints every live node at the vector f returns for its ID, after
+// the engine moved vectors (flush into a new segment, compaction). It returns
+// an error, leaving the index unchanged for nodes already visited, if f has no
+// vector for a live ID; the caller should rebuild in that case.
+func (x *Index) Rebind(f func(id uint64) []uint16) error {
+	fresh := make(map[int32][]uint16, len(x.idx))
+	for id, n := range x.idx {
+		v := f(id)
+		if v == nil {
+			return fmt.Errorf("ann: rebind: no vector for id %d", id)
+		}
+		fresh[n] = v
+	}
+	for n, v := range fresh {
+		x.vecs[n] = v
+	}
+	return nil
+}
+
+func (x *Index) nodeVec(n int32) []uint16 { return x.vecs[n] }
 
 func (x *Index) simQ(q []float32, n int32) float64 {
 	v := x.nodeVec(n)

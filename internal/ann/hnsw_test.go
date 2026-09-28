@@ -48,13 +48,13 @@ func buildCorpus(n, dim int, seed int64) *corpus {
 		centers[i] = c
 	}
 	c := &corpus{vecs: map[uint64][]uint16{}, f32: map[uint64][]float32{}}
-	c.idx = New(16, 100, func(id uint64) []uint16 { return c.vecs[id] })
+	c.idx = New(16, 100)
 	for i := 0; i < n; i++ {
 		id := uint64(i + 1)
 		v := unit(r, centers[r.Intn(len(centers))], 0.35)
 		c.f32[id] = v
 		c.vecs[id] = toF16(v)
-		c.idx.Insert(id, v)
+		c.idx.Insert(id, v, c.vecs[id])
 	}
 	return c
 }
@@ -175,7 +175,7 @@ func TestHNSW_DeletedNeverReturnedAndReinsertReplaces(t *testing.T) {
 	r := rand.New(rand.NewSource(11))
 	nv := unit(r, c.f32[2], 0.05)
 	c.f32[1], c.vecs[1] = nv, toF16(nv)
-	c.idx.Insert(1, nv)
+	c.idx.Insert(1, nv, c.vecs[1])
 	top := c.idx.Search(nv, 1, 64, nil)
 	if len(top) != 1 || top[0].ID != 1 {
 		t.Fatalf("re-inserted id not returned as its own nearest neighbour: %+v", top)
@@ -183,13 +183,12 @@ func TestHNSW_DeletedNeverReturnedAndReinsertReplaces(t *testing.T) {
 }
 
 func TestHNSW_EmptyAndTiny(t *testing.T) {
-	idx := New(16, 100, func(uint64) []uint16 { return nil })
+	idx := New(16, 100)
 	if got := idx.Search([]float32{1, 0}, 5, 10, nil); got != nil {
 		t.Fatalf("empty index returned %v", got)
 	}
-	vecs := map[uint64][]uint16{1: toF16([]float32{1, 0})}
-	idx = New(16, 100, func(id uint64) []uint16 { return vecs[id] })
-	idx.Insert(1, []float32{1, 0})
+	idx = New(16, 100)
+	idx.Insert(1, []float32{1, 0}, toF16([]float32{1, 0}))
 	if got := idx.Search([]float32{1, 0}, 5, 10, nil); len(got) != 1 || got[0].ID != 1 {
 		t.Fatalf("single-node search = %v", got)
 	}

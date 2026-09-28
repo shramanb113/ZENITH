@@ -80,7 +80,10 @@ func Open(path string, opt ...Option) (*DB, error) {
 		}
 	}
 
-	emb := buildEmbedder(o)
+	emb, err := buildEmbedder(o)
+	if err != nil {
+		return nil, err
+	}
 
 	cfg := config.DefaultConfig()
 	cfg.FuzzyMaxDist = o.fuzzyDistance
@@ -639,6 +642,14 @@ func (db *DB) Close() (err error) {
 			db.docWAL = nil
 		}
 
+		// Unmap the segment files (required on Windows before they can be
+		// deleted or replaced, and releases address space everywhere).
+		if db.engine != nil {
+			if closeErr := db.engine.Close(); closeErr != nil && err == nil {
+				err = closeErr
+			}
+		}
+
 		if db.lock != nil {
 			db.lock.release()
 			db.lock = nil
@@ -819,24 +830,48 @@ func parseChunkID(rawID string) (string, *Chunk) {
 
 // buildEmbedder constructs the embedder based on options.
 // Falls back to deterministic (hash-based) embeddings if ONNX is unavailable.
-func buildEmbedder(o *options) embedding.Embedder {
+func buildEmbedder(o *options) (embedding.Embedder, error) {
 	if o.embedder != nil {
-		return o.embedder
+		return o.embedder, nil
+	}
+	if o.model != "" && !o.bm25Only {
+		dir := o.modelsDir
+		if dir == "" {
+			dir = defaultModelsDir()
+		}
+		m, err := localembedder.NewByID(o.model, dir)
+		if err != nil {
+			return nil, fmt.Errorf("zenith: %w", err)
+		}
+		if o.cacheSize > 0 {
+			if cached, err := embedding.NewCachingEmbedder(m, o.cacheSize); err == nil {
+				return cached, nil
+			}
+		}
+		return m, nil
 	}
 	if o.bm25Only {
 		// Return nil vectors so the engine skips vector storage and vectorPass
 		// entirely — pure lexical (BM25 + n-gram + fuzzy) search only.
-		return &nullEmbedder{}
+		return &nullEmbedder{}, nil
 	}
 	if localEmb, err := localembedder.New(); err == nil {
 		if o.cacheSize > 0 {
 			if cached, err := embedding.NewCachingEmbedder(localEmb, o.cacheSize); err == nil {
-				return cached
+				return cached, nil
 			}
 		}
-		return localEmb
+		return localEmb, nil
 	}
-	return embedding.NewDeterministicEmbedder(384)
+	return embedding.NewDeterministicEmbedder(384), nil
+}
+
+// defaultModelsDir is where `zenith models pull` installs non-bundled models.
+func defaultModelsDir() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".zenith", "models")
+	}
+	return "models"
 }
 
 // nullEmbedder returns nil vectors, causing the engine to skip vector indexing

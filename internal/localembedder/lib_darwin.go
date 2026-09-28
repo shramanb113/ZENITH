@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build cgo && darwin
 
 package localembedder
 

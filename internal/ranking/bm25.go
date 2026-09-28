@@ -6,6 +6,22 @@ import (
 	"sync"
 )
 
+// BM25Backing supplies corpus statistics and postings for documents that live
+// in immutable, memory-mapped segments instead of the scorer's own maps. The
+// scorer combines it with the documents it holds itself (recent additions), so
+// scores are identical to a single in-memory index over all of them. Every
+// method must reflect only *live* backing documents (deleted ones excluded).
+type BM25Backing interface {
+	// Totals returns the number of live backing documents and the sum of their lengths.
+	Totals() (docs, totalLen int)
+	// DocFreq returns how many live backing documents contain term.
+	DocFreq(term string) int
+	// EachPosting calls fn once per live backing document containing term.
+	EachPosting(term string, fn func(docID uint64, tf, docLen int))
+	// TermFreq returns a live backing document's frequency of term and its length.
+	TermFreq(docID uint64, term string) (tf, docLen int, ok bool)
+}
+
 // BM25Scorer implements the BM25 (Okapi BM25) ranking function.
 //
 // BM25 improves on TF-IDF with two key parameters:
@@ -47,6 +63,47 @@ type BM25Scorer struct {
 	docFreq   map[string]int // term → number of documents containing it
 	totalDocs int
 	totalLen  int // sum of all document lengths (for avgdl)
+
+	back BM25Backing // optional; nil = everything is in the maps above
+}
+
+// SetBacking attaches (or, with nil, detaches) immutable-segment statistics.
+func (s *BM25Scorer) SetBacking(b BM25Backing) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.back = b
+}
+
+// Reset drops every document the scorer holds itself (not the backing).
+func (s *BM25Scorer) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.docLengths = make(map[uint64]int)
+	s.termFreqs = make(map[uint64]map[string]int)
+	s.postings = make(map[string][]uint64)
+	s.docFreq = make(map[string]int)
+	s.totalDocs, s.totalLen = 0, 0
+}
+
+// corpus returns the combined live document count and total length.
+// Caller holds s.mu.
+func (s *BM25Scorer) corpus() (docs, totalLen int) {
+	docs, totalLen = s.totalDocs, s.totalLen
+	if s.back != nil {
+		d, l := s.back.Totals()
+		docs += d
+		totalLen += l
+	}
+	return docs, totalLen
+}
+
+// dfOf returns the combined document frequency of term. Caller holds s.mu.
+func (s *BM25Scorer) dfOf(term string) int {
+	df := s.docFreq[term]
+	if s.back != nil {
+		df += s.back.DocFreq(term)
+	}
+	return df
 }
 
 // BM25Params allows tuning k1 and b. Zero value uses defaults.
@@ -181,32 +238,40 @@ func (s *BM25Scorer) LoadState(docLengths map[uint64]int, termFreqs map[uint64]m
 
 // avgdl returns the average document length across the corpus.
 func (s *BM25Scorer) avgdl() float64 {
-	if s.totalDocs == 0 {
+	docs, total := s.corpus()
+	if docs == 0 {
 		return 0
 	}
-	return float64(s.totalLen) / float64(s.totalDocs)
+	return float64(total) / float64(docs)
 }
 
 // idf computes the IDF component for a term.
 // Uses the Robertson-Walker IDF variant with +1 smoothing to avoid
 // negative values for terms appearing in more than half the corpus.
 func (s *BM25Scorer) idf(term string) float64 {
-	df := float64(s.docFreq[term])
-	n := float64(s.totalDocs)
-	return math.Log((n-df+0.5)/(df+0.5) + 1)
+	n, _ := s.corpus()
+	df := float64(s.dfOf(term))
+	return math.Log((float64(n)-df+0.5)/(df+0.5) + 1)
 }
 
 // scoreDocParams computes the BM25 score for a single document with explicit
 // k1/b, so parameter variants can be
 // evaluated against a built index without mutating the scorer.
 func (s *BM25Scorer) scoreDocParams(docID uint64, queryTerms []string, k1, b float64) float64 {
-	tf := s.termFreqs[docID]
+	tf, held := s.termFreqs[docID]
 	dl := float64(s.docLengths[docID])
 	avgdl := s.avgdl()
 
 	var score float64
 	for _, term := range queryTerms {
-		freq := float64(tf[term])
+		var freq float64
+		if held {
+			freq = float64(tf[term])
+		} else if s.back != nil {
+			if f, l, ok := s.back.TermFreq(docID, term); ok {
+				freq, dl = float64(f), float64(l)
+			}
+		}
 		if freq == 0 {
 			continue
 		}
@@ -255,7 +320,8 @@ func (s *BM25Scorer) Query(queryTerms []string) []BM25Result {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if len(queryTerms) == 0 || s.totalDocs == 0 {
+	nDocs, _ := s.corpus()
+	if len(queryTerms) == 0 || nDocs == 0 {
 		return nil
 	}
 
@@ -269,16 +335,20 @@ func (s *BM25Scorer) Query(queryTerms []string) []BM25Result {
 	avgdl := s.avgdl()
 	scores := make(map[uint64]float64)
 	for term, count := range termCount {
-		ids := s.postings[term]
-		if len(ids) == 0 {
-			continue
-		}
 		idf := s.idf(term) * float64(count)
-		for _, docID := range ids {
+		for _, docID := range s.postings[term] {
 			freq := float64(s.termFreqs[docID][term])
 			dl := float64(s.docLengths[docID])
 			tfNorm := freq * (s.k1 + 1) / (freq + s.k1*(1-s.b+s.b*(dl/avgdl)))
 			scores[docID] += idf * tfNorm
+		}
+		if s.back != nil {
+			s.back.EachPosting(term, func(docID uint64, tf, docLen int) {
+				freq := float64(tf)
+				dl := float64(docLen)
+				tfNorm := freq * (s.k1 + 1) / (freq + s.k1*(1-s.b+s.b*(dl/avgdl)))
+				scores[docID] += idf * tfNorm
+			})
 		}
 	}
 
@@ -311,7 +381,7 @@ func (s *BM25Scorer) Score(
 	keywordScores map[uint64]float64,
 	vectorIDs []uint64,
 	vectorScores map[uint64]float64,
-	idMapping map[uint64]string,
+	idMapping IDLookup,
 ) []ScoredResult {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -353,7 +423,7 @@ func (s *BM25Scorer) Score(
 		combined := 0.6*normKW + 0.4*normVec
 		if combined > 0 {
 			results = append(results, ScoredResult{
-				ID:    idMapping[id],
+				ID:    idMapping(id),
 				Score: combined,
 			})
 		}
@@ -376,5 +446,6 @@ func (s *BM25Scorer) Score(
 func (s *BM25Scorer) DocCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.totalDocs
+	n, _ := s.corpus()
+	return n
 }

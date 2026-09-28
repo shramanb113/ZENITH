@@ -1,9 +1,17 @@
 //go:build ignore
 
-// Run via: go generate ./internal/localembedder/...
-// Downloads the ONNX embedding model and platform-specific onnxruntime shared
-// library into internal/localembedder/assets/. These files are gitignored and
-// must be present before go build.
+// Run via: go run scripts/download_assets.go [-model <id>]
+// (or go generate ./internal/localembedder/...)
+//
+// Downloads the ONNX embedding model and the platform-specific onnxruntime
+// shared library into internal/localembedder/assets/, and records which model it
+// fetched in assets/model.id (the index-file identity is derived from that file,
+// so the binary and the indexes it writes cannot disagree about the model).
+// The model/runtime files are gitignored and must be present before a CGO build.
+//
+//	-model <id>   registered model to bundle (default: the registry default;
+//	              see internal/modelspec)
+//	-list         print the registered models and exit
 
 package main
 
@@ -15,16 +23,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"flag"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+
+	"github.com/shramanb113/ZENITH/internal/modelspec"
 )
 
-const (
-	ortVersion = "1.25.0"
-	modelURL   = "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_quantized.onnx"
-)
+const ortVersion = "1.25.0"
 
 // assetsDir resolves to internal/localembedder/assets/ relative to the
 // repository root, regardless of which directory go generate is called from.
@@ -71,6 +79,26 @@ var ortReleases = map[string]ortRelease{
 }
 
 func main() {
+	modelID := flag.String("model", modelspec.DefaultID, "registered model to bundle")
+	list := flag.Bool("list", false, "list registered models and exit")
+	flag.Parse()
+
+	if *list {
+		for _, m := range modelspec.Models() {
+			def := ""
+			if m.ID == modelspec.DefaultID {
+				def = " (default)"
+			}
+			fmt.Printf("%-20s %3d dims  ~%d MB  %s%s\n", m.ID, m.Dims, m.SizeMB, m.Description, def)
+		}
+		return
+	}
+	spec, err := modelspec.Lookup(*modelID)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	platform := goruntime.GOOS + "/" + goruntime.GOARCH
 	rel, ok := ortReleases[platform]
 	if !ok {
@@ -84,12 +112,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Downloading ONNX model from HuggingFace...\n")
-	if err := downloadFile(modelURL, filepath.Join(assetsDir, "model.onnx")); err != nil {
+	fmt.Printf("Downloading %s (~%d MB) from HuggingFace...\n", spec.ID, spec.SizeMB)
+	if err := downloadFile(spec.ModelURL, filepath.Join(assetsDir, "model.onnx")); err != nil {
 		fmt.Fprintf(os.Stderr, "model download failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("  model.onnx saved\n")
+	// Written only after the model landed, so a failed download never leaves an
+	// id that names a model that is not there.
+	if err := os.WriteFile(filepath.Join(assetsDir, "model.id"), []byte(spec.ID+"\n"), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "writing model.id: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("  model.onnx saved (%s)\n", spec.ID)
 
 	fmt.Printf("Downloading onnxruntime %s for %s...\n", ortVersion, platform)
 	archiveData, err := fetchBytes(rel.url)

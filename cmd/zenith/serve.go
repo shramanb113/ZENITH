@@ -144,9 +144,9 @@ func sidecarEmbedder(kind string) (zenith.Embedder, string) {
 			return nil, "none"
 		}
 		if cached, err := embedding.NewCachingEmbedder(le, 10_000); err == nil {
-			return cached, "all-MiniLM-L6-v2"
+			return cached, le.Spec().ID
 		}
-		return le, "all-MiniLM-L6-v2"
+		return le, le.Spec().ID
 	default:
 		slog.Warn("embedder not supported in HTTP mode; using BM25 + fuzzy only", "embedder", kind)
 		return nil, "none"

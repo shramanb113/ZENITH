@@ -183,7 +183,7 @@ func (s *TFIDFScorer) Score(
 	keywordScores map[uint64]float64,
 	vectorIDs []uint64,
 	vectorScores map[uint64]float64,
-	idMapping map[uint64]string,
+	idMapping IDLookup,
 ) []ScoredResult {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -220,7 +220,7 @@ func (s *TFIDFScorer) Score(
 		combined := 0.6*normKW + 0.4*normVec
 		if combined > 0 {
 			results = append(results, ScoredResult{
-				ID:    idMapping[id],
+				ID:    idMapping(id),
 				Score: combined,
 			})
 		}

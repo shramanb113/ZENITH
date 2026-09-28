@@ -41,14 +41,15 @@ The storage engine owns the FST and vocabulary; the index engine calls `AddTerms
 
 The search orchestrator — owns all sub-indexes and the scoring pipeline:
 
-- **InvertedIndex** — postings lists keyed by edge n-gram fragments and Soundex phonetic codes
+- **Layers** — the index is a stack of immutable, memory-mapped **segments** (`internal/segment`, wiring in `internal/index/layers.go`) plus a small mutable in-memory **delta** (the maps in `InvertedIndex`, `VectorStore`, `PhoneticIndex` and the BM25 stats). A document is live in exactly one place; replacing or removing a segment document marks its row dead in a per-segment bitset and records the deletion for the next flush. Search reads the delta and every segment through `eachFragDoc` / `eachPhonDoc` / `eachVector`, so results are identical to a single in-memory index (enforced by `layers_test.go`).
+- **InvertedIndex** — the delta's postings lists keyed by edge n-gram fragments and Soundex phonetic codes (segments hold the same data, delta-varint compressed)
 - **VectorStore** — document and word vectors stored as float16 to halve memory; magnitudes cached separately
 - **PhoneticIndex** — Soundex buckets for phonetic matching
-- **BKTree** (`internal/analysis/bktree.go`) — Levenshtein-based fuzzy term lookup, O(log n) via triangle inequality pruning
+- **Fuzzy lookup** — a Levenshtein automaton walking the FST (`internal/analysis/fst.go`, cost ∝ matches). `analysis.BKTree` is only a lazily-built fallback (edit distance above 2, or FST not built yet). Allowed edit distance scales with word length when `Config.FuzzyByLength` is set — see Configuration
 
-**Add pipeline** (per document): `Analyzer.Analyze` → embed (in-process ONNX call via `internal/localembedder`) → write postings to InvertedIndex + PhoneticIndex + BKTree + BM25 + TF-IDF
+**Add pipeline** (per document): `Analyzer.Analyze` → embed (in-process ONNX call via `internal/localembedder`) → write postings to the delta's InvertedIndex + PhoneticIndex + BM25. (The BK-tree is built lazily and TF-IDF is no longer maintained.)
 
-**Search pipeline**: lexical pass (n-gram + phonetic + BK-tree fuzzy) → vector pass (exact dot-product scan below `WithANNThreshold` docs, default 20k; HNSW graph in `internal/ann` above it — not persisted, rebuilt on Load) → `rankAndFuse` (RRF + BM25 tiebreak) → neural expansion if results are absent or weak
+**Search pipeline**: lexical pass (capped n-gram prefixes + phonetic + FST fuzzy) → vector pass (exact dot-product scan below `WithANNThreshold` docs, default 20k; HNSW graph in `internal/ann` above it — not persisted, rebuilt on Load and re-pointed at the new mapping after each flush/compaction) → `rankAndFuse` (RRF + BM25 tiebreak) → neural expansion if results are absent or weak
 
 ### 3. Analysis (`internal/analysis/`)
 
@@ -60,11 +61,11 @@ The search orchestrator — owns all sub-indexes and the scoring pipeline:
 
 - `RRFRanker` — Reciprocal Rank Fusion with k=60; input slices are copied before sorting to avoid caller mutation
 - `BM25Scorer` — used as tiebreaker when RRF scores are within epsilon (1e-6)
-- `TFIDFScorer` — kept in sync on every Add/Remove but not used in the main ranking path
+- `TFIDFScorer` — no longer maintained by the engine; kept as a standalone library type
 
 ### 5. Embedding (`internal/localembedder/`)
 
-An in-process embedder that runs `all-MiniLM-L6-v2` (384-dimensional, int8-quantized, ~22MB) via ONNX Runtime. The model, tokenizer vocab, and platform-specific ONNX Runtime shared library are all bundled into the Go binary with `go:embed` (`internal/localembedder/assets/`) and extracted to a temp directory on first use — no separate process, no Python, no network call. Requires `CGO_ENABLED=1` and a C compiler.
+An in-process embedder running a registered ONNX model (`internal/modelspec`: `gte-small` — the bundled default, chosen on measured out-of-domain hybrid quality —, `all-MiniLM-L6-v2`, `bge-small-en-v1.5`; all 384-dim, int8, sharing the BERT-uncased vocab) via ONNX Runtime. The bundled model (named by `assets/model.id`), tokenizer vocab and the platform-specific ONNX Runtime library are compiled into the Go binary with `go:embed` **only when `CGO_ENABLED=1`** (`bundle_cgo.go`; a no-CGo binary carries none of it and stays ~22 MB) and extracted to a temp directory on first use. Other registry models load from `~/.zenith/models/<id>/model.onnx` (`zenith models pull`, `--model`, `zenith.WithModel`). The model files are gitignored: `go run scripts/download_assets.go [-model id]` fetches them (and CI does so for its cgo legs). An index records `onnx:<id>` and refuses a different model; the CLI follows the model recorded in the index. Requires `CGO_ENABLED=1` and a C compiler.
 
 The Go side wraps it with a caching layer (`internal/embedding/cache.go`, LRU of 10,000 entries). Embedding failures — including CGo being unavailable at build time — are non-fatal: `pkg/zenith`'s `buildEmbedder` and `cmd/server/main.go` both fall back to `embedding.NewDeterministicEmbedder(384)` (a hash-based, non-semantic embedder) so lexical search keeps working.
 
@@ -80,7 +81,7 @@ RRFRanker
 index.NewEngine(config, embedder, scorer, analyzer) → gRPC server
 ```
 
-Index persistence uses `encoding/gob` (not the LSM storage engine) via `engine.Save("zenith.db")` / `engine.Load("zenith.db")`. The LSM engine is wired in `storage_engine.go` but the index-layer persistence is separate.
+Index persistence is **not** the LSM storage engine (that is wired in `storage_engine.go` for the term store/WAL). `engine.Save(path)` / `engine.Load(path)` use the segment format documented in `FORMAT.md`: `zenith.db` is a small manifest, segments live beside it as `zenith.db.seg-NNNNNN`. `Save` to the bound path is an *incremental flush* (the delta becomes one new segment; cost ∝ the delta, not the index), `Save` to another path exports a merged copy, `Compact()` merges segments without holding the engine lock, and `Load` memory-maps the files. Commit = fsync the segment, then atomically rename the manifest; orphans are deleted on open. Old gob files (v4/v5) are refused with `*LegacyFormatError` (matches `ErrIncompatibleVersion`) until `zenith migrate` converts them; `Save` will not overwrite one.
 
 ## Configuration
 
@@ -96,7 +97,7 @@ All tuneable parameters live in `internal/config/config.go` (`DefaultConfig()`).
 ### Metadata filtering, file format, install
 
 - **Filtering**: `AddWithAttrs` / `AddBatchWithAttrs` attach string/bool/number attributes; `Search(..., WithFilter(Eq/In/Range/Exists/And/Or/Not))` applies them to the lexical and vector candidate sets *before* rank fusion. Attrs are persisted in the snapshot and in WAL records. `WithFilter` cannot be combined with `Explain`.
-- **Snapshot v5**: header = magic + version + embedder name + vector dim, then the gob body. `Load` returns `ErrEmbedderMismatch` on a different embedder identity (custom embedders opt in via an optional `Name() string`; without it they're recorded as "unknown" and never checked). No migration between versions: a mismatch is a hard error.
+- **Format v6**: manifest header = magic + version + embedder name + vector dim, then a JSON segment list (CRC-checked). `Load` returns `ErrEmbedderMismatch` on a different embedder identity (custom embedders opt in via an optional `Name() string`; without it they're recorded as "unknown" and never checked). Migration only from the previous format (`zenith migrate` / `zenith.Migrate`, keeps a `.v<N>.bak`); a mismatch is a hard error. `zenith compact` merges segments; `zenith doctor` re-verifies every checksum. Crash safety is exercised by `internal/index/crash_test.go` (named failpoints via `ZENITH_FAILPOINT` plus hard-kill loops).
 - **WAL**: Put records carry text + vector + attrs so replay never re-embeds documents; a WAL over 64MB triggers a synchronous checkpoint.
 - **CLI install**: `zenith install` (per-user dir + PATH), `zenith doctor [--json]`, `zenith uninstall [--purge] [--yes]`. Uninstall keeps `~/.zenith` (the index) unless `--purge`.
 

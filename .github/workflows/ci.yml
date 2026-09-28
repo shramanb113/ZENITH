@@ -35,6 +35,25 @@ jobs:
         with:
           platform: x64
 
+      # The ONNX model and runtime are gitignored build inputs
+      # (internal/localembedder/assets). Only CGO builds embed them; CGO_ENABLED=0
+      # builds need nothing, which is why the lexical-only build stays small.
+      - name: Cache model + ONNX runtime
+        id: assets
+        if: matrix.cgo == '1'
+        uses: actions/cache@v4
+        with:
+          path: |
+            internal/localembedder/assets/model.onnx
+            internal/localembedder/assets/onnxruntime.dll
+            internal/localembedder/assets/libonnxruntime.so
+            internal/localembedder/assets/libonnxruntime.dylib
+          key: assets-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/download_assets.go', 'internal/modelspec/spec.go') }}
+
+      - name: Fetch model and ONNX runtime
+        if: matrix.cgo == '1' && steps.assets.outputs.cache-hit != 'true'
+        run: go run scripts/download_assets.go
+
       - name: Build
         run: go build ./...
 
@@ -49,3 +68,53 @@ jobs:
       - name: Test
         if: matrix.cgo == '0'
         run: go test ./...
+
+  # Crash safety and format compatibility: kill -9 fault injection, the golden
+  # files written by earlier releases, and the migration path. These also run in
+  # the matrix above; this job soaks the randomized kill test with many more
+  # rounds on every OS, since a flush or compaction interrupted at the wrong
+  # instant is exactly the kind of bug a few rounds can miss.
+  durability:
+    name: durability / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      CGO_ENABLED: "0"
+      ZENITH_CRASH_ROUNDS: "40"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.1"
+          cache: true
+
+      - name: Crash recovery, layered-vs-in-memory equivalence, golden files, migration
+        run: >
+          go test ./internal/index/ ./internal/segment/ ./pkg/zenith/
+          -run 'TestCrash|TestLayered|TestGolden|TestMigrate|TestSave_Refuses|TestOpen_Legacy'
+          -count=1 -timeout 20m -v
+
+  # Latency and recall regression gate for the lexical query path. Deterministic
+  # synthetic corpus (no download); asserts a recall floor, a bound on candidates
+  # per query (machine-independent, the sharp check), and a loose p50 ceiling.
+  # Verified to FAIL on the pre-optimisation behaviour. Real-corpus (MS MARCO)
+  # numbers are measured manually: see CONTRIBUTING.md.
+  latency-gate:
+    name: latency gate
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.1"
+          cache: true
+
+      - name: Lexical latency / recall gate
+        run: go test ./internal/index/ -run TestLexicalLatencyGate -count=3 -v

@@ -24,10 +24,10 @@ const (
 //   - scores from both lists are simply summed — no normalisation needed
 //   - documents appearing in both lists get a natural boost
 type RRFRanker struct {
-	k     float64
-	topN  int
-	wKw   float64 // weight of the keyword/lexical list
-	wVec  float64 // weight of the vector/semantic list
+	k    float64
+	topN int
+	wKw  float64 // weight of the keyword/lexical list
+	wVec float64 // weight of the vector/semantic list
 }
 
 // NewRRFRanker creates an RRFRanker with equal list weights.
@@ -85,7 +85,7 @@ func (r *RRFRanker) Score(
 	keywordScores map[uint64]float64,
 	vectorIDs []uint64,
 	vectorScores map[uint64]float64,
-	idMapping map[uint64]string,
+	idMapping IDLookup,
 ) []ScoredResult {
 
 	// --- 1. Rank each list ---
@@ -97,16 +97,90 @@ func (r *RRFRanker) Score(
 	// latency once the candidate lists reached tens of thousands of documents.
 	// Input slices are copied, never mutated.
 
+	//
+	// Document names are only needed to break exact score ties, and resolving
+	// one can be costly (a binary search plus a decode in a memory-mapped
+	// segment), so they are looked up lazily and memoised — the candidate lists
+	// can hold tens of thousands of documents but ties are rare.
+	memo := make(map[uint64]string)
+	nameOf := func(id uint64) string {
+		if n, ok := memo[id]; ok {
+			return n
+		}
+		n := idMapping(id)
+		memo[id] = n
+		return n
+	}
+
 	type kwEntry struct {
-		id   uint64
-		kw   float64
-		vec  float64
-		name string
+		id  uint64
+		kw  float64
+		vec float64
 	}
 	kw := make([]kwEntry, len(keywordIDs))
 	for i, id := range keywordIDs {
-		kw[i] = kwEntry{id: id, kw: keywordScores[id], vec: vectorScores[id], name: idMapping[id]}
+		kw[i] = kwEntry{id: id, kw: keywordScores[id], vec: vectorScores[id]}
 	}
+	// Lexical-only fast path. With no vector list the fused score is
+	// wKw/(k+rank), strictly decreasing in keyword rank, so the ranked output is
+	// exactly the first topN entries of the keyword order — no need to fully sort
+	// the (often tens of thousands of) candidates to find them. Identical output
+	// to the general path below; see TestRRF_LexicalFastPathMatchesFullSort.
+	if len(vectorIDs) == 0 && r.topN > 0 && len(kw) > r.topN {
+		lessKw := func(a, b kwEntry) int { // negative when a ranks before b
+			if d := cmpFloat(b.kw, a.kw); d != 0 {
+				return d
+			}
+			if d := cmpFloat(b.vec, a.vec); d != 0 {
+				return d
+			}
+			return strings.Compare(nameOf(a.id), nameOf(b.id))
+		}
+		// Bounded max-heap of the topN best so far; the root is the worst kept.
+		h := make([]kwEntry, 0, r.topN)
+		worstFirst := func(i, j int) bool { return lessKw(h[i], h[j]) > 0 }
+		siftDown := func(i int) {
+			for {
+				l, rr, w := 2*i+1, 2*i+2, i
+				if l < len(h) && worstFirst(l, w) {
+					w = l
+				}
+				if rr < len(h) && worstFirst(rr, w) {
+					w = rr
+				}
+				if w == i {
+					return
+				}
+				h[i], h[w] = h[w], h[i]
+				i = w
+			}
+		}
+		for _, e := range kw {
+			if len(h) < r.topN {
+				h = append(h, e)
+				for i := len(h) - 1; i > 0; { // sift up
+					p := (i - 1) / 2
+					if !worstFirst(i, p) {
+						break
+					}
+					h[i], h[p] = h[p], h[i]
+					i = p
+				}
+			} else if lessKw(e, h[0]) < 0 {
+				h[0] = e
+				siftDown(0)
+			}
+		}
+		slices.SortFunc(h, lessKw)
+		out := make([]ScoredResult, 0, len(h))
+		for rank, e := range h {
+			if sc := r.wKw / (r.k + float64(rank+1)); sc > 0 {
+				out = append(out, ScoredResult{ID: nameOf(e.id), Score: sc})
+			}
+		}
+		return out
+	}
+
 	// Keyword list: keyword score desc, tie-break vector score desc, then ID.
 	slices.SortFunc(kw, func(a, b kwEntry) int {
 		if d := cmpFloat(b.kw, a.kw); d != 0 {
@@ -115,24 +189,23 @@ func (r *RRFRanker) Score(
 		if d := cmpFloat(b.vec, a.vec); d != 0 {
 			return d
 		}
-		return strings.Compare(a.name, b.name)
+		return strings.Compare(nameOf(a.id), nameOf(b.id))
 	})
 
 	type vcEntry struct {
-		id   uint64
-		vec  float64
-		name string
+		id  uint64
+		vec float64
 	}
 	vc := make([]vcEntry, len(vectorIDs))
 	for i, id := range vectorIDs {
-		vc[i] = vcEntry{id: id, vec: vectorScores[id], name: idMapping[id]}
+		vc[i] = vcEntry{id: id, vec: vectorScores[id]}
 	}
 	// Vector list: vector score desc, tie-break by ID.
 	slices.SortFunc(vc, func(a, b vcEntry) int {
 		if d := cmpFloat(b.vec, a.vec); d != 0 {
 			return d
 		}
-		return strings.Compare(a.name, b.name)
+		return strings.Compare(nameOf(a.id), nameOf(b.id))
 	})
 
 	// --- 2. RRF accumulation ---
@@ -152,23 +225,23 @@ func (r *RRFRanker) Score(
 	// replaces sorting every candidate. IDs are unique, so the order is
 	// total and the result is identical to a full sort truncated to topN.
 
-	better := func(a, b ScoredResult) bool {
-		if d := cmpFloat(a.Score, b.Score); d != 0 {
+	better := func(a, b idScore) bool {
+		if d := cmpFloat(a.score, b.score); d != 0 {
 			return d > 0
 		}
-		return cmp.Compare(a.ID, b.ID) < 0
+		return cmp.Compare(nameOf(a.id), nameOf(b.id)) < 0
 	}
 
 	limit := r.topN
 	if limit <= 0 || limit > len(rrfScores) {
 		limit = len(rrfScores)
 	}
-	h := &resultHeap{better: better, items: make([]ScoredResult, 0, limit)}
+	h := &resultHeap{better: better, items: make([]idScore, 0, limit)}
 	for id, score := range rrfScores {
 		if score <= 0 {
 			continue
 		}
-		sr := ScoredResult{ID: idMapping[id], Score: score}
+		sr := idScore{id: id, score: score}
 		if len(h.items) < limit {
 			heap.Push(h, sr)
 		} else if better(sr, h.items[0]) {
@@ -176,22 +249,33 @@ func (r *RRFRanker) Score(
 			heap.Fix(h, 0)
 		}
 	}
-	results := h.items
-	sort.Slice(results, func(i, j int) bool { return better(results[i], results[j]) })
+	top := h.items
+	sort.Slice(top, func(i, j int) bool { return better(top[i], top[j]) })
+	results := make([]ScoredResult, len(top))
+	for i, t := range top {
+		results[i] = ScoredResult{ID: nameOf(t.id), Score: t.score}
+	}
 	return results
+}
+
+// idScore is a candidate's fused score keyed by internal ID; its name is
+// resolved only if it ties or makes the final cut.
+type idScore struct {
+	id    uint64
+	score float64
 }
 
 // resultHeap is a min-heap under the "better" ordering: the root is the
 // worst result currently kept, so it is the one evicted by a better one.
 type resultHeap struct {
-	better func(a, b ScoredResult) bool
-	items  []ScoredResult
+	better func(a, b idScore) bool
+	items  []idScore
 }
 
 func (h *resultHeap) Len() int           { return len(h.items) }
 func (h *resultHeap) Less(i, j int) bool { return h.better(h.items[j], h.items[i]) }
 func (h *resultHeap) Swap(i, j int)      { h.items[i], h.items[j] = h.items[j], h.items[i] }
-func (h *resultHeap) Push(x any)         { h.items = append(h.items, x.(ScoredResult)) }
+func (h *resultHeap) Push(x any)         { h.items = append(h.items, x.(idScore)) }
 func (h *resultHeap) Pop() any {
 	n := len(h.items)
 	x := h.items[n-1]

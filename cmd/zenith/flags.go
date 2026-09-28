@@ -18,6 +18,8 @@ func addEngineFlags(cmd *cobra.Command) {
   local         Alias for auto
   ollama        Local Ollama (needs: ollama serve + ollama pull nomic-embed-text)
   deterministic Hash-based, zero dependencies`)
+	cmd.Flags().StringVar(&cliFlags.model, "model", "",
+		"Embedding model id from `zenith models list` (default: the one bundled in this binary; others need `zenith models pull <id>`)")
 	cmd.Flags().StringVar(&cliFlags.ollamaURL, "ollama-url", "http://localhost:11434", "Ollama server URL")
 	cmd.Flags().StringVar(&cliFlags.ollamaModel, "ollama-model", "nomic-embed-text", "Ollama embedding model")
 }

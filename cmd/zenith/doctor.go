@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/shramanb113/ZENITH/internal/index"
 	"github.com/shramanb113/ZENITH/internal/localembedder"
 )
 
@@ -90,11 +91,7 @@ func runDoctor() error {
 		checks = append(checks, doctorCheck{name: "data dir", ok: true, msg: msg})
 	}
 
-	if st, err := os.Stat(filepath.Join(dataDir, "zenith.db")); err == nil {
-		checks = append(checks, doctorCheck{name: "index", ok: true, msg: fmt.Sprintf("zenith.db present (%s)", formatBytes(st.Size()))})
-	} else {
-		checks = append(checks, doctorCheck{name: "index", warn: true, msg: "no index yet", fix: "zenith index <directory>"})
-	}
+	checks = append(checks, indexChecks(filepath.Join(dataDir, "zenith.db"))...)
 
 	// Auto-start.
 	if on, _ := autostartFn().IsInstalled(); on {
@@ -187,4 +184,40 @@ func emitDoctorJSON(checks []doctorCheck) error {
 		return fmt.Errorf("%d check(s) failed", failed)
 	}
 	return nil
+}
+
+// indexChecks inspects the index file without loading it: on-disk format,
+// segment count, and — for the current format — a full checksum pass over every
+// segment, so silent disk corruption is found here rather than mid-search.
+func indexChecks(path string) []doctorCheck {
+	if _, err := os.Stat(path); err != nil {
+		return []doctorCheck{{name: "index", warn: true, msg: "no index yet", fix: "zenith index <directory>"}}
+	}
+	info, err := index.Inspect(path)
+	if err != nil {
+		return []doctorCheck{{name: "index", msg: "cannot read " + path + ": " + err.Error(),
+			fix: "if this is damage, restore a backup or remove the file and re-index; check the disk"}}
+	}
+	if info.Version != index.CurrentFormat {
+		return []doctorCheck{{name: "index", msg: fmt.Sprintf("%s uses the older on-disk format v%d (current: v%d)", path, info.Version, index.CurrentFormat),
+			fix: "zenith migrate     (keeps a backup of the original)"}}
+	}
+	var size int64
+	for _, s := range info.Segments {
+		if st, err := os.Stat(s); err == nil {
+			size += st.Size()
+		}
+	}
+	out := []doctorCheck{{name: "index", ok: true, msg: fmt.Sprintf("format v%d, %d segment(s), %s, embedder %s", info.Version, len(info.Segments), formatBytes(size), info.Embedder)}}
+	if err := index.Verify(path); err != nil {
+		out = append(out, doctorCheck{name: "checksums", msg: "index failed verification: " + err.Error(),
+			fix: "restore from a backup, or remove the index and re-index"})
+	} else {
+		out = append(out, doctorCheck{name: "checksums", ok: true, msg: "every segment passes its CRC-32C checks"})
+	}
+	if len(info.Segments) > 8 {
+		out = append(out, doctorCheck{name: "segments", warn: true, msg: fmt.Sprintf("%d segments — reads consult every one", len(info.Segments)),
+			fix: "zenith compact"})
+	}
+	return out
 }

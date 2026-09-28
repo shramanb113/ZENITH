@@ -41,16 +41,13 @@ func copyAttrs(a Attrs) Attrs {
 // computed over the filtered set only, instead of fetching a fixed window
 // and discarding non-matches afterwards (which can return fewer than the
 // requested limit even when enough matches exist).
-func (e *Engine) filterCandidates(pred Predicate, scores map[uint64]float64, match map[uint64]map[string]bool) {
+func (e *Engine) filterCandidates(pred Predicate, scores map[uint64]float64) {
 	if pred == nil {
 		return
 	}
 	for id := range scores {
 		if !pred(e.attrs[id]) {
 			delete(scores, id)
-			if match != nil {
-				delete(match, id)
-			}
 		}
 	}
 }

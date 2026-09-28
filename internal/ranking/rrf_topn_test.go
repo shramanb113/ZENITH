@@ -77,7 +77,7 @@ func TestRRFScore_MatchesReferenceFullSort(t *testing.T) {
 		}
 		for _, topN := range []int{1, 7, 50, 1000} {
 			r := NewWeightedRRFRanker(20, topN, 1, 2)
-			got := r.Score(kwIDs, kwS, vcIDs, vS, names)
+			got := r.Score(kwIDs, kwS, vcIDs, vS, MapLookup(names))
 			want := referenceRRF(r, kwIDs, kwS, vcIDs, vS, names)
 			if len(got) != len(want) {
 				t.Fatalf("trial %d topN %d: len %d vs %d", trial, topN, len(got), len(want))

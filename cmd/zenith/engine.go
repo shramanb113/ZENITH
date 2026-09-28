@@ -3,10 +3,13 @@ package main
 // engine.go — shared engine construction used by index, search, watch, serve.
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +29,7 @@ var cliFlags struct {
 	dbPath      string
 	fstPath     string
 	embedder    string // "auto" | "local" | "ollama" | "deterministic"
+	model       string // registered local model id; "" = the bundled one
 	ollamaURL   string
 	ollamaModel string
 }
@@ -51,6 +55,14 @@ func defaultStorageConfig() storage.EngineConfig {
 // buildEngine constructs and optionally loads a ready-to-use index.Engine.
 func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) {
 	appConfig := config.DefaultConfig()
+
+	// The index decides which embedding model to use: an existing index records the
+	// model that built its vectors, and opening it with any other would mix vector
+	// spaces. So unless --model says otherwise, follow the index (which makes changing
+	// the bundled default painless for existing users).
+	if load && cliFlags.model == "" {
+		cliFlags.model = modelFromIndex(cliFlags.dbPath)
+	}
 
 	alog := activitylog.Open()
 
@@ -86,10 +98,19 @@ func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) 
 	_ = embedderName
 
 	if load {
-		if err := engine.Load(cliFlags.dbPath); err != nil {
-			slog.Info("No existing index, starting fresh.")
-		} else {
+		err := engine.Load(cliFlags.dbPath)
+		switch {
+		case err == nil:
 			alog.Log("LOADED", cliFlags.dbPath)
+		case errors.Is(err, fs.ErrNotExist):
+			slog.Info("No existing index, starting fresh.")
+		default:
+			// Never fall through to "fresh": teardown saves to this path, so an
+			// index we merely failed to read (older format, different embedder,
+			// damage) would be overwritten by an empty one.
+			_ = storageEng.Close()
+			alog.Close()
+			return nil, nil, nil, fmt.Errorf("cannot open index %s: %w%s", cliFlags.dbPath, err, mismatchHint(err))
 		}
 	}
 
@@ -98,6 +119,9 @@ func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) 
 			slog.Error("Failed to save index", "error", err)
 		} else {
 			alog.Log("SAVED", cliFlags.dbPath)
+		}
+		if err := engine.Close(); err != nil {
+			slog.Error("Failed to release index files", "error", err)
 		}
 		if err := storageEng.Close(); err != nil {
 			slog.Error("Storage engine close failed", "error", err)
@@ -138,7 +162,13 @@ func resolveEmbedder(_ *config.Config, alog *activitylog.Logger) (embedding.Embe
 // localEmbedderOrFallback loads the embedded ONNX model.
 // Falls back to deterministic embeddings if CGo is unavailable or initialisation fails.
 func localEmbedderOrFallback(alog *activitylog.Logger) (embedding.Embedder, string) {
-	emb, err := localembedder.New()
+	emb, err := localembedder.NewByID(cliFlags.model, modelsDir())
+	if err != nil && cliFlags.model != "" {
+		// An explicitly requested model must not silently degrade to another one.
+		alog.Log("EMBEDDER", fmt.Sprintf("model %q unavailable: %v", cliFlags.model, err))
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
 	if err != nil {
 		alog.Log("EMBEDDER", fmt.Sprintf("local embedder unavailable: %v — using deterministic", err))
 		return embedding.NewDeterministicEmbedder(384), "deterministic"
@@ -154,4 +184,35 @@ func setupLogger() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelWarn,
 	})))
+}
+
+// mismatchHint turns an embedder-mismatch error into the two ways forward.
+// The model that built the index is read from its header (nothing is loaded).
+func mismatchHint(err error) string {
+	if !errors.Is(err, index.ErrEmbedderMismatch) {
+		return ""
+	}
+	info, ierr := index.Inspect(cliFlags.dbPath)
+	if ierr != nil || !strings.HasPrefix(info.Embedder, "onnx:") {
+		return "\n  This index was built with a different embedding model. Re-index, or open it with the model that built it (--model <id>; see 'zenith models list')."
+	}
+	id := strings.TrimPrefix(info.Embedder, "onnx:")
+	return fmt.Sprintf("\n  This index was built with the %s model. Either:\n"+
+		"    - keep using it:  zenith models pull %s   (skip if it is the bundled model), then add  --model %s\n"+
+		"    - switch models:  remove the index and re-index (your documents are untouched; vectors differ per model)", id, id, id)
+}
+
+// modelFromIndex returns the registry model recorded in the index at path, or ""
+// when there is no index, it records no registry model, or that model is the one
+// bundled in this binary (which needs no special handling).
+func modelFromIndex(path string) string {
+	info, err := index.Inspect(path)
+	if err != nil || !strings.HasPrefix(info.Embedder, "onnx:") {
+		return ""
+	}
+	id := strings.TrimPrefix(info.Embedder, "onnx:")
+	if _, err := localembedder.Lookup(id); err != nil || strings.EqualFold(id, localembedder.BundledID()) {
+		return ""
+	}
+	return id
 }

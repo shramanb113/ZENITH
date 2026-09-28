@@ -3,17 +3,14 @@ package index
 import (
 	"context"
 	"encoding/binary"
-	"encoding/gob"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"log/slog"
 	"maps"
-	"os"
-	pathutil "path/filepath" // aliased: Save/Load use "filepath" as a parameter name
 	"sort"
 	"sync"
-	"time"
+	"sync/atomic"
 
 	"github.com/shramanb113/ZENITH/internal/analysis"
 	"github.com/shramanb113/ZENITH/internal/ann"
@@ -62,23 +59,43 @@ type DocumentJournal interface {
 type Engine struct {
 	mu sync.RWMutex // primary concurrency gate — see comment above
 
-	// saveMu serialises Save calls so two concurrent Saves can't both write
-	// to the same fixed ".tmp" path. Save only takes mu.RLock() (to allow
-	// concurrent Search), so this is the only thing preventing that race.
+	// saveMu serialises Save calls (and Close) so two flushes never interleave.
 	saveMu sync.Mutex
+	// compactMu serialises compactions and keeps Load/Close from unmapping
+	// segments a running compaction is still reading. Lock order:
+	// compactMu → mu.
+	compactMu sync.Mutex
 
 	config    *config.Config
 	inverted  *InvertedIndex
 	vectors   *VectorStore
 	phonetics *PhoneticIndex
-	bkTree    *analysis.BKTree
+
+	// bk is the BK-tree fuzzy-match fallback (used only when the FST cannot
+	// serve the query: FST not built, or edit distance above 3). It is built
+	// lazily from the live vocabulary, since the FST automaton normally answers
+	// fuzzy queries and the tree costs ~200 bytes per term.
+	bk   *analysis.BKTree
+	bkMu sync.Mutex
+
+	// Persistence state. See layers.go: documents live either in segs
+	// (immutable, memory-mapped) or in the in-memory maps below (the delta).
+	segs        []*segLayer
+	dbPath      string              // manifest path the engine is bound to; "" until first Load/Save
+	nextGen     uint64              // next segment file number
+	manifestGen uint64              // generation of the last committed manifest
+	pendingDels map[uint64]struct{} // segment docs deleted since the last flush
+	autoCompact bool
+	// replaceLegacy lets the first Save replace an old-format file at dbPath.
+	// Only Migrate sets it, after it has copied the original aside.
+	replaceLegacy bool
+	compacting    atomic.Bool
 
 	embedder embedding.Embedder
 	scorer   ranking.Scorer
 	analyzer analysis.Analyzer
 
-	bm25  *ranking.BM25Scorer
-	tfidf *ranking.TFIDFScorer
+	bm25 *ranking.BM25Scorer
 
 	idMapping map[uint64]string
 	docText   map[uint64]string // original full text per document, for GetText
@@ -102,23 +119,25 @@ type Engine struct {
 
 // NewEngine constructs a fully initialised Engine.
 func NewEngine(cfg *config.Config, emb embedding.Embedder, scr ranking.Scorer, ana analysis.Analyzer) *Engine {
-	return &Engine{
-		config:    cfg,
-		inverted:  NewInvertedIndex(),
-		vectors:   NewVectorStore(),
-		phonetics: NewPhoneticIndex(),
-		bkTree:    analysis.NewBKTree(),
-		embedder:  emb,
-		scorer:    scr,
-		analyzer:  ana,
-		idMapping: make(map[uint64]string),
-		docText:   make(map[uint64]string),
-		attrs:     make(map[uint64]Attrs),
-		annMinDocs: defaultANNMinDocs,
-		bm25:      ranking.NewBM25Scorer(ranking.BM25Params{}),
-		tfidf:     ranking.NewTFIDFScorer(),
-		fst:       analysis.NewFSTDictionary(),
+	e := &Engine{
+		config:      cfg,
+		inverted:    NewInvertedIndex(),
+		vectors:     NewVectorStore(),
+		phonetics:   NewPhoneticIndex(),
+		embedder:    emb,
+		scorer:      scr,
+		analyzer:    ana,
+		idMapping:   make(map[uint64]string),
+		docText:     make(map[uint64]string),
+		attrs:       make(map[uint64]Attrs),
+		annMinDocs:  defaultANNMinDocs,
+		autoCompact: true,
+		nextGen:     1,
+		bm25:        ranking.NewBM25Scorer(ranking.BM25Params{}),
+		fst:         analysis.NewFSTDictionary(),
 	}
+	e.bm25.SetBacking(segBacking{e})
+	return e
 }
 
 func (e *Engine) SetTermStore(s TermStore)             { e.termStore = s }
@@ -137,12 +156,8 @@ func (e *Engine) RebuildFST() error {
 // MUST be called while Engine.mu.Lock() is held.
 func (e *Engine) rebuildFSTLocked() error {
 	e.inverted.RLock()
-	glob := e.inverted.GetGlobalSeen()
-	terms := make([]string, 0, len(glob))
-	for t := range glob {
-		terms = append(terms, t)
-	}
-	e.fstSize = len(glob)
+	terms := e.liveTerms()
+	e.fstSize = len(terms)
 	e.inverted.RUnlock()
 
 	var buildErr error
@@ -348,7 +363,7 @@ func (e *Engine) warmWordVectors(ctx context.Context, docs []BatchDoc) {
 	tokenSet := make(map[string]struct{})
 	for _, d := range docs {
 		for _, t := range e.analyzer.Analyze(d.Text) {
-			if !e.vectors.HasWordVector(t.Term) {
+			if !e.hasWordVector(t.Term) {
 				tokenSet[t.Term] = struct{}{}
 			}
 		}
@@ -452,25 +467,18 @@ func (e *Engine) Remove(ctx context.Context, originalID string) error {
 
 	idxData := e.inverted.GetData()
 	idxPhon := e.phonetics.GetData()
-	idxFrags := e.inverted.GetDocFragments()
 	docVecStore := e.vectors.GetVectors()
 	glob := e.inverted.GetGlobalSeen()
 	docToks := e.inverted.GetDocTokens()
 
-	oldFrags, exists := idxFrags[internalID]
-	if !exists {
+	if _, exists := e.idMapping[internalID]; !exists {
+		// Not in the delta: it may live in a segment, where removal is a
+		// tombstone (the row is marked dead; postings are never edited).
+		e.killBase(internalID)
 		return nil
 	}
 
-	for _, frag := range oldFrags {
-		if idList, ok := idxData[frag]; ok {
-			idxData[frag] = removeID(idList, internalID)
-		}
-		if idList, ok := idxPhon[frag]; ok {
-			idxPhon[frag] = removeID(idList, internalID)
-		}
-	}
-	delete(idxFrags, internalID)
+	e.unlinkPostings(internalID, docToks[internalID], idxData, idxPhon)
 	delete(docVecStore, internalID)
 	delete(e.idMapping, internalID)
 	delete(e.docText, internalID)
@@ -491,9 +499,53 @@ func (e *Engine) Remove(ctx context.Context, originalID string) error {
 	}
 
 	e.bm25.Remove(internalID)
-	e.tfidf.Remove(internalID)
 
 	return nil
+}
+
+// docFragments returns every posting key a document's raw tokens contribute
+// to: each token's edge n-grams and its Soundex code. Fragments are a pure
+// function of the tokens, so they are recomputed on demand instead of being
+// stored per document (the stored copy was the single largest heap consumer
+// after the postings themselves).
+func docFragments(tokens []string) []string {
+	seen := make(map[string]struct{}, len(tokens)*6)
+	var out []string
+	add := func(f string) {
+		if _, dup := seen[f]; !dup {
+			seen[f] = struct{}{}
+			out = append(out, f)
+		}
+	}
+	for _, token := range tokens {
+		for _, frag := range generateEdgeNgrams(token) {
+			add(frag)
+		}
+		if phon := analysis.Soundex(token); phon != "" {
+			add(phon)
+		}
+	}
+	return out
+}
+
+// unlinkPostings removes id from every lexical posting list its tokens fed.
+func (e *Engine) unlinkPostings(id uint64, tokens []string, idxData, idxPhon map[string][]uint64) {
+	for _, frag := range docFragments(tokens) {
+		if idList, ok := idxData[frag]; ok {
+			if idList = removeID(idList, id); len(idList) == 0 {
+				delete(idxData, frag)
+			} else {
+				idxData[frag] = idList
+			}
+		}
+		if idList, ok := idxPhon[frag]; ok {
+			if idList = removeID(idList, id); len(idList) == 0 {
+				delete(idxPhon, frag)
+			} else {
+				idxPhon[frag] = idList
+			}
+		}
+	}
 }
 
 // GetText returns the original full text last indexed under originalID, and
@@ -506,15 +558,14 @@ func (e *Engine) GetText(originalID string) (string, bool) {
 	h.Write([]byte(originalID))
 	internalID := h.Sum64()
 
-	text, ok := e.docText[internalID]
-	return text, ok
+	return e.textOf(internalID)
 }
 
 // Count returns the number of documents currently held in the index.
 func (e *Engine) Count() int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return len(e.docText)
+	return e.docCountLocked()
 }
 
 func (e *Engine) addInternal(ctx context.Context, originalID string, fullText string, preVec []float32, attrs Attrs) error {
@@ -541,7 +592,7 @@ func (e *Engine) addInternal(ctx context.Context, originalID string, fullText st
 	if e.config.WordVectors {
 		var tokensToEmbed []string
 		for _, t := range rawTokens {
-			if _, exists := tempWordVectors[t]; !exists && !e.vectors.HasWordVector(t) {
+			if _, exists := tempWordVectors[t]; !exists && !e.hasWordVector(t) {
 				tokensToEmbed = append(tokensToEmbed, t)
 				tempWordVectors[t] = VectorEntry{}
 			}
@@ -593,7 +644,6 @@ func (e *Engine) addInternal(ctx context.Context, originalID string, fullText st
 
 	idxData := e.inverted.GetData()
 	idxPhon := e.phonetics.GetData()
-	idxFrags := e.inverted.GetDocFragments()
 	wordVecs := e.vectors.GetWordVectors()
 	docVecStore := e.vectors.GetVectors()
 	glob := e.inverted.GetGlobalSeen()
@@ -602,20 +652,13 @@ func (e *Engine) addInternal(ctx context.Context, originalID string, fullText st
 	// Detect a 64-bit doc-ID hash collision: internalID already maps to a
 	// *different* originalID. Without this check the second document would
 	// silently overwrite the first's postings, vector and BM25 state below.
-	if existing, ok := e.idMapping[internalID]; ok && existing != originalID {
+	if existing := e.origID(internalID); existing != "" && existing != originalID {
 		return fmt.Errorf("index: id hash collision: %q and %q both hash to %d", existing, originalID, internalID)
 	}
 
 	// Idempotency: remove previous postings for this document.
-	if oldFrags, exists := idxFrags[internalID]; exists {
-		for _, frag := range oldFrags {
-			if idList, ok := idxData[frag]; ok {
-				idxData[frag] = removeID(idList, internalID)
-			}
-			if idList, ok := idxPhon[frag]; ok {
-				idxPhon[frag] = removeID(idList, internalID)
-			}
-		}
+	if _, exists := e.idMapping[internalID]; exists {
+		e.unlinkPostings(internalID, docToks[internalID], idxData, idxPhon)
 		// Decrement globalSeen for the old tokens before overwriting.
 		if oldToks, ok := docToks[internalID]; ok {
 			for _, tok := range oldToks {
@@ -628,7 +671,10 @@ func (e *Engine) addInternal(ctx context.Context, originalID string, fullText st
 			}
 		}
 		e.bm25.Remove(internalID)
-		e.tfidf.Remove(internalID)
+	} else {
+		// A replacement of a document that lives in a segment: tombstone the
+		// old copy; the new version goes into the delta below.
+		e.killBase(internalID)
 	}
 
 	e.idMapping[internalID] = originalID
@@ -644,7 +690,7 @@ func (e *Engine) addInternal(ctx context.Context, originalID string, fullText st
 			Vector:    FloatsToFloat16(docVec),
 			Magnitude: ranking.Magnitude(docVec),
 		}
-		e.annInsertLocked(internalID, docVec)
+		e.annInsertLocked(internalID, docVec, docVecStore[internalID].Vector)
 	} else {
 		e.annDeleteLocked(internalID)
 		// Re-indexing with no usable vector (embedder down, or the caller
@@ -656,43 +702,35 @@ func (e *Engine) addInternal(ctx context.Context, originalID string, fullText st
 	maps.Copy(wordVecs, tempWordVectors)
 
 	seenInDoc := make(map[string]bool)
-	var docFrags []string
-
-	tokCnt := e.inverted.GetTokenCounts()
-	vocab := e.inverted.GetVocabulary()
 
 	for _, token := range rawTokens {
-		tokCnt[token]++
-
 		for _, frag := range generateEdgeNgrams(token) {
 			if seenInDoc[frag] {
 				continue
 			}
 			seenInDoc[frag] = true
 			idxData[frag] = append(idxData[frag], internalID)
-			docFrags = append(docFrags, frag)
 		}
 
 		if phon := analysis.Soundex(token); phon != "" && !seenInDoc[phon] {
 			idxPhon[phon] = append(idxPhon[phon], internalID)
 			seenInDoc[phon] = true
-			docFrags = append(docFrags, phon)
 		}
 
-		// Increment globalSeen reference count; add to BKTree on first occurrence.
-		if glob[token] == 0 {
-			vocab[len(token)] = append(vocab[len(token)], token)
-			e.bkTree.Add(token)
+		// Increment globalSeen reference count; a term new to the whole index
+		// (delta and segments) dirties the FST and joins the BK-tree if built.
+		if glob[token] == 0 && e.termRefs(token) == 0 {
+			if e.bk != nil {
+				e.bk.Add(token)
+			}
 			e.fstDirty = true
 		}
 		glob[token]++
 	}
 
-	idxFrags[internalID] = docFrags
 	docToks[internalID] = append([]string(nil), rawTokens...) // snapshot
 
 	e.bm25.Index(internalID, rawTokens)
-	e.tfidf.Index(internalID, rawTokens)
 
 	return nil
 }
@@ -705,247 +743,6 @@ func (e *Engine) addInternal(ctx context.Context, originalID string, fullText st
 // lock) and, transitively, every other Search queued behind them.
 func (e *Engine) Search(ctx context.Context, query string) ([]SearchResponse, error) {
 	return e.SearchWithFilter(ctx, query, nil)
-}
-
-// SearchWithFilter is Search restricted to documents whose attributes satisfy
-// pred (nil = no restriction). The predicate is applied to the lexical and
-// vector candidate sets before rank fusion.
-func (e *Engine) SearchWithFilter(ctx context.Context, query string, pred Predicate) ([]SearchResponse, error) {
-	queryVec, embErr := e.embedder.Embed(ctx, query)
-	if embErr != nil {
-		slog.Warn("Search vectors degraded — embedder unreachable", "error", embErr)
-	}
-	queryVec = normalizeVector(queryVec)
-
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-
-	var tokens []analysis.Token
-	if qa, ok := e.analyzer.(analysis.QueryAnalyzer); ok {
-		tokens = qa.AnalyzeQuery(query)
-	} else {
-		tokens = e.analyzer.Analyze(query)
-	}
-	rawTokens := make([]string, 0, len(tokens))
-	for _, t := range tokens {
-		rawTokens = append(rawTokens, t.Term)
-	}
-
-	// A blank/whitespace/stop-word-only query analyses to zero tokens.
-	// Embedding "" still produces a valid vector that happens to be closest
-	// to whatever the fallback/embedder considers "nothing", which returned
-	// arbitrary top-N results instead of no results.
-	if len(rawTokens) == 0 {
-		return nil, nil
-	}
-
-	e.inverted.RLock()
-	e.phonetics.RLock()
-	keywordScores, matchTokens := e.lexicalPass(rawTokens)
-	e.phonetics.RUnlock()
-	e.inverted.RUnlock()
-	e.filterCandidates(pred, keywordScores, matchTokens)
-
-	e.vectors.RLock()
-	vectorScores := e.vectorPass(queryVec, pred)
-	e.vectors.RUnlock()
-
-	ranks := e.rankAndFuse(keywordScores, matchTokens, rawTokens, vectorScores)
-
-	// Neural expansion is meant to catch queries whose literal terms aren't
-	// in the vocabulary (typos, unusual phrasing) by pulling in embedding
-	// neighbors. Gating it on len(ranks)==0 alone means it almost never
-	// fires in hybrid mode: vectorPass keeps every document with a positive
-	// dot product against the query vector (roughly half the corpus for a
-	// real embedder), so ranks is essentially never empty even when the
-	// literal query terms match nothing. Instead, treat "no real BM25 hit
-	// for the literal terms" as weak — that's independent of how permissive
-	// the vector pass was.
-	weakResults := len(ranks) == 0
-	if !weakResults && e.config.WordVectors && len(e.bm25.Query(rawTokens)) == 0 {
-		weakResults = true
-	}
-
-	if weakResults && e.config.WordVectors {
-		expandedTokens := e.expandTokens(rawTokens)
-
-		e.inverted.RLock()
-		expandedKeywords, expandedMatches := e.neuralExpand(rawTokens, expandedTokens)
-		e.inverted.RUnlock()
-		e.filterCandidates(pred, expandedKeywords, expandedMatches)
-
-		for id, score := range keywordScores {
-			expandedKeywords[id] += score
-			if expandedMatches[id] == nil {
-				expandedMatches[id] = make(map[string]bool)
-			}
-			for mt := range matchTokens[id] {
-				expandedMatches[id][mt] = true
-			}
-		}
-
-		ranks = e.rankAndFuse(expandedKeywords, expandedMatches, rawTokens, vectorScores)
-	}
-
-	return ranks, nil
-}
-
-func (e *Engine) expandTokens(rawTokens []string) []string {
-	var expanded []string
-	for _, token := range rawTokens {
-		if len(token) < 3 {
-			continue
-		}
-		neighbors := e.getSemanticNeighbors(token, 5, 0.70)
-		for _, n := range neighbors {
-			neighborTokens := e.analyzer.Analyze(n)
-			if len(neighborTokens) > 0 {
-				expanded = append(expanded, neighborTokens[0].Term)
-			}
-		}
-	}
-	return expanded
-}
-
-func (e *Engine) lexicalPass(queryTokens []string) (map[uint64]float64, map[uint64]map[string]bool) {
-	keywordScores := make(map[uint64]float64)
-	matchTokens := make(map[uint64]map[string]bool)
-
-	idxData := e.inverted.GetData()
-	idxPhon := e.phonetics.GetData()
-
-	for _, token := range queryTokens {
-		Q := len(token)
-
-		var frags []string
-		if Q >= 3 {
-			frags = generateEdgeNgrams(token)
-		} else {
-			frags = []string{token}
-		}
-
-		for _, frag := range frags {
-			if ids, ok := idxData[frag]; ok {
-				for _, id := range ids {
-					keywordScores[id] += (float64(len(frag)) / float64(Q)) * 100.0
-					if matchTokens[id] == nil {
-						matchTokens[id] = make(map[string]bool)
-					}
-					matchTokens[id][token] = true
-				}
-			}
-		}
-
-		if phon := analysis.Soundex(token); phon != "" {
-			if ids, ok := idxPhon[phon]; ok {
-				for _, id := range ids {
-					keywordScores[id] += e.config.PhoneticWeight
-					if matchTokens[id] == nil {
-						matchTokens[id] = make(map[string]bool)
-					}
-					matchTokens[id][token] = true
-				}
-			}
-		}
-
-		if Q >= 2 {
-			for _, match := range e.fuzzyMatches(token) {
-				if match.Distance == 0 {
-					continue
-				}
-				if ids, ok := idxData[match.Word]; ok {
-					for _, id := range ids {
-						keywordScores[id] += 60.0 / float64(match.Distance)
-						if matchTokens[id] == nil {
-							matchTokens[id] = make(map[string]bool)
-						}
-						matchTokens[id][token] = true
-					}
-				}
-			}
-		}
-	}
-	return keywordScores, matchTokens
-}
-
-// fuzzyMatches returns vocabulary terms within FuzzyMaxDist edits of token.
-// It walks the FST with a Levenshtein automaton when the FST is built and the
-// distance is supported (cost ~ matches, not vocabulary size); otherwise it
-// falls back to the BK-tree, which returns the identical set and distances.
-func (e *Engine) fuzzyMatches(token string) []analysis.FuzzyMatch {
-	if m, ok, err := e.fst.FuzzySearch(token, e.config.FuzzyMaxDist); err == nil && ok {
-		return m
-	}
-	return e.bkTree.Search(token, e.config.FuzzyMaxDist)
-}
-
-// vectorPass scores documents by dot product with the query vector.
-// Negative dot products are clamped to 0 — a document pointing away from
-// the query has zero semantic relevance, not negative relevance.
-//
-// Small corpora (or highly selective filters) are scored exactly by scanning;
-// once an ANN graph exists and the filter is broad, the graph returns the
-// top annK candidates instead of scoring every document. pred (may be nil)
-// is applied here, before fusion.
-func (e *Engine) vectorPass(queryVec []float32, pred Predicate) map[uint64]float64 {
-	scores := make(map[uint64]float64)
-	if len(queryVec) == 0 {
-		return scores
-	}
-	vecs := e.vectors.GetVectors()
-
-	if e.ann != nil && e.ann.Len() > 0 {
-		if hits, ok := e.annSearch(queryVec, pred, vecs); ok {
-			for _, h := range hits {
-				if h.Score > 0 {
-					scores[h.ID] = h.Score
-				}
-			}
-			return scores
-		}
-	}
-
-	for id, entry := range vecs {
-		if pred != nil && !pred(e.attrs[id]) {
-			continue
-		}
-		if s := ann.DotF32F16(queryVec, entry.Vector); s > 0 {
-			scores[id] = s
-		}
-	}
-	return scores
-}
-
-func (e *Engine) neuralExpand(originalTokens []string, expandedTokens []string) (map[uint64]float64, map[uint64]map[string]bool) {
-	keywordScores := make(map[uint64]float64)
-	matchTokens := make(map[uint64]map[string]bool)
-	idxData := e.inverted.GetData()
-
-	for _, neighbor := range expandedTokens {
-		targets := make(map[uint64]bool)
-		if ids, ok := idxData[neighbor]; ok {
-			for _, id := range ids {
-				targets[id] = true
-			}
-		}
-		if runes := []rune(neighbor); len(runes) > 3 {
-			if ids, ok := idxData[string(runes[:3])]; ok {
-				for _, id := range ids {
-					targets[id] = true
-				}
-			}
-		}
-		for id := range targets {
-			keywordScores[id] += 20000.0
-			if matchTokens[id] == nil {
-				matchTokens[id] = make(map[string]bool)
-			}
-			if len(originalTokens) > 0 {
-				matchTokens[id][originalTokens[0]] = true
-			}
-		}
-	}
-	return keywordScores, matchTokens
 }
 
 // buildKwRank turns raw n-gram/phonetic/fuzzy coverage scores into a single
@@ -978,97 +775,10 @@ func buildKwRank(kwScores map[uint64]float64, bm25ByID map[uint64]float64) map[u
 	return kwRank
 }
 
-func (e *Engine) rankAndFuse(
-	kwScores map[uint64]float64,
-	matchToks map[uint64]map[string]bool,
-	qryToks []string,
-	vScores map[uint64]float64,
-) []SearchResponse {
-
-	bm25Results := e.bm25.Query(qryToks)
-	bm25ByID := make(map[uint64]float64, len(bm25Results))
-	for _, r := range bm25Results {
-		bm25ByID[r.DocID] = r.Score
-	}
-	kwRank := buildKwRank(kwScores, bm25ByID)
-	kwIDs := make([]uint64, 0, len(kwRank))
-	for id := range kwRank {
-		kwIDs = append(kwIDs, id)
-	}
-
-	// BM25-only mode: no vector scores are present.
-	if len(vScores) == 0 {
-		scored := e.scorer.Score(kwIDs, kwRank, nil, nil, e.idMapping)
-		results := make([]SearchResponse, len(scored))
-		for i, r := range scored {
-			results[i] = SearchResponse{ID: r.ID, Score: r.Score}
-		}
-		return results
-	}
-
-	// Hybrid mode: rank the lexical RRF list by kwRank (BM25-weighted, with
-	// a coverage-based fallback for candidates BM25 doesn't score) fused
-	// against the vector list.
-	vcIDs := make([]uint64, 0, len(vScores))
-	for id := range vScores {
-		vcIDs = append(vcIDs, id)
-	}
-
-	// e.idMapping is safe here — Engine.mu.RLock() (Search) or Lock() (others) is held.
-	scored := e.scorer.Score(kwIDs, kwRank, vcIDs, vScores, e.idMapping)
-
-	results := make([]SearchResponse, len(scored))
-	for i, r := range scored {
-		results[i] = SearchResponse{ID: r.ID, Score: r.Score}
-	}
-	return results
-}
-
 // neighborCandidate pairs a word with its similarity score for sorting.
 type neighborCandidate struct {
 	word  string
 	score float32
-}
-
-// getSemanticNeighbors returns the topN most similar words to token by dot
-// product, sorted descending by similarity. Previously truncated without
-// sorting — nondeterministic under Go's randomised map iteration.
-func (e *Engine) getSemanticNeighbors(token string, topN int, threshold float32) []string {
-	e.vectors.RLock()
-	defer e.vectors.RUnlock()
-
-	wordVecs := e.vectors.GetWordVectors()
-	tokenEntry, ok := wordVecs[token]
-	if !ok {
-		return nil
-	}
-
-	tokenVec := Float16ToFloats(tokenEntry.Vector)
-	var candidates []neighborCandidate
-	for word, entry := range wordVecs {
-		if word == token {
-			continue
-		}
-		s := float32(ranking.DotProduct(tokenVec, Float16ToFloats(entry.Vector)))
-		if s >= threshold {
-			candidates = append(candidates, neighborCandidate{word: word, score: s})
-		}
-	}
-
-	// Sort descending by similarity so topN is deterministic.
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].score > candidates[j].score
-	})
-
-	if topN > 0 && len(candidates) > topN {
-		candidates = candidates[:topN]
-	}
-
-	out := make([]string, len(candidates))
-	for i, c := range candidates {
-		out[i] = c.word
-	}
-	return out
 }
 
 func generateEdgeNgrams(token string) []string {
@@ -1110,17 +820,6 @@ func removeID(ids []uint64, target uint64) []uint64 {
 }
 
 var saveFormatMagic = [4]byte{'Z', 'N', 'T', 'H'}
-
-// saveFormatVersion v3: globalSeen is now map[string]int (ref count),
-// docTokens map[uint64][]string added for globalSeen management on Remove.
-// v4: docText map[uint64]string added so GetText/GetDocument can return the
-// original indexed text instead of just IDs and scores.
-// v5: a fixed-size header (embedder name + vector dimension) is written
-// right after magic+version and before the gob body, so Load can refuse a
-// mismatched embedder without decoding the full file. There is no migration
-// from v4 — as with every prior version bump, an old file fails
-// ErrIncompatibleVersion and must be rebuilt.
-const saveFormatVersion uint16 = 5
 
 var ErrIncompatibleVersion = fmt.Errorf("index: incompatible file version — rebuild the index with the current binary")
 
@@ -1168,300 +867,6 @@ func readHeaderString(r io.Reader) (string, error) {
 		return "", err
 	}
 	return string(buf), nil
-}
-
-// Save serialises all index state to filepath. Takes Engine.mu.RLock() so
-// concurrent Searches can proceed during save, but Add/Remove/Load block.
-//
-// Save additionally takes saveMu, a dedicated mutex: mu.RLock() alone allows
-// two Saves to run concurrently (both are readers), and both would write to
-// the same fixed ".tmp" path, corrupting each other's output.
-func (e *Engine) Save(filepath string) error {
-	e.saveMu.Lock()
-	defer e.saveMu.Unlock()
-
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-
-	start := time.Now()
-	e.inverted.RLock()
-	e.vectors.RLock()
-	e.phonetics.RLock()
-	defer e.inverted.RUnlock()
-	defer e.vectors.RUnlock()
-	defer e.phonetics.RUnlock()
-
-	slog.Info("Saving index state", "path", filepath)
-
-	tmp := filepath + ".tmp"
-	file, err := os.Create(tmp)
-	if err != nil {
-		return err
-	}
-
-	if _, err := file.Write(saveFormatMagic[:]); err != nil {
-		file.Close()
-		os.Remove(tmp)
-		return err
-	}
-	var vbuf [2]byte
-	vbuf[0] = byte(saveFormatVersion >> 8)
-	vbuf[1] = byte(saveFormatVersion)
-	if _, err := file.Write(vbuf[:]); err != nil {
-		file.Close()
-		os.Remove(tmp)
-		return err
-	}
-
-	embName, embDims := e.embedderIdentity()
-	if err := writeHeaderString(file, embName); err != nil {
-		file.Close()
-		os.Remove(tmp)
-		return err
-	}
-	var dimsBuf [4]byte
-	binary.BigEndian.PutUint32(dimsBuf[:], uint32(embDims))
-	if _, err := file.Write(dimsBuf[:]); err != nil {
-		file.Close()
-		os.Remove(tmp)
-		return err
-	}
-
-	enc := gob.NewEncoder(file)
-
-	bm25Lengths, bm25TermFreqs, bm25DocFreq, bm25TotalDocs, bm25TotalLen := e.bm25.State()
-	tfidfLengths, tfidfTermFreqs, tfidfDocFreq, tfidfTotalDocs := e.tfidf.State()
-
-	state := []any{
-		e.inverted.GetData(), e.idMapping, e.vectors.GetVectors(),
-		e.inverted.GetTokenCounts(), e.phonetics.GetData(), e.inverted.GetVocabulary(),
-		e.inverted.GetGlobalSeen(), e.vectors.GetWordVectors(), e.inverted.GetDocFragments(),
-		bm25Lengths, bm25TermFreqs, bm25DocFreq, bm25TotalDocs, bm25TotalLen,
-		tfidfLengths, tfidfTermFreqs, tfidfDocFreq, tfidfTotalDocs,
-		// v3: docTokens for globalSeen reference counting
-		e.inverted.GetDocTokens(),
-		// v4: original document text, for GetText/GetDocument
-		e.docText,
-		// v5: per-document metadata attributes for filtered search
-		e.attrs,
-	}
-	for _, s := range state {
-		if err := enc.Encode(s); err != nil {
-			file.Close()
-			os.Remove(tmp)
-			return err
-		}
-	}
-
-	// fsync the temp file's contents before rename, and fsync the containing
-	// directory after rename. Without the first, a crash right after Close
-	// can leave the renamed file truncated (the rename itself is durable,
-	// but the data it points at might not be). Without the second, on most
-	// filesystems the rename operation itself isn't guaranteed durable until
-	// the directory entry is synced, so a crash could leave the old file's
-	// name pointing at nothing or at stale data.
-	if err := file.Sync(); err != nil {
-		file.Close()
-		os.Remove(tmp)
-		return fmt.Errorf("index: fsync temp file: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, filepath); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if dir, err := os.Open(pathutil.Dir(filepath)); err == nil {
-		if syncErr := dir.Sync(); syncErr != nil {
-			// Directory fsync is expected to fail on Windows (no support for
-			// syncing a directory handle) — best-effort only, log at Debug
-			// so it doesn't look like an operational problem there. On
-			// platforms where it's supposed to work, Debug is still visible
-			// with verbose logging enabled.
-			slog.Debug("index: directory fsync after save failed", "error", syncErr)
-		}
-		dir.Close()
-	}
-
-	slog.Info("Index saved", "entries", len(e.inverted.GetData()), "duration", time.Since(start))
-	return nil
-}
-
-// Load restores index state from a gob file. Takes Engine.mu.Lock().
-func (e *Engine) Load(filepath string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if err := e.load(filepath); err != nil {
-		return err
-	}
-
-	e.inverted.RLock()
-	vocabSize := len(e.inverted.GetGlobalSeen())
-	e.inverted.RUnlock()
-
-	if e.fstPath != "" {
-		if err := e.fst.OpenFromFile(e.fstPath); err == nil {
-			// The FST file on disk isn't guaranteed to match the vocabulary
-			// we just loaded (stale file from a previous run, or a save
-			// that didn't complete). A term-count mismatch is a cheap,
-			// effective check — trusting the file blindly let a stale FST
-			// silently survive restarts (queries for real terms in the
-			// loaded index would fail prefix resolution, or vice versa).
-			if e.fst.Size() == vocabSize {
-				e.fstSize = vocabSize
-				e.fstDirty = false
-				if w, ok := e.analyzer.(analysis.FSTWirer); ok {
-					w.SetFST(e.fst)
-				}
-				slog.Info("index: FST loaded from disk", "path", e.fstPath, "terms", e.fst.Size())
-				return nil
-			}
-			slog.Warn("index: FST on disk does not match loaded vocabulary, rebuilding",
-				"fst_terms", e.fst.Size(), "vocab_terms", vocabSize)
-		} else {
-			slog.Info("index: FST file not found, rebuilding", "path", e.fstPath)
-		}
-	}
-
-	if err := e.rebuildFSTLocked(); err != nil {
-		slog.Warn("index: FST rebuild after load failed", "error", err)
-	}
-	return nil
-}
-
-func (e *Engine) load(filepath string) error {
-	start := time.Now()
-
-	f, err := os.Open(filepath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			slog.Warn("No persistence file found, starting fresh", "path", filepath)
-		}
-		return err
-	}
-	defer f.Close()
-
-	var magic [4]byte
-	if _, err := f.Read(magic[:]); err != nil {
-		return fmt.Errorf("index: failed to read file header: %w", err)
-	}
-	if magic != saveFormatMagic {
-		return fmt.Errorf("index: not a ZENITH index file (bad magic bytes)")
-	}
-	var vbuf [2]byte
-	if _, err := f.Read(vbuf[:]); err != nil {
-		return fmt.Errorf("index: failed to read version: %w", err)
-	}
-	version := uint16(vbuf[0])<<8 | uint16(vbuf[1])
-	if version != saveFormatVersion {
-		return ErrIncompatibleVersion
-	}
-
-	savedName, err := readHeaderString(f)
-	if err != nil {
-		return fmt.Errorf("index: failed to read embedder header: %w", err)
-	}
-	var dimsBuf [4]byte
-	if _, err := io.ReadFull(f, dimsBuf[:]); err != nil {
-		return fmt.Errorf("index: failed to read embedder dimensions: %w", err)
-	}
-	savedDims := int(binary.BigEndian.Uint32(dimsBuf[:]))
-
-	curName, curDims := e.embedderIdentity()
-	if curName != "unknown" && savedName != "unknown" && (curName != savedName || curDims != savedDims) {
-		return fmt.Errorf("%w: file has %q (%d-dim), engine has %q (%d-dim)",
-			ErrEmbedderMismatch, savedName, savedDims, curName, curDims)
-	}
-
-	dec := gob.NewDecoder(f)
-
-	// Decode into brand-new, empty structures — never into the live engine's
-	// maps. gob.Decode into an already-populated map merges entries into it
-	// rather than replacing it, so decoding straight into e.inverted's live
-	// maps (the previous approach) silently combined the loaded file with
-	// whatever was already in memory instead of replacing it, and a decode
-	// failure partway through left the engine in a half-loaded, inconsistent
-	// state (e.g. postings and BM25 out of sync) that then got persisted on
-	// the next Save. Only after every field decodes successfully do we swap
-	// these into the live engine, atomically under the sub-index locks.
-	vData := make(map[string][]uint64)
-	vVectors := make(map[uint64]VectorEntry)
-	vToken := make(map[string]int)
-	vPhon := make(map[string][]uint64)
-	vVocab := make(map[int][]string)
-	vSeen := make(map[string]int)
-	vWordVectors := make(map[string]VectorEntry)
-	vFrag := make(map[uint64][]string)
-	vDocToks := make(map[uint64][]string)
-	vIDMapping := make(map[uint64]string)
-	vDocText := make(map[uint64]string)
-	vAttrs := make(map[uint64]Attrs)
-
-	var bm25Lengths map[uint64]int
-	var bm25TermFreqs map[uint64]map[string]int
-	var bm25DocFreq map[string]int
-	var bm25TotalDocs, bm25TotalLen int
-
-	var tfidfLengths map[uint64]int
-	var tfidfTermFreqs map[uint64]map[string]int
-	var tfidfDocFreq map[string]int
-	var tfidfTotalDocs int
-
-	state := []any{
-		&vData, &vIDMapping, &vVectors,
-		&vToken, &vPhon, &vVocab,
-		&vSeen, &vWordVectors, &vFrag,
-		&bm25Lengths, &bm25TermFreqs, &bm25DocFreq, &bm25TotalDocs, &bm25TotalLen,
-		&tfidfLengths, &tfidfTermFreqs, &tfidfDocFreq, &tfidfTotalDocs,
-		&vDocToks, // v3
-		&vDocText, // v4
-		&vAttrs,   // v5
-	}
-	for _, s := range state {
-		if err := dec.Decode(s); err != nil {
-			return fmt.Errorf("index: decode index state: %w", err)
-		}
-	}
-
-	// Every field decoded successfully — swap it all in now.
-	e.inverted.Lock()
-	e.vectors.Lock()
-	e.phonetics.Lock()
-	e.inverted.ReplaceAll(vData, vToken, vVocab, vSeen, vFrag, vDocToks)
-	e.vectors.ReplaceAll(vVectors, vWordVectors)
-	e.phonetics.ReplaceAll(vPhon)
-	e.idMapping = vIDMapping
-	e.docText = vDocText
-	e.attrs = vAttrs
-	e.inverted.Unlock()
-	e.vectors.Unlock()
-	e.phonetics.Unlock()
-
-	// The ANN graph is not persisted; drop the stale one and rebuild from the
-	// freshly loaded vectors if the corpus is large enough to use it.
-	e.ann = nil
-	if e.annMinDocs > 0 && len(vVectors) >= e.annMinDocs {
-		e.rebuildANNLocked()
-	}
-
-	e.bm25.LoadState(bm25Lengths, bm25TermFreqs, bm25DocFreq, bm25TotalDocs, bm25TotalLen)
-	e.tfidf.LoadState(tfidfLengths, tfidfTermFreqs, tfidfDocFreq, tfidfTotalDocs)
-
-	// The BK-tree (fuzzy search) is never persisted — rebuild it from the
-	// loaded vocabulary. Previously it was simply never repopulated on Load
-	// at all: fuzzy search returned nothing for the lifetime of the process
-	// after any restart.
-	newBK := analysis.NewBKTree()
-	for term := range vSeen {
-		newBK.Add(term)
-	}
-	e.bkTree = newBK
-
-	slog.Info("Index loaded", "docs", len(e.idMapping), "duration", time.Since(start))
-	return nil
 }
 
 // ExplainHit is the raw per-signal evidence for one document (Explain mode). Unlike fused RRF scores,
@@ -1536,7 +941,7 @@ func (e *Engine) Explain(ctx context.Context, query string) ([]string, []Explain
 			all = append(all, s)
 		}
 		if len([]rune(t)) >= 2 {
-			for _, m := range e.bkTree.Search(t, e.config.FuzzyMaxDist) {
+			for _, m := range e.fuzzyMatches(t) {
 				if m.Distance > 0 {
 					cs = append(cs, cand{tok: m.Word, dist: m.Distance})
 				}
@@ -1559,7 +964,7 @@ func (e *Engine) Explain(ctx context.Context, query string) ([]string, []Explain
 	var queryVec []float32
 	if e.embedder != nil {
 		var err error
-		queryVec, err = e.embedder.Embed(ctx, query)
+		queryVec, err = embedding.EmbedQuery(ctx, e.embedder, query)
 		if err != nil {
 			slog.Warn("explain: semantic signal unavailable — embedder failed", "error", err)
 			queryVec = nil
@@ -1570,18 +975,13 @@ func (e *Engine) Explain(ctx context.Context, query string) ([]string, []Explain
 	e.vectors.RLock()
 	defer e.vectors.RUnlock()
 	defer e.inverted.RUnlock()
-	docVecs := e.vectors.GetVectors()
 
 	hits := make([]ExplainHit, 0)
-	for id, toks := range e.inverted.GetDocTokens() {
-		set := make(map[string]struct{}, len(toks))
-		for _, tk := range toks {
-			set[tk] = struct{}{}
-		}
+	e.eachDocTerms(func(id uint64, has func(string) bool) {
 		var terms []TermHit
 		for _, t := range base {
 			for _, c := range cands[t] {
-				if _, ok := set[c.tok]; ok {
+				if has(c.tok) {
 					terms = append(terms, TermHit{Term: t, Matched: c.tok, Dist: c.dist, Synonym: c.syn})
 					break
 				}
@@ -1589,17 +989,17 @@ func (e *Engine) Explain(ctx context.Context, query string) ([]string, []Explain
 		}
 		sem := 0.0
 		if len(queryVec) > 0 {
-			if v, ok := docVecs[id]; ok {
-				if s := ranking.DotProduct(queryVec, Float16ToFloats(v.Vector)); s > 0 {
+			if v := e.vecOf(id); v != nil {
+				if s := ranking.DotProduct(queryVec, Float16ToFloats(v)); s > 0 {
 					sem = s
 				}
 			}
 		}
 		if len(terms) == 0 && sem <= 0 {
-			continue
+			return
 		}
-		hits = append(hits, ExplainHit{ID: e.idMapping[id], Lexical: lex[id], Semantic: sem, Terms: terms})
-	}
+		hits = append(hits, ExplainHit{ID: e.origID(id), Lexical: lex[id], Semantic: sem, Terms: terms})
+	})
 	sort.Slice(hits, func(i, j int) bool {
 		a, b := hits[i], hits[j]
 		if len(a.Terms) != len(b.Terms) {

@@ -1,0 +1,183 @@
+package index
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"math/rand"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/shramanb113/ZENITH/internal/analysis"
+	"github.com/shramanb113/ZENITH/internal/config"
+	"github.com/shramanb113/ZENITH/internal/ranking"
+)
+
+// randVecEmbedder returns a deterministic pseudo-random unit vector per text —
+// the same size and storage cost as a real 384-dim embedding, without the cost
+// of running a model.
+type randVecEmbedder struct{ dims int }
+
+func (e randVecEmbedder) Dimensions() int { return e.dims }
+func (e randVecEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
+	h := uint64(1469598103934665603)
+	for i := 0; i < len(text); i++ {
+		h = (h ^ uint64(text[i])) * 1099511628211
+	}
+	r := rand.New(rand.NewSource(int64(h)))
+	v := make([]float32, e.dims)
+	var ss float64
+	for i := range v {
+		v[i] = float32(r.NormFloat64())
+		ss += float64(v[i]) * float64(v[i])
+	}
+	n := float32(math.Sqrt(ss))
+	for i := range v {
+		v[i] /= n
+	}
+	return v, nil
+}
+func (e randVecEmbedder) EmbedBatch(ctx context.Context, ts []string) ([][]float32, error) {
+	out := make([][]float32, len(ts))
+	for i := range ts {
+		out[i], _ = e.Embed(ctx, ts[i])
+	}
+	return out, nil
+}
+
+// TestFlushPause reports how long a checkpoint (an incremental flush of the
+// in-memory delta) holds up searches, as a function of delta size, on an index
+// that already has a large mapped base. It is a measurement, not an assertion —
+// the numbers go in ROADMAP.md. Run:
+//
+//	ZENITH_FLUSH_PAUSE=1 go test ./internal/index -run TestFlushPause -v -timeout 1800s
+func TestFlushPause(t *testing.T) {
+	if os.Getenv("ZENITH_FLUSH_PAUSE") == "" {
+		t.Skip("set ZENITH_FLUSH_PAUSE=1 to run (a measurement, several minutes)")
+	}
+	ctx := context.Background()
+	words := synthVocab(8000)
+	r := rand.New(rand.NewSource(3))
+	zipf := rand.NewZipf(r, 1.15, 4, uint64(len(words)-1))
+	mkDocs := func(prefix string, n int) []BatchDoc {
+		docs := make([]BatchDoc, n)
+		for i := range docs {
+			txt := ""
+			for j := 0; j < 80; j++ { // ~500 bytes, like a short passage
+				txt += words[zipf.Uint64()] + " "
+			}
+			docs[i] = BatchDoc{ID: fmt.Sprintf("%s-%07d", prefix, i), Text: txt}
+		}
+		return docs
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.WordVectors = false
+	eng := NewEngine(cfg, randVecEmbedder{dims: 384}, ranking.NewWeightedRRFRanker(cfg.RRFConstant, 0, 1.0, cfg.VectorWeight), analysis.NewStandardAnalyzer())
+	eng.SetAutoCompact(false)
+	defer eng.Close()
+	path := filepath.Join(t.TempDir(), "pause.db")
+
+	// A mapped base (default 100k docs), so the flush is measured against a big index.
+	// ZENITH_FLUSH_PAUSE_BASE / ZENITH_FLUSH_PAUSE_DELTAS (comma list) shorten a run,
+	// e.g. for profiling.
+	base := 100_000
+	if v, err := strconv.Atoi(os.Getenv("ZENITH_FLUSH_PAUSE_BASE")); err == nil && v > 0 {
+		base = v
+	}
+	deltas := []int{1_000, 10_000, 30_000}
+	if v := os.Getenv("ZENITH_FLUSH_PAUSE_DELTAS"); v != "" {
+		deltas = nil
+		for _, f := range strings.Split(v, ",") {
+			if n, err := strconv.Atoi(strings.TrimSpace(f)); err == nil && n > 0 {
+				deltas = append(deltas, n)
+			}
+		}
+	}
+	if err := eng.AddBatch(ctx, mkDocs("base", base)); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("base: %d docs, %d segment(s)", eng.Count(), eng.SegmentCount())
+
+	for di, delta := range deltas {
+		if err := eng.AddBatch(ctx, mkDocs(fmt.Sprintf("d%d-%d", di, delta), delta)); err != nil {
+			t.Fatal(err)
+		}
+
+		// A concurrent searcher records the longest gap between completed searches.
+		var stop atomic.Bool
+		var wg sync.WaitGroup
+		var maxLat atomic.Int64
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			qs := []string{"kubernetes cluster", "search index ranking", "tokyo weather", words[10] + " " + words[40]}
+			for i := 0; !stop.Load(); i++ {
+				t0 := time.Now()
+				eng.Search(ctx, qs[i%len(qs)])
+				if d := int64(time.Since(t0)); d > maxLat.Load() {
+					maxLat.Store(d)
+				}
+			}
+		}()
+		time.Sleep(200 * time.Millisecond) // warm: steady-state latency before the flush
+		steady := time.Duration(maxLat.Swap(0))
+
+		t0 := time.Now()
+		if err := eng.Save(path); err != nil {
+			t.Fatal(err)
+		}
+		flush := time.Since(t0)
+		time.Sleep(100 * time.Millisecond)
+		stop.Store(true)
+		wg.Wait()
+		worst := time.Duration(maxLat.Load())
+		t.Logf("delta %6d docs: flush took %8s; longest search stall during it %8s (steady-state max before: %s)",
+			delta, flush.Round(time.Millisecond), worst.Round(time.Millisecond), steady.Round(time.Millisecond))
+	}
+
+	// Compaction runs outside the engine lock: stall should stay small.
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	var maxLat atomic.Int64
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for !stop.Load() {
+			t0 := time.Now()
+			eng.Search(ctx, words[10]+" "+words[40])
+			if d := int64(time.Since(t0)); d > maxLat.Load() {
+				maxLat.Store(d)
+			}
+		}
+	}()
+	t0 := time.Now()
+	segs := eng.SegmentCount()
+	if err := eng.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	comp := time.Since(t0)
+	stop.Store(true)
+	wg.Wait()
+	sizes := []int64{}
+	if info, err := Inspect(path); err == nil {
+		for _, s := range info.Segments {
+			if st, err := os.Stat(s); err == nil {
+				sizes = append(sizes, st.Size())
+			}
+		}
+	}
+	sort.Slice(sizes, func(i, j int) bool { return sizes[i] < sizes[j] })
+	t.Logf("compact %d segments -> %d (%d docs) took %s; longest search stall during it %s; result size %v bytes",
+		segs, eng.SegmentCount(), eng.Count(), comp.Round(time.Millisecond), time.Duration(maxLat.Load()).Round(time.Millisecond), sizes)
+}

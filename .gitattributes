@@ -1,0 +1,5 @@
+# Golden fixtures are byte-exact files written by specific releases; never touch their bytes.
+internal/index/testdata/golden-v5/golden.db      binary
+internal/index/testdata/golden-v6/golden.db      binary
+internal/index/testdata/golden-v6/*.seg-*        binary
+internal/index/testdata/golden-v5/expected.tsv   text eol=lf

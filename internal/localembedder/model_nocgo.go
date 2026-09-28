@@ -14,7 +14,7 @@ func newOnnxModel(_ []byte, _ string) (*onnxModel, error) {
 	return nil, errNoCGo
 }
 
-func (m *onnxModel) infer(_ []int64, _ []int64, _ []int64, _, _ int) ([]float32, error) {
+func (m *onnxModel) infer(_ []int64, _ []int64, _ []int64, _, _, _ int) ([]float32, error) {
 	return nil, errNoCGo
 }
 

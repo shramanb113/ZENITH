@@ -101,3 +101,13 @@ func (c *CachingEmbedder) Name() string {
 	}
 	return "unknown"
 }
+
+// EmbedQuery forwards to the wrapped embedder's query mode when it has one.
+// Queries bypass the cache: they are few and rarely repeat, and a query
+// vector must not be served for the same text embedded as a document.
+func (c *CachingEmbedder) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
+	if q, ok := c.base.(QueryEmbedder); ok {
+		return q.EmbedQuery(ctx, text)
+	}
+	return c.Embed(ctx, text)
+}

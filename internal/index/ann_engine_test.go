@@ -84,7 +84,7 @@ func bagDocs(n int, seed int64) []BatchDoc {
 	return docs
 }
 
-func topIDs(rs []SearchResponse, k int) map[string]bool {
+func topResultIDs(rs []SearchResponse, k int) map[string]bool {
 	m := map[string]bool{}
 	for i, r := range rs {
 		if i >= k {
@@ -116,7 +116,7 @@ func TestANN_MatchesExactSearchClosely(t *testing.T) {
 		q := docs[r.Intn(len(docs))].Text
 		a, _ := exact.Search(ctx, q)
 		b, _ := fast.Search(ctx, q)
-		ea, eb := topIDs(a, 10), topIDs(b, 10)
+		ea, eb := topResultIDs(a, 10), topResultIDs(b, 10)
 		hit := 0
 		for id := range ea {
 			if eb[id] {
@@ -191,6 +191,7 @@ func TestANN_RebuiltAfterLoadAndBelowThresholdStaysExact(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ann.db")
 	a := newBagEngine(100)
+	defer a.Close()
 	if err := a.AddBatch(ctx, bagDocs(400, 3)); err != nil {
 		t.Fatal(err)
 	}
@@ -199,6 +200,7 @@ func TestANN_RebuiltAfterLoadAndBelowThresholdStaysExact(t *testing.T) {
 	}
 
 	b := newBagEngine(100)
+	defer b.Close()
 	if b.ANNActive() {
 		t.Fatal("fresh engine must not have ANN")
 	}

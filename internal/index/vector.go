@@ -82,8 +82,8 @@ func (vs *VectorStore) RUnlock() { vs.mu.RUnlock() }
 func (vs *VectorStore) Lock()    { vs.mu.Lock() }
 func (vs *VectorStore) Unlock()  { vs.mu.Unlock() }
 
-func (vs *VectorStore) GetVectors() map[uint64]VectorEntry       { return vs.vectors }
-func (vs *VectorStore) GetWordVectors() map[string]VectorEntry   { return vs.wordVectors }
+func (vs *VectorStore) GetVectors() map[uint64]VectorEntry     { return vs.vectors }
+func (vs *VectorStore) GetWordVectors() map[string]VectorEntry { return vs.wordVectors }
 
 // ReplaceAll atomically swaps both backing maps for freshly decoded ones.
 // Callers must hold vs.Lock() for the duration of the swap.

@@ -2,7 +2,7 @@ package localembedder
 
 import "math"
 
-const hiddenSize = 384
+
 
 // meanPool computes the attention-mask-weighted mean over the sequence dimension.
 // lastHiddenState is a flat []float32 of shape [seqLen * hidden].

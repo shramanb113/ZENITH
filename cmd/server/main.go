@@ -74,7 +74,7 @@ func main() {
 		case os.IsNotExist(err):
 			slog.Info("No existing index found, starting fresh.")
 		case errors.Is(err, index.ErrIncompatibleVersion):
-			slog.Error("Index file is from an incompatible version — rebuild required", "error", err)
+			slog.Error("Index file is in an older on-disk format — run `zenith migrate --db zenith.db` (keeps a backup), then restart", "error", err)
 			os.Exit(1)
 		case len(storageEng.Records()) == 0:
 			// The gob snapshot exists but failed to load, and there is no WAL
@@ -149,5 +149,8 @@ func main() {
 		if err := storageEng.Checkpoint(); err != nil {
 			slog.Error("WAL checkpoint failed", "error", err)
 		}
+	}
+	if err := engine.Close(); err != nil {
+		slog.Error("Failed to release index files", "error", err)
 	}
 }

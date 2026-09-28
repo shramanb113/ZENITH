@@ -47,7 +47,7 @@ func newOnnxModel(modelBytes []byte, libPath string) (*onnxModel, error) {
 
 // infer runs a forward pass and returns the raw last_hidden_state as a flat
 // []float32 of shape [batchSize * seqLen * hiddenSize].
-func (m *onnxModel) infer(inputIDs, attnMask, typeIDs []int64, batchSize, seqLen int) ([]float32, error) {
+func (m *onnxModel) infer(inputIDs, attnMask, typeIDs []int64, batchSize, seqLen, hiddenSize int) ([]float32, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

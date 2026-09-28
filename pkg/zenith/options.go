@@ -1,6 +1,9 @@
 package zenith
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type options struct {
 	embedder           Embedder
@@ -12,6 +15,8 @@ type options struct {
 	noWordVectors      bool
 	memoryLimitBytes   int64
 	annMinDocs         int // -1 = engine default
+	model              string // registered embedding model id; "" = the bundled one
+	modelsDir          string
 }
 
 func defaultOptions() *options {
@@ -42,6 +47,38 @@ func WithEmbedder(e Embedder) Option {
 			return ErrInvalidOption
 		}
 		o.embedder = e
+		return nil
+	}
+}
+
+// WithModel selects a registered embedding model by ID (see localembedder's
+// registry: all-MiniLM-L6-v2, gte-small, bge-small-en-v1.5). The bundled model
+// is used directly; any other must first be installed with `zenith models pull <id>`
+// (or placed at <models dir>/<id>/model.onnx). Unlike the default embedder, an
+// explicitly requested model that cannot be loaded is an error from Open, not a
+// silent fall back to lexical-only search.
+//
+// The model's identity is recorded in the index, so an index built with one
+// model refuses to open with another (ErrEmbedderMismatch) rather than mixing
+// vector spaces. Requires a CGO build.
+func WithModel(id string) Option {
+	return func(o *options) error {
+		if strings.TrimSpace(id) == "" {
+			return ErrInvalidOption
+		}
+		o.model = id
+		return nil
+	}
+}
+
+// WithModelsDir sets where non-bundled models are looked up
+// (default: ~/.zenith/models).
+func WithModelsDir(dir string) Option {
+	return func(o *options) error {
+		if dir == "" {
+			return ErrInvalidOption
+		}
+		o.modelsDir = dir
 		return nil
 	}
 }

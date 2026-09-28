@@ -25,7 +25,7 @@ func TestRRFScore_BasicOrdering(t *testing.T) {
 	vcIDs, vcScores, _ := makeMapping("doc_a", "doc_c", "doc_b")
 	// doc_c appears at rank 2 in both lists — should outscore doc_b.
 
-	results := ranker.Score(kwIDs, kwScores, vcIDs, vcScores, mapping)
+	results := ranker.Score(kwIDs, kwScores, vcIDs, vcScores, MapLookup(mapping))
 	if len(results) == 0 {
 		t.Fatal("expected non-empty results")
 	}
@@ -45,7 +45,7 @@ func TestRRFScore_DocumentInBothLists(t *testing.T) {
 	vcScores := map[uint64]float64{2: 80}
 	mapping := map[uint64]string{1: "unique_doc", 2: "shared_doc"}
 
-	results := ranker.Score(kwIDs, kwScores, vcIDs, vcScores, mapping)
+	results := ranker.Score(kwIDs, kwScores, vcIDs, vcScores, MapLookup(mapping))
 
 	var sharedScore, uniqueScore float64
 	for _, r := range results {
@@ -74,7 +74,7 @@ func TestRRFScore_DoesNotMutateInputSlices(t *testing.T) {
 	copy(kwCopy, kwIDs)
 	copy(vcCopy, vcIDs)
 
-	ranker.Score(kwIDs, kwScores, vcIDs, vcScores, mapping)
+	ranker.Score(kwIDs, kwScores, vcIDs, vcScores, MapLookup(mapping))
 
 	for i := range kwIDs {
 		if kwIDs[i] != kwCopy[i] {
@@ -101,7 +101,7 @@ func TestRRFScore_OnlyKeyword(t *testing.T) {
 	kwIDs := []uint64{1, 2}
 	kwScores := map[uint64]float64{1: 50, 2: 30}
 	mapping := map[uint64]string{1: "alpha", 2: "beta"}
-	results := ranker.Score(kwIDs, kwScores, nil, nil, mapping)
+	results := ranker.Score(kwIDs, kwScores, nil, nil, MapLookup(mapping))
 	if len(results) == 0 {
 		t.Fatal("expected results from keyword-only input")
 	}
@@ -122,7 +122,7 @@ func TestRRFScore_TopNCap(t *testing.T) {
 		scores[uint64(i+1)] = float64(10 - i)
 		mapping[uint64(i+1)] = "doc"
 	}
-	results := ranker.Score(ids, scores, nil, nil, mapping)
+	results := ranker.Score(ids, scores, nil, nil, MapLookup(mapping))
 	if len(results) > 3 {
 		t.Errorf("expected at most 3 results with topN=3, got %d", len(results))
 	}
@@ -134,8 +134,8 @@ func TestRRFScore_DeterministicOrder(t *testing.T) {
 	kwScores := map[uint64]float64{1: 100, 2: 100}
 	mapping := map[uint64]string{1: "z_doc", 2: "a_doc"}
 
-	r1 := ranker.Score(kwIDs, kwScores, nil, nil, mapping)
-	r2 := ranker.Score(kwIDs, kwScores, nil, nil, mapping)
+	r1 := ranker.Score(kwIDs, kwScores, nil, nil, MapLookup(mapping))
+	r2 := ranker.Score(kwIDs, kwScores, nil, nil, MapLookup(mapping))
 
 	if len(r1) != len(r2) {
 		t.Fatal("non-deterministic result length")

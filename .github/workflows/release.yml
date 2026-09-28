@@ -1,0 +1,169 @@
+name: Release
+
+# Builds prebuilt binaries for every supported OS/arch when a version tag is pushed
+# and attaches them, with checksums, to a GitHub release.
+#
+# Two flavours are published per platform:
+#   zenith_<ver>_<os>_<arch>          full build: embedded ONNX model, semantic + lexical search
+#   zenith-lexical_<ver>_<os>_<arch>  CGO_ENABLED=0: lexical (BM25 / n-gram / fuzzy) only, no C
+#                                     toolchain or model, ~20 MB — a first-class supported mode
+#
+# Users of either flavour need no Go toolchain, C compiler or model download.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {} # dry run: builds and uploads workflow artifacts, publishes nothing
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: "1.24.1"
+
+jobs:
+  full:
+    name: full / ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, goos: linux, goarch: amd64, ext: "" }
+          - { os: macos-latest, goos: darwin, goarch: arm64, ext: "" }
+          - { os: macos-13, goos: darwin, goarch: amd64, ext: "" }
+          - { os: windows-latest, goos: windows, goarch: amd64, ext: ".exe" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up MinGW (Windows)
+        if: matrix.goos == 'windows'
+        uses: egor-tensin/setup-mingw@v2
+        with:
+          platform: x64
+
+      # Model + platform-specific onnxruntime are gitignored; fetch them for this
+      # runner's OS/arch. The script also records which model it fetched
+      # (assets/model.id) so the binary and its index-file identity cannot disagree.
+      - name: Fetch model and ONNX runtime
+        run: go run scripts/download_assets.go
+
+      - name: Build
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -o "dist/zenith${{ matrix.ext }}" ./cmd/zenith
+
+      # A binary that builds but cannot load its own model is a failed release.
+      - name: Smoke test
+        shell: bash
+        run: |
+          ./dist/zenith${{ matrix.ext }} version
+          # doctor exits non-zero when this fresh binary is not on PATH; that is not
+          # what is being tested here, so capture the report and inspect the embedder check.
+          ./dist/zenith${{ matrix.ext }} doctor --json > doctor.json || true
+          cat doctor.json
+          grep -q '"name": "embedder"' doctor.json
+          grep -A1 '"name": "embedder"' doctor.json | grep -q '"status": "ok"'
+
+      - name: Package
+        shell: bash
+        run: |
+          name="zenith_${GITHUB_REF_NAME}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          cd dist
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            7z a "../${name}.zip" "zenith${{ matrix.ext }}" ../LICENSE ../README.md
+          else
+            tar -czf "../${name}.tar.gz" "zenith${{ matrix.ext }}" -C .. LICENSE README.md
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: full-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            zenith_*.tar.gz
+            zenith_*.zip
+
+  lexical:
+    name: lexical (no CGo) / all platforms
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build and package every platform
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p out
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            goos=${target%/*}; goarch=${target#*/}
+            ext=""; [ "$goos" = "windows" ] && ext=".exe"
+            name="zenith-lexical_${GITHUB_REF_NAME}_${goos}_${goarch}"
+            work=$(mktemp -d)
+            GOOS=$goos GOARCH=$goarch go build -trimpath \
+              -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+              -o "$work/zenith${ext}" ./cmd/zenith
+            cp LICENSE README.md "$work/"
+            if [ "$goos" = "windows" ]; then
+              (cd "$work" && zip -q "$GITHUB_WORKSPACE/out/${name}.zip" "zenith${ext}" LICENSE README.md)
+            else
+              tar -czf "out/${name}.tar.gz" -C "$work" "zenith${ext}" LICENSE README.md
+            fi
+          done
+          ls -l out
+
+      # The one flavour we can execute on this runner: check it really is lexical-only.
+      - name: Smoke test (linux/amd64)
+        run: |
+          d=$(mktemp -d)
+          tar -xzf out/zenith-lexical_${GITHUB_REF_NAME}_linux_amd64.tar.gz -C "$d"
+          "$d/zenith" version
+          "$d/zenith" doctor --json > doctor.json || true
+          cat doctor.json
+          grep -A1 '"name": "embedder"' doctor.json | grep -q '"status": "warn"'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lexical
+          path: out/*
+
+  publish:
+    name: publish release
+    needs: [full, lexical]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: artifacts
+        run: |
+          sha256sum zenith*_* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" artifacts/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag

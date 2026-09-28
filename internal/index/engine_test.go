@@ -211,8 +211,8 @@ func TestEngine_Search_MultipleDocumentRanking(t *testing.T) {
 
 	// doc_relevant has 3 occurrences of search terms; doc_partial has 1.
 	docs := map[string]string{
-		"doc_relevant": "search engine search ranking search algorithm",
-		"doc_partial":  "database storage index",
+		"doc_relevant":  "search engine search ranking search algorithm",
+		"doc_partial":   "database storage index",
 		"doc_unrelated": "cooking recipe pasta tomato sauce",
 	}
 	for id, content := range docs {
@@ -258,6 +258,7 @@ func TestEngine_FSTContains_AfterAdd(t *testing.T) {
 
 func TestEngine_SaveLoad_RoundTrip(t *testing.T) {
 	e := newTestEngine()
+	defer e.Close()
 	ctx := context.Background()
 
 	docs := []struct{ id, text string }{
@@ -278,6 +279,7 @@ func TestEngine_SaveLoad_RoundTrip(t *testing.T) {
 
 	// Load into fresh engine.
 	e2 := newTestEngine()
+	defer e2.Close()
 	if err := e2.Load(path); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -305,6 +307,7 @@ func TestEngine_Load_MissingFile(t *testing.T) {
 
 func TestEngine_Save_CreatesFile(t *testing.T) {
 	e := newTestEngine()
+	defer e.Close()
 	ctx := context.Background()
 	_ = e.Add(ctx, "doc1", "hello world")
 
@@ -468,6 +471,7 @@ func TestEngine_AddBatch_Empty(t *testing.T) {
 
 func TestEngine_AddBatch_SearchableAfterSave(t *testing.T) {
 	e := newTestEngine()
+	defer e.Close()
 	ctx := context.Background()
 
 	docs := []BatchDoc{
@@ -483,6 +487,7 @@ func TestEngine_AddBatch_SearchableAfterSave(t *testing.T) {
 	}
 
 	e2 := newTestEngine()
+	defer e2.Close()
 	if err := e2.Load(path); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -604,6 +609,7 @@ func TestIndexEngine_JournalNilSafe(t *testing.T) {
 // fuzzy search silently died after every restart.
 func TestEngine_Load_RebuildsBKTree(t *testing.T) {
 	e := newTestEngine()
+	defer e.Close()
 	ctx := context.Background()
 
 	if err := e.Add(ctx, "doc1", "kubernetes cluster deployment"); err != nil {
@@ -616,6 +622,7 @@ func TestEngine_Load_RebuildsBKTree(t *testing.T) {
 	}
 
 	e2 := newTestEngine()
+	defer e2.Close()
 	if err := e2.Load(path); err != nil {
 		t.Fatalf("Load: %v", err)
 	}

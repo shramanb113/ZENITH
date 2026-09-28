@@ -11,7 +11,7 @@ You can use it two ways:
 - **As a CLI tool** — install once, point at directories, search from your terminal
 - **As a Go library** — `go get` it, call three methods, ship search inside your app
 
-The storage layer is a full LSM-tree (WAL → MemTable → SSTable → Bloom filters), built from scratch. The embedding model (`all-MiniLM-L6-v2`, int8 ONNX) is baked into the binary — no Python, no server, no setup step.
+The storage layer is a full LSM-tree (WAL → MemTable → SSTable → Bloom filters), built from scratch. The embedding model (`gte-small`, int8 ONNX; swappable, see [Choosing an embedding model](#choosing-an-embedding-model)) is baked into the binary — no Python, no server, no setup step.
 
 ---
 
@@ -32,10 +32,10 @@ See [DECISIONS.md](./DECISIONS.md) for the full architectural and strategic reas
 | Requirement | Version | Notes |
 |---|---|---|
 | Go | 1.24+ | Required |
-| C compiler | gcc / MinGW-w64 | Required for ONNX inference (CGo). See note below. |
+| C compiler | gcc / MinGW-w64 | Only to build semantic search from source (CGo). Not needed for the prebuilt release binaries, nor for the lexical-only build. See note below. |
 | Ollama | any | Optional — alternative embedder |
 
-**C compiler note:** ZENITH uses CGo to run `all-MiniLM-L6-v2` in-process via ONNX Runtime. On Windows, install MinGW-w64:
+**C compiler note:** ZENITH uses CGo to run its embedding model (`gte-small` by default) in-process via ONNX Runtime. On Windows, install MinGW-w64:
 
 ```powershell
 winget install -e --id MSYS2.MSYS2
@@ -57,6 +57,15 @@ go install github.com/shramanb113/ZENITH/cmd/zenith@latest
 ```
 
 One command. No setup step. The embedding model is embedded in the binary — ZENITH is ready immediately.
+
+**Prebuilt binaries.** Each version tag publishes archives with checksums (built by `.github/workflows/release.yml`) so you need no Go toolchain and no C compiler:
+
+| Archive | What it is |
+|---|---|
+| `zenith_<version>_<os>_<arch>` | Full build: embedded ONNX model, semantic + lexical search (linux/amd64, darwin/arm64, darwin/amd64, windows/amd64) |
+| `zenith-lexical_<version>_<os>_<arch>` | Built without CGo, ~20 MB: BM25 / n-gram / phonetic / fuzzy search only. A supported mode, not a fallback — `zenith doctor` reports which one you are running |
+
+`zenith doctor` checks your install, and verifies the index's checksums.
 
 `go install` puts the binary in `$(go env GOPATH)/bin`, which is often *not* on your PATH. If `zenith` is "not found", or you are running an older copy than the one you just installed, let ZENITH fix it itself:
 
@@ -97,6 +106,20 @@ zenith serve
 ```
 
 No `zenith setup` required. That command existed in v1 to install the Python embedding packages. It is now a no-op — everything ships in the binary.
+
+### Upgrading an existing index (on-disk format change)
+
+The index is now a small manifest (`zenith.db`) plus memory-mapped, immutable segment files next to it (`zenith.db.seg-000001`, …): opening is fast regardless of size, most of the index lives in the OS page cache rather than the Go heap, and saving writes only what changed. See [FORMAT.md](./FORMAT.md) for the layout and the compatibility policy.
+
+An index written by an older release is **refused with a clear error, never overwritten or misread**, until you convert it:
+
+```bash
+zenith migrate            # in place; keeps the original as zenith.db.v5.bak
+zenith doctor             # confirms the format and re-verifies every checksum
+zenith compact            # optional: merge segments and reclaim space
+```
+
+Migration needs no embedding model (vectors are copied, not recomputed), swaps the new index in atomically, and re-opens and checksums it before reporting success. From Go: `zenith.Migrate(path, "")`.
 
 ### Upgrading from v1 (Python sidecar)
 
@@ -181,7 +204,30 @@ The zero-argument happy path uses the embedded ONNX model automatically. Functio
 
 ## How Embedding Works
 
-ZENITH ships the `all-MiniLM-L6-v2` embedding model (int8 ONNX, ~22 MB) **baked into the binary** via `go:embed`. Inference runs in-process via `yalue/onnxruntime_go` — no Python, no network hop, no separate process.
+ZENITH ships the `gte-small` embedding model (int8 ONNX, ~34 MB) **baked into the binary** via `go:embed`. Inference runs in-process via `yalue/onnxruntime_go` — no Python, no network hop, no separate process.
+
+### Choosing an embedding model
+
+```bash
+zenith models list                          # what is available, and what is installed
+zenith models pull all-MiniLM-L6-v2         # download one into ~/.zenith/models
+zenith index ~/notes --model all-MiniLM-L6-v2
+```
+
+From Go: `zenith.Open(path, zenith.WithModel("all-MiniLM-L6-v2"))`. A model that cannot be loaded is an error, never a silent fall back to another one.
+
+**An index remembers its model** and refuses to open with a different one (mixing vector spaces gives plausible-looking but wrong results). The CLI follows the model recorded in the index automatically, so upgrading never strands an existing index: one built with `all-MiniLM-L6-v2` (the bundled model in earlier releases) keeps working after a one-time `zenith models pull all-MiniLM-L6-v2`. To switch an index to another model, re-index — your documents are untouched.
+
+**Why `gte-small` is the default** (measured here, `ZENITH_MODEL_EVAL` / `ZENITH_SCIFACT_HYBRID` / `ZENITH_MSMARCO_HYBRID` tests; a 14-thread desktop):
+
+| Model | Size | Embed 20k docs | Dense-only nDCG@10: MS MARCO / SciFact | **Hybrid** nDCG@10 on SciFact |
+|---|---|---|---|---|
+| lexical only (no model) | — | — | — | 0.689 |
+| all-MiniLM-L6-v2 | 23 MB | 2m19s | 0.946 / 0.652 | 0.691 |
+| bge-small-en-v1.5 | 34 MB | 4m30s | 0.961 / 0.699 | 0.727 |
+| **gte-small** | 34 MB | 3m52s | 0.965 / 0.714 | **0.738** |
+
+On out-of-domain text (SciFact, scientific claims) the previous default added almost nothing to BM25 in the full hybrid pipeline (+0.2 nDCG points), while `gte-small` adds +5.0, and it beats the previous default by +4.7 nDCG points and +4.3 points of Recall@10. On MS MARCO (which these models were trained near) the two are **tied** in hybrid (Recall@10 0.962 = 0.962 over 107,399 passages). The price is about 1.7× the embedding time (107k passages: 21m41s vs 12m45s) and an 11 MB larger binary; if indexing speed matters more than out-of-domain quality, `--model all-MiniLM-L6-v2` is the faster choice. SciFact is one out-of-domain task, not a guarantee for your documents.
 
 On every query and document add, ZENITH runs this cascade automatically:
 
@@ -308,7 +354,7 @@ zenith index <path>
 │   Crawler   │────▶│       Analyzer        │────▶│         Embedder             │
 │  (fsnotify) │     │                      │     │                              │
 │  recursive  │     │  regex tokenise      │     │  cascade (default: auto):    │
-│  dir walk   │     │  camelCase-aware     │     │  1. ONNX  all-MiniLM-L6-v2  │
+│  dir walk   │     │  camelCase-aware     │     │  1. ONNX  gte-small          │
 │  + live     │     │  lowercase           │     │     (embedded, in-process)   │
 │  watching   │     │  stop-word filter    │     │  2. Ollama nomic-embed-text  │
 │             │     │  Porter2 stem        │     │  3. deterministic (fallback) │
@@ -362,7 +408,7 @@ zenith search <query>          ▼
 | Synonym expansion | Active | |
 | FST term dictionary | Active | Rebuilt after every flush |
 | RRF hybrid ranking | Active | |
-| ONNX embedder (embedded, in-process) | Active | all-MiniLM-L6-v2, int8, CGo |
+| ONNX embedder (embedded, in-process) | Active | gte-small (default) / all-MiniLM-L6-v2 / bge-small-en-v1.5, int8, CGo |
 | Deterministic embedder | Active | Fallback — zero dependencies |
 | Ollama embedder | Active | Needs Ollama running |
 | gRPC server (`zenith serve`) | Active | Port 8080 default |
@@ -400,11 +446,11 @@ Full LSM-tree — same architecture as RocksDB and LevelDB, built from scratch.
 
 **Lexical:** inverted index with BM25 and TF-IDF scoring, Porter2 stemming, edge n-grams, phonetic matching (Soundex), synonym expansion.
 
-**Fuzzy:** BK-tree over Levenshtein distance, O(log n) via triangle inequality pruning. Tolerates up to 2 edits by default (configurable in `internal/config/config.go`).
+**Fuzzy:** a Levenshtein automaton walking the FST (cost proportional to the matches, not the vocabulary). The allowed edit distance scales with word length — 2–3 letter words match exactly, 4–5 letters tolerate one edit, longer words two (`FuzzyMaxDist`, `FuzzyByLength` in `internal/config/config.go`). A fixed distance of 2 on every word made short words match hundreds of unrelated terms; on MS MARCO the length rule (with a cap on very common prefixes) cut median lexical latency from 201 ms to 43 ms with Recall@10 unchanged (0.830) and typo-query recall no worse (0.550 → 0.553).
 
-**Semantic:** `all-MiniLM-L6-v2` (384-dim) via ONNX Runtime, running in-process. Vector cosine similarity stored as float16 to halve memory. Embedding failures are non-fatal — engine degrades to lexical-only.
+**Semantic:** `gte-small` (384-dim, selectable) via ONNX Runtime, running in-process. Vector cosine similarity stored as float16 to halve memory. Embedding failures are non-fatal — engine degrades to lexical-only.
 
-**Ranking:** Reciprocal Rank Fusion (RRF, k=60) merges all result lists. BM25 tiebreaker when RRF scores are within epsilon. All weights tunable in `internal/config/config.go`.
+**Ranking:** Reciprocal Rank Fusion (RRF, k=20, tuned on MS MARCO dev) merges all result lists. BM25 tiebreaker when RRF scores are within epsilon. All weights tunable in `internal/config/config.go`.
 
 ---
 
@@ -529,7 +575,7 @@ are not written in Go can use ZENITH's hybrid matching without gRPC code generat
 
 | Route | Purpose |
 |---|---|
-| `GET /healthz` | version, embedding model id (`all-MiniLM-L6-v2`, `deterministic` or `none`), synonyms hash |
+| `GET /healthz` | version, embedding model id (e.g. `gte-small`, `deterministic` or `none`), synonyms hash |
 | `PUT /v1/ns/{ns}/docs` | build (or replace) a namespace from `{"docs":[{"id","text"}]}` |
 | `POST /v1/ns/{ns}/search` | many queries at once with `explain`: raw BM25, cosine, and per-term exact / synonym / fuzzy hits with character spans |
 | `DELETE /v1/ns/{ns}` | drop a namespace (idle namespaces also expire after 10 min; max 200, LRU) |
