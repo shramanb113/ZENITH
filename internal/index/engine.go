@@ -2,9 +2,11 @@ package index
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/gob"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log/slog"
 	"maps"
 	"os"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/shramanb113/ZENITH/internal/analysis"
+	"github.com/shramanb113/ZENITH/internal/ann"
 	"github.com/shramanb113/ZENITH/internal/config"
 	"github.com/shramanb113/ZENITH/internal/embedding"
 	"github.com/shramanb113/ZENITH/internal/ranking"
@@ -30,6 +33,7 @@ type BatchDoc struct {
 	ID     string
 	Text   string
 	Vector []float32
+	Attrs  Attrs
 }
 
 // TermStore is implemented by storage backends that maintain a term vocabulary.
@@ -78,6 +82,14 @@ type Engine struct {
 
 	idMapping map[uint64]string
 	docText   map[uint64]string // original full text per document, for GetText
+	attrs     map[uint64]Attrs  // per-document metadata for filtered search; absent = no attrs
+
+	// ann is the HNSW graph over document vectors. nil while the corpus is
+	// below annMinDocs (brute force is exact and fast enough there); built
+	// once the threshold is crossed and maintained incrementally after. It is
+	// not persisted: Load rebuilds it from the stored vectors.
+	ann        *ann.Index
+	annMinDocs int
 
 	fst      *analysis.FSTDictionary
 	fstSize  int  // informational only — last rebuild's term count
@@ -101,6 +113,8 @@ func NewEngine(cfg *config.Config, emb embedding.Embedder, scr ranking.Scorer, a
 		analyzer:  ana,
 		idMapping: make(map[uint64]string),
 		docText:   make(map[uint64]string),
+		attrs:     make(map[uint64]Attrs),
+		annMinDocs: defaultANNMinDocs,
 		bm25:      ranking.NewBM25Scorer(ranking.BM25Params{}),
 		tfidf:     ranking.NewTFIDFScorer(),
 		fst:       analysis.NewFSTDictionary(),
@@ -193,7 +207,7 @@ func (e *Engine) Add(ctx context.Context, originalID string, fullText string) er
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if err := e.addInternal(ctx, originalID, fullText, docVec); err != nil {
+	if err := e.addInternal(ctx, originalID, fullText, docVec, nil); err != nil {
 		return err
 	}
 	e.rebuildFSTIfNeeded()
@@ -202,13 +216,43 @@ func (e *Engine) Add(ctx context.Context, originalID string, fullText string) er
 
 // AddWithVector indexes a document with a pre-computed embedding.
 func (e *Engine) AddWithVector(ctx context.Context, originalID string, fullText string, docVec []float32) error {
+	return e.AddWithVectorAttrs(ctx, originalID, fullText, docVec, nil)
+}
+
+// AddWithVectorAttrs is AddWithVector plus per-document metadata used by
+// SearchWithFilter. Re-adding an ID replaces its attributes (nil clears them).
+func (e *Engine) AddWithVectorAttrs(ctx context.Context, originalID string, fullText string, docVec []float32, attrs Attrs) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if err := e.addInternal(ctx, originalID, fullText, docVec); err != nil {
+	if err := e.addInternal(ctx, originalID, fullText, docVec, attrs); err != nil {
 		return err
 	}
 	e.rebuildFSTIfNeeded()
 	return nil
+}
+
+// EmbedText computes an embedding for text without indexing anything. Like
+// Add, an embedding failure is non-fatal — it returns nil so the caller can
+// still index (or persist) the document purely lexically. Callers that also
+// need to index the text should pass the result to AddWithVector rather than
+// calling Add and embedding twice.
+func (e *Engine) EmbedText(ctx context.Context, text string) []float32 {
+	vec, err := e.embedder.Embed(ctx, text)
+	if err != nil {
+		return nil
+	}
+	return vec
+}
+
+// EmbedTexts computes one embedding per text without indexing anything,
+// using the same length-bucketed batching as AddBatch. The result aligns by
+// index with texts; a failed batch leaves the corresponding entries nil.
+func (e *Engine) EmbedTexts(ctx context.Context, texts []string) [][]float32 {
+	docs := make([]BatchDoc, len(texts))
+	for i, t := range texts {
+		docs[i] = BatchDoc{Text: t}
+	}
+	return e.embedDocs(ctx, docs)
 }
 
 // docEmbedBatch is the ONNX inference sweet spot measured on 12-thread
@@ -279,7 +323,7 @@ func (e *Engine) AddBatch(ctx context.Context, docs []BatchDoc) error {
 					slog.With("doc_id", docs[i].ID).Warn("Embedding failed, indexing purely lexically", "error", err)
 				}
 			}
-			if err := e.addInternal(ctx, docs[i].ID, docs[i].Text, docVec); err != nil {
+			if err := e.addInternal(ctx, docs[i].ID, docs[i].Text, docVec, docs[i].Attrs); err != nil {
 				// Documents before i are already applied to the live index.
 				// Rebuild the FST so their new terms are still resolvable
 				// even though the batch overall reports an error, instead
@@ -430,6 +474,8 @@ func (e *Engine) Remove(ctx context.Context, originalID string) error {
 	delete(docVecStore, internalID)
 	delete(e.idMapping, internalID)
 	delete(e.docText, internalID)
+	delete(e.attrs, internalID)
+	e.annDeleteLocked(internalID)
 
 	// Decrement globalSeen reference counts for this document's raw tokens.
 	if rawToks, ok := docToks[internalID]; ok {
@@ -471,7 +517,7 @@ func (e *Engine) Count() int {
 	return len(e.docText)
 }
 
-func (e *Engine) addInternal(ctx context.Context, originalID string, fullText string, preVec []float32) error {
+func (e *Engine) addInternal(ctx context.Context, originalID string, fullText string, preVec []float32, attrs Attrs) error {
 	if e.journal != nil {
 		if err := e.journal.Put(ctx, []byte(originalID), []byte(fullText)); err != nil {
 			return fmt.Errorf("index: journal write: %w", err)
@@ -587,13 +633,20 @@ func (e *Engine) addInternal(ctx context.Context, originalID string, fullText st
 
 	e.idMapping[internalID] = originalID
 	e.docText[internalID] = fullText
+	if a := copyAttrs(attrs); a != nil {
+		e.attrs[internalID] = a
+	} else {
+		delete(e.attrs, internalID)
+	}
 
 	if docVec != nil {
 		docVecStore[internalID] = VectorEntry{
 			Vector:    FloatsToFloat16(docVec),
 			Magnitude: ranking.Magnitude(docVec),
 		}
+		e.annInsertLocked(internalID, docVec)
 	} else {
+		e.annDeleteLocked(internalID)
 		// Re-indexing with no usable vector (embedder down, or the caller
 		// didn't supply one) must drop any vector left over from a previous
 		// version of this document — otherwise semantic search keeps
@@ -651,6 +704,13 @@ func (e *Engine) addInternal(ctx context.Context, originalID string, fullText st
 // holding even RLock previously stalled Add/Remove (which need the write
 // lock) and, transitively, every other Search queued behind them.
 func (e *Engine) Search(ctx context.Context, query string) ([]SearchResponse, error) {
+	return e.SearchWithFilter(ctx, query, nil)
+}
+
+// SearchWithFilter is Search restricted to documents whose attributes satisfy
+// pred (nil = no restriction). The predicate is applied to the lexical and
+// vector candidate sets before rank fusion.
+func (e *Engine) SearchWithFilter(ctx context.Context, query string, pred Predicate) ([]SearchResponse, error) {
 	queryVec, embErr := e.embedder.Embed(ctx, query)
 	if embErr != nil {
 		slog.Warn("Search vectors degraded — embedder unreachable", "error", embErr)
@@ -684,9 +744,10 @@ func (e *Engine) Search(ctx context.Context, query string) ([]SearchResponse, er
 	keywordScores, matchTokens := e.lexicalPass(rawTokens)
 	e.phonetics.RUnlock()
 	e.inverted.RUnlock()
+	e.filterCandidates(pred, keywordScores, matchTokens)
 
 	e.vectors.RLock()
-	vectorScores := e.vectorPass(queryVec)
+	vectorScores := e.vectorPass(queryVec, pred)
 	e.vectors.RUnlock()
 
 	ranks := e.rankAndFuse(keywordScores, matchTokens, rawTokens, vectorScores)
@@ -711,6 +772,7 @@ func (e *Engine) Search(ctx context.Context, query string) ([]SearchResponse, er
 		e.inverted.RLock()
 		expandedKeywords, expandedMatches := e.neuralExpand(rawTokens, expandedTokens)
 		e.inverted.RUnlock()
+		e.filterCandidates(pred, expandedKeywords, expandedMatches)
 
 		for id, score := range keywordScores {
 			expandedKeywords[id] += score
@@ -787,7 +849,7 @@ func (e *Engine) lexicalPass(queryTokens []string) (map[uint64]float64, map[uint
 		}
 
 		if Q >= 2 {
-			for _, match := range e.bkTree.Search(token, e.config.FuzzyMaxDist) {
+			for _, match := range e.fuzzyMatches(token) {
 				if match.Distance == 0 {
 					continue
 				}
@@ -806,17 +868,48 @@ func (e *Engine) lexicalPass(queryTokens []string) (map[uint64]float64, map[uint
 	return keywordScores, matchTokens
 }
 
-// vectorPass scores all documents by dot product with the query vector.
+// fuzzyMatches returns vocabulary terms within FuzzyMaxDist edits of token.
+// It walks the FST with a Levenshtein automaton when the FST is built and the
+// distance is supported (cost ~ matches, not vocabulary size); otherwise it
+// falls back to the BK-tree, which returns the identical set and distances.
+func (e *Engine) fuzzyMatches(token string) []analysis.FuzzyMatch {
+	if m, ok, err := e.fst.FuzzySearch(token, e.config.FuzzyMaxDist); err == nil && ok {
+		return m
+	}
+	return e.bkTree.Search(token, e.config.FuzzyMaxDist)
+}
+
+// vectorPass scores documents by dot product with the query vector.
 // Negative dot products are clamped to 0 — a document pointing away from
 // the query has zero semantic relevance, not negative relevance.
-func (e *Engine) vectorPass(queryVec []float32) map[uint64]float64 {
+//
+// Small corpora (or highly selective filters) are scored exactly by scanning;
+// once an ANN graph exists and the filter is broad, the graph returns the
+// top annK candidates instead of scoring every document. pred (may be nil)
+// is applied here, before fusion.
+func (e *Engine) vectorPass(queryVec []float32, pred Predicate) map[uint64]float64 {
 	scores := make(map[uint64]float64)
 	if len(queryVec) == 0 {
 		return scores
 	}
-	for id, entry := range e.vectors.GetVectors() {
-		s := ranking.DotProduct(queryVec, Float16ToFloats(entry.Vector))
-		if s > 0 {
+	vecs := e.vectors.GetVectors()
+
+	if e.ann != nil && e.ann.Len() > 0 {
+		if hits, ok := e.annSearch(queryVec, pred, vecs); ok {
+			for _, h := range hits {
+				if h.Score > 0 {
+					scores[h.ID] = h.Score
+				}
+			}
+			return scores
+		}
+	}
+
+	for id, entry := range vecs {
+		if pred != nil && !pred(e.attrs[id]) {
+			continue
+		}
+		if s := ann.DotF32F16(queryVec, entry.Vector); s > 0 {
 			scores[id] = s
 		}
 	}
@@ -1022,9 +1115,60 @@ var saveFormatMagic = [4]byte{'Z', 'N', 'T', 'H'}
 // docTokens map[uint64][]string added for globalSeen management on Remove.
 // v4: docText map[uint64]string added so GetText/GetDocument can return the
 // original indexed text instead of just IDs and scores.
-const saveFormatVersion uint16 = 4
+// v5: a fixed-size header (embedder name + vector dimension) is written
+// right after magic+version and before the gob body, so Load can refuse a
+// mismatched embedder without decoding the full file. There is no migration
+// from v4 — as with every prior version bump, an old file fails
+// ErrIncompatibleVersion and must be rebuilt.
+const saveFormatVersion uint16 = 5
 
 var ErrIncompatibleVersion = fmt.Errorf("index: incompatible file version — rebuild the index with the current binary")
+
+// ErrEmbedderMismatch is returned by Load when the saved file's embedder
+// identity (model name and/or vector dimension) doesn't match the embedder
+// the Engine was constructed with. Loading anyway would silently mix vectors
+// from two different embedding spaces into the same VectorStore, producing
+// meaningless dot products — see the P0-5 discussion in ROADMAP.md.
+var ErrEmbedderMismatch = fmt.Errorf("index: saved file was written with a different embedder — rebuild the index with the current embedder")
+
+// embedderIdentity returns the (name, dimensions) pair recorded in a saved
+// file's header for e's current embedder. An embedder that doesn't implement
+// embedding.Named (e.g. a caller's custom WithEmbedder type) is recorded as
+// "unknown" and is never checked for mismatch on Load — we can't compare
+// what we can't identify.
+func (e *Engine) embedderIdentity() (name string, dims int) {
+	if e.embedder == nil {
+		return "none", 0
+	}
+	dims = e.embedder.Dimensions()
+	if n, ok := e.embedder.(embedding.Named); ok {
+		return n.Name(), dims
+	}
+	return "unknown", dims
+}
+
+func writeHeaderString(w io.Writer, s string) error {
+	var lbuf [4]byte
+	binary.BigEndian.PutUint32(lbuf[:], uint32(len(s)))
+	if _, err := w.Write(lbuf[:]); err != nil {
+		return err
+	}
+	_, err := io.WriteString(w, s)
+	return err
+}
+
+func readHeaderString(r io.Reader) (string, error) {
+	var lbuf [4]byte
+	if _, err := io.ReadFull(r, lbuf[:]); err != nil {
+		return "", err
+	}
+	n := binary.BigEndian.Uint32(lbuf[:])
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return "", err
+	}
+	return string(buf), nil
+}
 
 // Save serialises all index state to filepath. Takes Engine.mu.RLock() so
 // concurrent Searches can proceed during save, but Add/Remove/Load block.
@@ -1069,6 +1213,20 @@ func (e *Engine) Save(filepath string) error {
 		return err
 	}
 
+	embName, embDims := e.embedderIdentity()
+	if err := writeHeaderString(file, embName); err != nil {
+		file.Close()
+		os.Remove(tmp)
+		return err
+	}
+	var dimsBuf [4]byte
+	binary.BigEndian.PutUint32(dimsBuf[:], uint32(embDims))
+	if _, err := file.Write(dimsBuf[:]); err != nil {
+		file.Close()
+		os.Remove(tmp)
+		return err
+	}
+
 	enc := gob.NewEncoder(file)
 
 	bm25Lengths, bm25TermFreqs, bm25DocFreq, bm25TotalDocs, bm25TotalLen := e.bm25.State()
@@ -1084,6 +1242,8 @@ func (e *Engine) Save(filepath string) error {
 		e.inverted.GetDocTokens(),
 		// v4: original document text, for GetText/GetDocument
 		e.docText,
+		// v5: per-document metadata attributes for filtered search
+		e.attrs,
 	}
 	for _, s := range state {
 		if err := enc.Encode(s); err != nil {
@@ -1200,6 +1360,22 @@ func (e *Engine) load(filepath string) error {
 		return ErrIncompatibleVersion
 	}
 
+	savedName, err := readHeaderString(f)
+	if err != nil {
+		return fmt.Errorf("index: failed to read embedder header: %w", err)
+	}
+	var dimsBuf [4]byte
+	if _, err := io.ReadFull(f, dimsBuf[:]); err != nil {
+		return fmt.Errorf("index: failed to read embedder dimensions: %w", err)
+	}
+	savedDims := int(binary.BigEndian.Uint32(dimsBuf[:]))
+
+	curName, curDims := e.embedderIdentity()
+	if curName != "unknown" && savedName != "unknown" && (curName != savedName || curDims != savedDims) {
+		return fmt.Errorf("%w: file has %q (%d-dim), engine has %q (%d-dim)",
+			ErrEmbedderMismatch, savedName, savedDims, curName, curDims)
+	}
+
 	dec := gob.NewDecoder(f)
 
 	// Decode into brand-new, empty structures — never into the live engine's
@@ -1222,6 +1398,7 @@ func (e *Engine) load(filepath string) error {
 	vDocToks := make(map[uint64][]string)
 	vIDMapping := make(map[uint64]string)
 	vDocText := make(map[uint64]string)
+	vAttrs := make(map[uint64]Attrs)
 
 	var bm25Lengths map[uint64]int
 	var bm25TermFreqs map[uint64]map[string]int
@@ -1241,6 +1418,7 @@ func (e *Engine) load(filepath string) error {
 		&tfidfLengths, &tfidfTermFreqs, &tfidfDocFreq, &tfidfTotalDocs,
 		&vDocToks, // v3
 		&vDocText, // v4
+		&vAttrs,   // v5
 	}
 	for _, s := range state {
 		if err := dec.Decode(s); err != nil {
@@ -1257,9 +1435,17 @@ func (e *Engine) load(filepath string) error {
 	e.phonetics.ReplaceAll(vPhon)
 	e.idMapping = vIDMapping
 	e.docText = vDocText
+	e.attrs = vAttrs
 	e.inverted.Unlock()
 	e.vectors.Unlock()
 	e.phonetics.Unlock()
+
+	// The ANN graph is not persisted; drop the stale one and rebuild from the
+	// freshly loaded vectors if the corpus is large enough to use it.
+	e.ann = nil
+	if e.annMinDocs > 0 && len(vVectors) >= e.annMinDocs {
+		e.rebuildANNLocked()
+	}
 
 	e.bm25.LoadState(bm25Lengths, bm25TermFreqs, bm25DocFreq, bm25TotalDocs, bm25TotalLen)
 	e.tfidf.LoadState(tfidfLengths, tfidfTermFreqs, tfidfDocFreq, tfidfTotalDocs)

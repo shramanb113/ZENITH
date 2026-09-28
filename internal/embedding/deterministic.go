@@ -40,3 +40,12 @@ func (d *DeterministicEmbedder) EmbedBatch(_ context.Context, _ []string) ([][]f
 func (d *DeterministicEmbedder) Dimensions() int {
 	return d.dims
 }
+
+// Name identifies this embedder for index-file compatibility checks (see
+// Named). It never produces a real vector (see ErrEmbeddingUnavailable
+// above), so an index saved under it holds no vectors either — recorded
+// distinctly from a real model so switching to one is never mistaken for a
+// no-op.
+func (d *DeterministicEmbedder) Name() string {
+	return "none:deterministic-fallback"
+}

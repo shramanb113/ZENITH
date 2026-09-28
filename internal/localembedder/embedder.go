@@ -130,5 +130,9 @@ func (e *Embedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, e
 // Dimensions returns 384 — the output size of all-MiniLM-L6-v2.
 func (e *Embedder) Dimensions() int { return hiddenSize }
 
+// Name identifies the embedding model for index-file compatibility checks
+// (see internal/embedding.Named).
+func (e *Embedder) Name() string { return "onnx:all-MiniLM-L6-v2" }
+
 // Verify implements embedding.Embedder at compile time.
 var _ embedding.Embedder = (*Embedder)(nil)

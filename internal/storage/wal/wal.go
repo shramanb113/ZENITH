@@ -491,6 +491,15 @@ func (w *WAL) AppendBatch(ctx context.Context, records []*Record) ([]uint64, err
 	return seqs, nil
 }
 
+// Size returns the number of bytes written to the WAL since it was opened
+// or last Reset, including buffered-but-not-yet-flushed data. Callers use it
+// to decide when to checkpoint and bound how much a crash needs to replay.
+func (w *WAL) Size() uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.byteWritten
+}
+
 // Reset flushes, syncs, and truncates the WAL file to zero, then resets
 // internal state so the WAL can accept new records. Called after a
 // successful gob checkpoint — the delta journal is no longer needed.

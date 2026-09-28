@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/blevesearch/vellum"
+	"github.com/blevesearch/vellum/levenshtein"
 )
 
 // FSTDictionary is a read-optimised, memory-efficient term dictionary built
@@ -323,4 +324,71 @@ func prefixUpperBound(prefix string) []byte {
 		}
 	}
 	return nil
+}
+
+// ─── Fuzzy (Levenshtein automaton) search ─────────────────────────────────────
+
+// maxAutomatonDist is the largest edit distance served by the automaton.
+// Builder construction grows exponentially with distance; beyond this callers
+// fall back to the BK-tree.
+const maxAutomatonDist = 3
+
+var (
+	levBuilders   [maxAutomatonDist + 1]*levenshtein.LevenshteinAutomatonBuilder
+	levBuilderErr [maxAutomatonDist + 1]error
+	levBuilderOnc [maxAutomatonDist + 1]sync.Once
+)
+
+func levBuilder(dist int) (*levenshtein.LevenshteinAutomatonBuilder, error) {
+	levBuilderOnc[dist].Do(func() {
+		levBuilders[dist], levBuilderErr[dist] = levenshtein.NewLevenshteinAutomatonBuilder(uint8(dist), false)
+	})
+	return levBuilders[dist], levBuilderErr[dist]
+}
+
+// SupportsFuzzy reports whether FuzzySearch can serve maxDist.
+func SupportsFuzzy(maxDist int) bool { return maxDist >= 1 && maxDist <= maxAutomatonDist }
+
+// FuzzySearch returns every dictionary term within maxDist Levenshtein edits
+// of query (plain insert/delete/substitute, same metric as BKTree), with the
+// exact distance. It walks the FST once, pruned by a Levenshtein automaton, so
+// cost scales with the number of matches and query length rather than with
+// vocabulary size. The exact term (distance 0) is included when present.
+// Returns ok=false when the FST is not built or maxDist is unsupported, in
+// which case the caller should use another strategy.
+func (d *FSTDictionary) FuzzySearch(query string, maxDist int) (matches []FuzzyMatch, ok bool, err error) {
+	if !SupportsFuzzy(maxDist) {
+		return nil, false, nil
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if !d.built || d.fst == nil {
+		return nil, false, nil
+	}
+
+	b, err := levBuilder(maxDist)
+	if err != nil {
+		return nil, false, err
+	}
+	dfa, err := b.BuildDfa(query, uint8(maxDist))
+	if err != nil {
+		return nil, false, err
+	}
+	itr, err := d.fst.Search(dfa, nil, nil)
+	if err != nil {
+		if err == vellum.ErrIteratorDone {
+			return nil, true, nil
+		}
+		return nil, false, err
+	}
+	for err == nil {
+		key, _ := itr.Current()
+		w := string(key)
+		matches = append(matches, FuzzyMatch{Word: w, Distance: Levenshtein(query, w)})
+		err = itr.Next()
+	}
+	if err != nil && err != vellum.ErrIteratorDone {
+		return nil, false, err
+	}
+	return matches, true, nil
 }

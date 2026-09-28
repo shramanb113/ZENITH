@@ -48,7 +48,7 @@ The search orchestrator — owns all sub-indexes and the scoring pipeline:
 
 **Add pipeline** (per document): `Analyzer.Analyze` → embed (in-process ONNX call via `internal/localembedder`) → write postings to InvertedIndex + PhoneticIndex + BKTree + BM25 + TF-IDF
 
-**Search pipeline**: lexical pass (n-gram + phonetic + BK-tree fuzzy) → vector pass (dot product against all doc vectors) → `rankAndFuse` (RRF + BM25 tiebreak) → neural expansion if results are absent or weak
+**Search pipeline**: lexical pass (n-gram + phonetic + BK-tree fuzzy) → vector pass (exact dot-product scan below `WithANNThreshold` docs, default 20k; HNSW graph in `internal/ann` above it — not persisted, rebuilt on Load) → `rankAndFuse` (RRF + BM25 tiebreak) → neural expansion if results are absent or weak
 
 ### 3. Analysis (`internal/analysis/`)
 
@@ -92,6 +92,13 @@ All tuneable parameters live in `internal/config/config.go` (`DefaultConfig()`).
 - `PhoneticWeight`, `VectorWeight`, `NeuralWeight` — scoring blend weights
 - `MemTableMaxSize` — SSTable flush threshold (64MB)
 - `NerveGRPCAddr` — dead config left over from the removed Nerve sidecar; not read anywhere in the codebase
+
+### Metadata filtering, file format, install
+
+- **Filtering**: `AddWithAttrs` / `AddBatchWithAttrs` attach string/bool/number attributes; `Search(..., WithFilter(Eq/In/Range/Exists/And/Or/Not))` applies them to the lexical and vector candidate sets *before* rank fusion. Attrs are persisted in the snapshot and in WAL records. `WithFilter` cannot be combined with `Explain`.
+- **Snapshot v5**: header = magic + version + embedder name + vector dim, then the gob body. `Load` returns `ErrEmbedderMismatch` on a different embedder identity (custom embedders opt in via an optional `Name() string`; without it they're recorded as "unknown" and never checked). No migration between versions: a mismatch is a hard error.
+- **WAL**: Put records carry text + vector + attrs so replay never re-embeds documents; a WAL over 64MB triggers a synchronous checkpoint.
+- **CLI install**: `zenith install` (per-user dir + PATH), `zenith doctor [--json]`, `zenith uninstall [--purge] [--yes]`. Uninstall keeps `~/.zenith` (the index) unless `--purge`.
 
 ### Result limits
 

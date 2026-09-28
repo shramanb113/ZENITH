@@ -120,3 +120,9 @@ func (o *OllamaEmbedder) Dimensions() int {
 		return 0
 	}
 }
+
+// Name identifies the embedding model for index-file compatibility checks
+// (see Named).
+func (o *OllamaEmbedder) Name() string {
+	return "ollama:" + o.model
+}

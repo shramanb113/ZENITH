@@ -11,10 +11,12 @@ type options struct {
 	checkpointInterval time.Duration
 	noWordVectors      bool
 	memoryLimitBytes   int64
+	annMinDocs         int // -1 = engine default
 }
 
 func defaultOptions() *options {
 	return &options{
+		annMinDocs:    -1,
 		cacheSize:     10_000,
 		fuzzyDistance: 2,
 		limit:         10,
@@ -30,6 +32,7 @@ type SearchOption func(*searchOptions)
 type searchOptions struct {
 	limit   int
 	explain bool
+	filter  *Filter
 }
 
 // WithEmbedder replaces the default embedded ONNX embedder with a custom one.
@@ -146,6 +149,20 @@ func WithCheckpointInterval(d time.Duration) Option {
 			d = minInterval
 		}
 		o.checkpointInterval = d
+		return nil
+	}
+}
+
+// WithANNThreshold sets the document count at which vector search switches
+// from an exact scan to an approximate HNSW graph (default 20,000). Pass 0 to
+// always search exactly. The graph is rebuilt from stored vectors on Open, so
+// very large indexes pay that build time at startup.
+func WithANNThreshold(n int) Option {
+	return func(o *options) error {
+		if n < 0 {
+			return ErrInvalidOption
+		}
+		o.annMinDocs = n
 		return nil
 	}
 }

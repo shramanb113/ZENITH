@@ -156,7 +156,7 @@ func TestMSMARCORecallDiag(t *testing.T) {
 
 			queryVec, _ := eng.embedder.Embed(ctx, q.text)
 			eng.vectors.RLock()
-			vScores := eng.vectorPass(queryVec)
+			vScores := eng.vectorPass(queryVec, nil)
 			eng.vectors.RUnlock()
 
 			// Lexical ranking exactly as the hybrid branch of rankAndFuse.

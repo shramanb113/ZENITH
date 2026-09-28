@@ -58,6 +58,25 @@ go install github.com/shramanb113/ZENITH/cmd/zenith@latest
 
 One command. No setup step. The embedding model is embedded in the binary — ZENITH is ready immediately.
 
+`go install` puts the binary in `$(go env GOPATH)/bin`, which is often *not* on your PATH. If `zenith` is "not found", or you are running an older copy than the one you just installed, let ZENITH fix it itself:
+
+```bash
+zenith install        # copy this binary to a per-user dir and put it on PATH (safe to re-run)
+zenith doctor         # diagnose PATH / data dir / auto-start / embedder problems, with the fix for each
+```
+
+`zenith install` uses `%LOCALAPPDATA%Programszenith` on Windows and `~/.local/bin` on Linux/macOS (a marked, removable block is added to your shell rc). Add `--autostart` to also register the login watcher, `--dir` to pick another location, `--no-path` to leave PATH alone. Open a new terminal afterwards.
+
+### Uninstall
+
+```bash
+zenith uninstall            # removes binary, PATH entry, auto-start; KEEPS your index in ~/.zenith
+zenith uninstall --purge    # also deletes the index and settings (irreversible)
+zenith uninstall --yes      # skip the confirmation prompt (scripts)
+```
+
+Your search index is never deleted unless you pass `--purge`. On Windows the running `.exe` is removed automatically a moment after the command exits. `zenith doctor --json` prints a shareable, contents-free report (versions, OS, paths, check results) for support requests; ZENITH sends nothing anywhere on its own.
+
 ```bash
 # Index a directory
 zenith index ~/Documents
@@ -271,7 +290,9 @@ zenith serve            # start gRPC server (port 8080)
 zenith serve --port 9090
 zenith version          # print version
 zenith update           # update to latest release
-zenith uninstall        # remove binary (index data preserved)
+zenith install          # put this binary on your PATH
+zenith doctor           # diagnose install problems (--json for a shareable report)
+zenith uninstall        # remove binary/PATH/auto-start (index kept; --purge deletes it)
 zenith setup --clean    # remove leftover Python files from v1
 ```
 

@@ -92,3 +92,12 @@ func (c *CachingEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]f
 func (c *CachingEmbedder) Dimensions() int {
 	return c.base.Dimensions()
 }
+
+// Name forwards to the wrapped embedder if it implements Named, so callers
+// see the underlying model's identity rather than the cache wrapper's.
+func (c *CachingEmbedder) Name() string {
+	if n, ok := c.base.(Named); ok {
+		return n.Name()
+	}
+	return "unknown"
+}

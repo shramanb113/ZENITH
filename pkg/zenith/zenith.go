@@ -15,6 +15,8 @@ package zenith
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -87,6 +89,9 @@ func Open(path string, opt ...Option) (*DB, error) {
 	tkz := analysis.NewStandardAnalyzer()
 	scorer := ranking.NewWeightedRRFRanker(cfg.RRFConstant, cfg.MaxResults, 1.0, cfg.VectorWeight)
 	eng := index.NewEngine(cfg, emb, scorer, tkz)
+	if o.annMinDocs >= 0 {
+		eng.SetANNThreshold(o.annMinDocs)
+	}
 
 	db := &DB{
 		engine: eng,
@@ -129,6 +134,15 @@ func Open(path string, opt ...Option) (*DB, error) {
 			fl.release()
 			return nil, ErrIncompatibleVersion
 		}
+		if errors.Is(gobErr, index.ErrEmbedderMismatch) {
+			// Unlike a corrupt gob, this file decodes fine — it was just built
+			// with a different embedder. Loading it anyway (or silently
+			// rebuilding from the WAL) would mix incompatible vector spaces,
+			// so refuse outright rather than falling through to WAL recovery.
+			_ = docWAL.Close()
+			fl.release()
+			return nil, fmt.Errorf("%w: %v", ErrEmbedderMismatch, gobErr)
+		}
 		if len(walRecords) == 0 {
 			// Corrupt gob and no WAL data to recover from — user must rebuild.
 			_ = docWAL.Close()
@@ -139,11 +153,16 @@ func Open(path string, opt ...Option) (*DB, error) {
 		slog.Warn("zenith: gob corrupt, rebuilding from WAL", "error", gobErr)
 	}
 
-	// Replay WAL delta on top of the gob baseline (or as full history if gob was corrupt).
+	// Replay WAL delta on top of the gob baseline (or as full history if gob
+	// was corrupt). Put records written by this binary carry their embedding
+	// alongside the text (see encodeWALValue), so replay re-indexes without
+	// re-embedding every document — the previous behaviour made crash
+	// recovery cost scale with ONNX inference time, not just WAL size.
 	for _, r := range walRecords {
 		switch r.Op {
 		case wal.OpTypePut:
-			_ = eng.Add(context.Background(), string(r.Key), string(r.Value))
+			text, vec, attrs := decodeWALValue(r.Value)
+			_ = eng.AddWithVectorAttrs(context.Background(), string(r.Key), text, vec, attrs)
 		case wal.OpTypeDelete:
 			_ = eng.Remove(context.Background(), string(r.Key))
 		}
@@ -160,7 +179,22 @@ func Open(path string, opt ...Option) (*DB, error) {
 
 // Add indexes a document. Safe to call with the same id to re-index
 // (idempotent — old entries are replaced cleanly).
-func (db *DB) Add(ctx context.Context, id, text string) (err error) {
+func (db *DB) Add(ctx context.Context, id, text string) error {
+	return db.add(ctx, id, text, nil)
+}
+
+// AddWithAttrs is Add plus metadata attributes that Search can restrict on
+// via the Filter search option. Re-adding an id replaces its attributes; an
+// Add without attributes clears any previously stored ones.
+func (db *DB) AddWithAttrs(ctx context.Context, id, text string, attrs Attrs) error {
+	ia, err := toIndexAttrs(attrs)
+	if err != nil {
+		return err
+	}
+	return db.add(ctx, id, text, ia)
+}
+
+func (db *DB) add(ctx context.Context, id, text string, attrs index.Attrs) (err error) {
 	if db == nil {
 		return errors.New("zenith: Add called on nil DB")
 	}
@@ -195,17 +229,23 @@ func (db *DB) Add(ctx context.Context, id, text string) (err error) {
 		}
 	}
 
+	// Embed once, outside the WAL write, and reuse the vector both for the
+	// WAL record (so a crash-recovery replay doesn't re-embed) and for
+	// indexing (via AddWithVector, instead of Add which would embed again).
+	vec := db.engine.EmbedText(ctx, text)
+
 	if db.docWAL != nil {
 		if _, err = db.docWAL.Append(ctx, &wal.Record{
-			Op: wal.OpTypePut, Key: []byte(id), Value: []byte(text),
+			Op: wal.OpTypePut, Key: []byte(id), Value: encodeWALValue(text, vec, attrs),
 		}); err != nil {
 			return fmt.Errorf("zenith: wal: %w", err)
 		}
 	}
 
-	if err = db.engine.Add(ctx, id, text); err != nil {
+	if err = db.engine.AddWithVectorAttrs(ctx, id, text, vec, attrs); err != nil {
 		return fmt.Errorf("zenith: %w", err)
 	}
+	db.checkpointIfWALTooLarge()
 	return nil
 }
 
@@ -213,7 +253,25 @@ func (db *DB) Add(ctx context.Context, id, text string) (err error) {
 // More efficient than calling Add in a loop for large inputs.
 // NOT atomic — if AddBatch returns an error, some documents may already
 // be indexed. Documents are processed in sorted ID order for deterministic results.
-func (db *DB) AddBatch(ctx context.Context, docs map[string]string) (err error) {
+func (db *DB) AddBatch(ctx context.Context, docs map[string]string) error {
+	return db.addBatch(ctx, docs, nil)
+}
+
+// AddBatchWithAttrs is AddBatch plus per-document attributes keyed by id.
+// Documents without an entry in attrs are indexed with no attributes.
+func (db *DB) AddBatchWithAttrs(ctx context.Context, docs map[string]string, attrs map[string]Attrs) error {
+	converted := make(map[string]index.Attrs, len(attrs))
+	for id, a := range attrs {
+		ia, err := toIndexAttrs(a)
+		if err != nil {
+			return fmt.Errorf("attrs for %q: %w", id, err)
+		}
+		converted[id] = ia
+	}
+	return db.addBatch(ctx, docs, converted)
+}
+
+func (db *DB) addBatch(ctx context.Context, docs map[string]string, attrs map[string]index.Attrs) (err error) {
 	if db == nil {
 		return errors.New("zenith: AddBatch called on nil DB")
 	}
@@ -236,7 +294,7 @@ func (db *DB) AddBatch(ctx context.Context, docs map[string]string) (err error) 
 		if err = validateText(text); err != nil {
 			return err
 		}
-		batch = append(batch, index.BatchDoc{ID: id, Text: sanitiseText(text)})
+		batch = append(batch, index.BatchDoc{ID: id, Text: sanitiseText(text), Attrs: attrs[id]})
 	}
 
 	db.mu.Lock()
@@ -257,10 +315,22 @@ func (db *DB) AddBatch(ctx context.Context, docs map[string]string) (err error) 
 		}
 	}
 
+	// Embed once, outside the WAL write, using the same length-bucketed
+	// batching AddBatch itself would use — batch.Vector is then already
+	// populated, so AddBatch's internal embedDocs skips these entirely.
+	texts := make([]string, len(batch))
+	for i, d := range batch {
+		texts[i] = d.Text
+	}
+	vecs := db.engine.EmbedTexts(ctx, texts)
+	for i := range batch {
+		batch[i].Vector = vecs[i]
+	}
+
 	if db.docWAL != nil {
 		walRecs := make([]*wal.Record, len(batch))
 		for i, d := range batch {
-			walRecs[i] = &wal.Record{Op: wal.OpTypePut, Key: []byte(d.ID), Value: []byte(d.Text)}
+			walRecs[i] = &wal.Record{Op: wal.OpTypePut, Key: []byte(d.ID), Value: encodeWALValue(d.Text, d.Vector, d.Attrs)}
 		}
 		if _, err = db.docWAL.AppendBatch(ctx, walRecs); err != nil {
 			return fmt.Errorf("zenith: wal: %w", err)
@@ -270,6 +340,7 @@ func (db *DB) AddBatch(ctx context.Context, docs map[string]string) (err error) 
 	if err = db.engine.AddBatch(ctx, batch); err != nil {
 		return fmt.Errorf("zenith: %w", err)
 	}
+	db.checkpointIfWALTooLarge()
 	return nil
 }
 
@@ -300,6 +371,9 @@ func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) (r
 	}
 
 	if so.explain {
+		if so.filter != nil {
+			return nil, fmt.Errorf("%w: WithFilter cannot be combined with Explain", ErrInvalidOption)
+		}
 		terms, hits, err := db.engine.Explain(ctx, query)
 		if err != nil {
 			return nil, fmt.Errorf("zenith: %w", err)
@@ -311,7 +385,7 @@ func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) (r
 		return buildExplained(terms, hits, raw, so.limit), nil
 	}
 
-	raw, err := db.engine.Search(ctx, query)
+	raw, err := db.engine.SearchWithFilter(ctx, query, so.predicate())
 	if err != nil {
 		return nil, fmt.Errorf("zenith: %w", err)
 	}
@@ -386,7 +460,110 @@ func (db *DB) Delete(ctx context.Context, id string) (err error) {
 	if err = db.engine.Remove(ctx, id); err != nil {
 		return fmt.Errorf("zenith: %w", err)
 	}
+	db.checkpointIfWALTooLarge()
 	return nil
+}
+
+// WAL Put-record Value tags. walValueHasVector (1) is the P0-4 layout
+// [tag][4B textLen][text][4B vecLen][vec]; walValueHasAttrs (2) appends
+// [4B attrsLen][attrs JSON] for P1 metadata. Both remain decodable; anything
+// else is treated as legacy raw text (a pre-P0-4 WAL).
+const (
+	walValueHasVector byte = 1
+	walValueHasAttrs  byte = 2
+)
+
+// encodeWALValue packs text, its (possibly nil) embedding and its (possibly
+// nil) attributes into a WAL record Value, so a crash-recovery replay can
+// re-index without calling the embedder again and without losing metadata.
+func encodeWALValue(text string, vec []float32, attrs index.Attrs) []byte {
+	textBytes := []byte(text)
+	var attrJSON []byte
+	if len(attrs) > 0 {
+		attrJSON, _ = json.Marshal(attrs) // Attrs is plain data; Marshal cannot fail
+	}
+	buf := make([]byte, 1+4+len(textBytes)+4+len(vec)*4+4+len(attrJSON))
+	buf[0] = walValueHasAttrs
+	binary.BigEndian.PutUint32(buf[1:5], uint32(len(textBytes)))
+	off := 5
+	off += copy(buf[off:], textBytes)
+	binary.BigEndian.PutUint32(buf[off:off+4], uint32(len(vec)))
+	off += 4
+	for _, f := range vec {
+		binary.BigEndian.PutUint32(buf[off:off+4], math.Float32bits(f))
+		off += 4
+	}
+	binary.BigEndian.PutUint32(buf[off:off+4], uint32(len(attrJSON)))
+	off += 4
+	copy(buf[off:], attrJSON)
+	return buf
+}
+
+// decodeWALValue is the inverse of encodeWALValue. A value that is not
+// well-formed (a pre-P0-4 raw-text WAL, or truncated/corrupt) is treated as
+// legacy plain text with no stored vector or attributes, so replay falls
+// back to re-embedding instead of failing outright.
+func decodeWALValue(raw []byte) (text string, vec []float32, attrs index.Attrs) {
+	if len(raw) < 5 || (raw[0] != walValueHasVector && raw[0] != walValueHasAttrs) {
+		return string(raw), nil, nil
+	}
+	textLen := binary.BigEndian.Uint32(raw[1:5])
+	off := 5
+	if uint64(off)+uint64(textLen)+4 > uint64(len(raw)) {
+		return string(raw), nil, nil
+	}
+	text = string(raw[off : off+int(textLen)])
+	off += int(textLen)
+	vecLen := binary.BigEndian.Uint32(raw[off : off+4])
+	off += 4
+	vecEnd := uint64(off) + uint64(vecLen)*4
+	if vecEnd > uint64(len(raw)) {
+		return text, nil, nil
+	}
+	if raw[0] == walValueHasVector && vecEnd != uint64(len(raw)) {
+		return text, nil, nil
+	}
+	vec = make([]float32, vecLen)
+	for i := range vec {
+		vec[i] = math.Float32frombits(binary.BigEndian.Uint32(raw[off : off+4]))
+		off += 4
+	}
+	if raw[0] == walValueHasAttrs {
+		if off+4 > len(raw) {
+			return text, vec, nil
+		}
+		attrLen := int(binary.BigEndian.Uint32(raw[off : off+4]))
+		off += 4
+		if attrLen > 0 && off+attrLen == len(raw) {
+			var a index.Attrs
+			if json.Unmarshal(raw[off:], &a) == nil {
+				attrs = a
+			}
+		}
+	}
+	return text, vec, attrs
+}
+
+// defaultWALCheckpointThreshold bounds crash-recovery cost by default, even
+// when the caller never sets WithCheckpointInterval: once the WAL grows past
+// this many bytes, the next Add/AddBatch/Delete triggers a synchronous
+// checkpoint. 64MB matches the MemTableMaxSize convention used elsewhere in
+// this codebase (see CLAUDE.md) rather than measured WAL-replay cost.
+const defaultWALCheckpointThreshold uint64 = 64 * 1024 * 1024
+
+// checkpointIfWALTooLarge triggers a synchronous checkpoint once the WAL
+// exceeds defaultWALCheckpointThreshold. Must be called with db.mu held
+// (write lock) — same requirement as checkpoint. A failure here is logged,
+// not returned: the document that triggered the check is already safely
+// durable in the (still-growing) WAL, so a bookkeeping checkpoint failing
+// must not fail the caller's Add/AddBatch/Delete.
+func (db *DB) checkpointIfWALTooLarge() {
+	if db.docWAL == nil || db.docWAL.Size() < defaultWALCheckpointThreshold {
+		return
+	}
+	if err := db.checkpoint(); err != nil {
+		slog.Warn("zenith: size-triggered checkpoint failed", "error", err)
+	}
 }
 
 // checkpoint saves the gob snapshot and resets the WAL.
@@ -675,3 +852,8 @@ func (n *nullEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float3
 }
 
 func (n *nullEmbedder) Dimensions() int { return 0 }
+
+// Name identifies this embedder for index-file compatibility checks (see
+// embedding.Named). BM25-only mode never touches vectors, so it's recorded
+// distinctly rather than as an absent/unknown identity.
+func (n *nullEmbedder) Name() string { return "none:bm25-only" }

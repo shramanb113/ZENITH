@@ -2,6 +2,7 @@ package zenith_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1093,6 +1094,68 @@ func TestPersistent_CorruptGobFallsBackToWAL(t *testing.T) {
 	if !found {
 		t.Fatal("doc2 must be recovered from WAL even when gob is corrupt")
 	}
+}
+
+// ─── Embedder identity header (P0-5) ──────────────────────────────────────────
+
+// namedEmbedder implements the optional embedding.Named interface (Name()
+// string) structurally, without importing any internal package — the same
+// way customEmbedder proves zenith.Embedder is fully public.
+type namedEmbedder struct{ name string }
+
+func (e *namedEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
+	return []float32{0, 0, 0}, nil
+}
+func (e *namedEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range out {
+		out[i] = []float32{0, 0, 0}
+	}
+	return out, nil
+}
+func (e *namedEmbedder) Dimensions() int { return 3 }
+func (e *namedEmbedder) Name() string    { return e.name }
+
+// TestOpen_EmbedderMismatchRefusesToLoad verifies that reopening an index
+// file with a differently-identified embedder is refused outright (P0-5)
+// instead of silently loading and mixing two incompatible vector spaces.
+func TestOpen_EmbedderMismatchRefusesToLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mismatch.db")
+
+	db1, err := zenith.Open(path, zenith.WithEmbedder(&namedEmbedder{name: "model-a"}))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	mustAdd(t, db1, "doc1", "hello world")
+	if err := db1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	_, err = zenith.Open(path, zenith.WithEmbedder(&namedEmbedder{name: "model-b"}))
+	if !errors.Is(err, zenith.ErrEmbedderMismatch) {
+		t.Fatalf("Open with a different embedder identity = %v, want ErrEmbedderMismatch", err)
+	}
+}
+
+// TestOpen_SameEmbedderIdentityReopensFine is the control: identical
+// embedder identity across Open calls must not be treated as a mismatch.
+func TestOpen_SameEmbedderIdentityReopensFine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "match.db")
+
+	db1, err := zenith.Open(path, zenith.WithEmbedder(&namedEmbedder{name: "model-a"}))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	mustAdd(t, db1, "doc1", "hello world")
+	if err := db1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	db2, err := zenith.Open(path, zenith.WithEmbedder(&namedEmbedder{name: "model-a"}))
+	if err != nil {
+		t.Fatalf("reopen with the same embedder identity should succeed: %v", err)
+	}
+	defer db2.Close()
 }
 
 // ─── Public Embedder interface ────────────────────────────────────────────────

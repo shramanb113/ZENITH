@@ -34,7 +34,7 @@ func init() {
 
 func main() {
 	autoMigrate() // one-time cleanup of Python nerve artifacts on upgrade
-	rootCmd.AddCommand(indexCmd, searchCmd, watchCmd, serveCmd, versionCmd, uninstallCmd, updateCmd, logCmd, setupCmd)
+	rootCmd.AddCommand(indexCmd, searchCmd, watchCmd, serveCmd, versionCmd, installCmd, uninstallCmd, doctorCmd, updateCmd, logCmd, setupCmd)
 
 	err := rootCmd.Execute()
 	if err == nil {

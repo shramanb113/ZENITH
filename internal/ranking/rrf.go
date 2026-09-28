@@ -2,6 +2,7 @@ package ranking
 
 import (
 	"cmp"
+	"container/heap"
 	"slices"
 	"sort"
 	"strings"
@@ -87,74 +88,115 @@ func (r *RRFRanker) Score(
 	idMapping map[uint64]string,
 ) []ScoredResult {
 
-	// --- 1. Sort copies, not the caller's slices ---
+	// --- 1. Rank each list ---
+	//
+	// The sort keys (scores, ID strings) are materialised into a flat struct
+	// slice once, so the comparator does no map lookups. The original sorted
+	// bare IDs and hit keywordScores/vectorScores/idMapping (3 hash lookups
+	// plus a string compare) inside every comparison, which dominated query
+	// latency once the candidate lists reached tens of thousands of documents.
+	// Input slices are copied, never mutated.
 
-	kwSorted := make([]uint64, len(keywordIDs))
-	copy(kwSorted, keywordIDs)
-	vcSorted := make([]uint64, len(vectorIDs))
-	copy(vcSorted, vectorIDs)
-
-	// Keyword list: sort by keyword score desc,
-	// tie-break by vector score desc, then alphabetically.
-	slices.SortFunc(kwSorted, func(a, b uint64) int {
-		if d := cmpFloat(keywordScores[b], keywordScores[a]); d != 0 {
+	type kwEntry struct {
+		id   uint64
+		kw   float64
+		vec  float64
+		name string
+	}
+	kw := make([]kwEntry, len(keywordIDs))
+	for i, id := range keywordIDs {
+		kw[i] = kwEntry{id: id, kw: keywordScores[id], vec: vectorScores[id], name: idMapping[id]}
+	}
+	// Keyword list: keyword score desc, tie-break vector score desc, then ID.
+	slices.SortFunc(kw, func(a, b kwEntry) int {
+		if d := cmpFloat(b.kw, a.kw); d != 0 {
 			return d
 		}
-		if d := cmpFloat(vectorScores[b], vectorScores[a]); d != 0 {
+		if d := cmpFloat(b.vec, a.vec); d != 0 {
 			return d
 		}
-		return strings.Compare(idMapping[a], idMapping[b])
+		return strings.Compare(a.name, b.name)
 	})
 
-	// Vector list: sort by vector score desc, tie-break alphabetically.
-	slices.SortFunc(vcSorted, func(a, b uint64) int {
-		if d := cmpFloat(vectorScores[b], vectorScores[a]); d != 0 {
+	type vcEntry struct {
+		id   uint64
+		vec  float64
+		name string
+	}
+	vc := make([]vcEntry, len(vectorIDs))
+	for i, id := range vectorIDs {
+		vc[i] = vcEntry{id: id, vec: vectorScores[id], name: idMapping[id]}
+	}
+	// Vector list: vector score desc, tie-break by ID.
+	slices.SortFunc(vc, func(a, b vcEntry) int {
+		if d := cmpFloat(b.vec, a.vec); d != 0 {
 			return d
 		}
-		return strings.Compare(idMapping[a], idMapping[b])
+		return strings.Compare(a.name, b.name)
 	})
 
 	// --- 2. RRF accumulation ---
 
 	// Pre-size to the union of both lists to avoid rehashing.
-	capacity := len(kwSorted) + len(vcSorted)
-	rrfScores := make(map[uint64]float64, capacity)
-
-	for rank, id := range kwSorted {
-		rrfScores[id] += r.wKw / (r.k + float64(rank+1))
+	rrfScores := make(map[uint64]float64, len(kw)+len(vc))
+	for rank, e := range kw {
+		rrfScores[e.id] += r.wKw / (r.k + float64(rank+1))
 	}
-	for rank, id := range vcSorted {
-		rrfScores[id] += r.wVec / (r.k + float64(rank+1))
+	for rank, e := range vc {
+		rrfScores[e.id] += r.wVec / (r.k + float64(rank+1))
 	}
 
-	// --- 3. Collect results in one pass ---
+	// --- 3. Select the top N: score desc, then ID asc for determinism ---
+	//
+	// Only topN results are returned, so a bounded min-heap (O(n log topN))
+	// replaces sorting every candidate. IDs are unique, so the order is
+	// total and the result is identical to a full sort truncated to topN.
 
-	results := make([]ScoredResult, 0, len(rrfScores))
+	better := func(a, b ScoredResult) bool {
+		if d := cmpFloat(a.Score, b.Score); d != 0 {
+			return d > 0
+		}
+		return cmp.Compare(a.ID, b.ID) < 0
+	}
+
+	limit := r.topN
+	if limit <= 0 || limit > len(rrfScores) {
+		limit = len(rrfScores)
+	}
+	h := &resultHeap{better: better, items: make([]ScoredResult, 0, limit)}
 	for id, score := range rrfScores {
-		if score > 0 {
-			results = append(results, ScoredResult{
-				ID:    idMapping[id],
-				Score: score,
-			})
+		if score <= 0 {
+			continue
+		}
+		sr := ScoredResult{ID: idMapping[id], Score: score}
+		if len(h.items) < limit {
+			heap.Push(h, sr)
+		} else if better(sr, h.items[0]) {
+			h.items[0] = sr
+			heap.Fix(h, 0)
 		}
 	}
-
-	// --- 4. Final sort: score desc, then ID asc for determinism ---
-
-	sort.Slice(results, func(i, j int) bool {
-		if d := cmpFloat(results[i].Score, results[j].Score); d != 0 {
-			return d > 0 // higher score first
-		}
-		return cmp.Compare(results[i].ID, results[j].ID) < 0
-	})
-
-	// --- 5. Configurable cap ---
-
-	if r.topN > 0 && len(results) > r.topN {
-		results = results[:r.topN]
-	}
-
+	results := h.items
+	sort.Slice(results, func(i, j int) bool { return better(results[i], results[j]) })
 	return results
+}
+
+// resultHeap is a min-heap under the "better" ordering: the root is the
+// worst result currently kept, so it is the one evicted by a better one.
+type resultHeap struct {
+	better func(a, b ScoredResult) bool
+	items  []ScoredResult
+}
+
+func (h *resultHeap) Len() int           { return len(h.items) }
+func (h *resultHeap) Less(i, j int) bool { return h.better(h.items[j], h.items[i]) }
+func (h *resultHeap) Swap(i, j int)      { h.items[i], h.items[j] = h.items[j], h.items[i] }
+func (h *resultHeap) Push(x any)         { h.items = append(h.items, x.(ScoredResult)) }
+func (h *resultHeap) Pop() any {
+	n := len(h.items)
+	x := h.items[n-1]
+	h.items = h.items[:n-1]
+	return x
 }
 
 // cmpFloat compares two float64s exactly. Returns negative, zero, or

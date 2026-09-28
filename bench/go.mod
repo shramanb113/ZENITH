@@ -3,6 +3,7 @@ module github.com/shramanb113/ZENITH/bench
 go 1.25.0
 
 require (
+	github.com/blevesearch/bleve/v2 v2.6.0
 	github.com/mattn/go-sqlite3 v1.14.45
 	github.com/shramanb113/ZENITH v0.0.0
 )
@@ -10,7 +11,6 @@ require (
 require (
 	github.com/RoaringBitmap/roaring/v2 v2.14.5 // indirect
 	github.com/bits-and-blooms/bitset v1.24.2 // indirect
-	github.com/blevesearch/bleve/v2 v2.6.0 // indirect
 	github.com/blevesearch/bleve_index_api v1.3.11 // indirect
 	github.com/blevesearch/geo v0.2.5 // indirect
 	github.com/blevesearch/go-faiss v1.1.0 // indirect
@@ -38,6 +38,7 @@ require (
 	github.com/yalue/onnxruntime_go v1.30.1 // indirect
 	go.etcd.io/bbolt v1.4.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/text v0.35.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 

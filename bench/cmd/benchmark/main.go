@@ -11,6 +11,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"math/rand"
 	"os"
 	"runtime"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/shramanb113/ZENITH/bench/internal/corpus"
 	"github.com/shramanb113/ZENITH/bench/internal/engines"
 	"github.com/shramanb113/ZENITH/bench/internal/metrics"
+	"github.com/shramanb113/ZENITH/bench/internal/queryset"
 	"github.com/shramanb113/ZENITH/bench/internal/report"
 	"github.com/shramanb113/ZENITH/bench/internal/sysinfo"
 )
@@ -28,7 +30,16 @@ func main() {
 	skipFlag := flag.String("skip", "", "comma-separated engines to skip: zenith-hybrid,zenith-bm25,sqlite,bleve")
 	cacheDir := flag.String("cache", ".cache", "directory for cached dataset files")
 	resultsDir := flag.String("results", "results", "directory for markdown output files")
+	querySetFlag := flag.String("queryset", "clean",
+		"query set: clean | typo (one edit per word, seeded) | codemixed (synthetic romanised-Hindi noise; a proxy, not real Hinglish data)")
+	seedFlag := flag.Int64("seed", 1, "seed for typo/codemixed query generation (same seed = same queries)")
 	flag.Parse()
+
+	kind := queryset.Kind(strings.ToLower(*querySetFlag))
+	if !kind.Valid() {
+		fmt.Fprintf(os.Stderr, "unknown --queryset %q (use clean, typo or codemixed)\n", *querySetFlag)
+		os.Exit(1)
+	}
 
 	limit := scaleToLimit(*scaleFlag)
 	if limit == 0 {
@@ -59,6 +70,16 @@ func main() {
 	}
 	queries = filtered
 
+	// Perturb query text only; qrels (ground truth) still key on the original
+	// query ID, so recall is graded against the same relevant passages.
+	if kind != queryset.Clean {
+		rng := rand.New(rand.NewSource(*seedFlag))
+		for i := range queries {
+			queries[i].Text = queryset.Apply(kind, queries[i].Text, rng)
+		}
+		fmt.Printf("Query set: %s (seed %d) — e.g. %q\n", kind, *seedFlag, queries[0].Text)
+	}
+
 	fmt.Printf("Loaded %d passages, %d queries (qrel-filtered), %d qrels\n", len(passages), len(queries), len(qrels))
 
 	docs := make(map[string]string, len(passages))
@@ -84,7 +105,11 @@ func main() {
 		return engines.NewBleveEngine()
 	}, docs, queries, qrels, subset))
 
-	report.Print(results, *scaleFlag, sys.String(), *resultsDir)
+	label := *scaleFlag
+	if kind != queryset.Clean {
+		label += "-" + string(kind)
+	}
+	report.Print(results, label, sys.String(), *resultsDir)
 }
 
 func runEngine(
