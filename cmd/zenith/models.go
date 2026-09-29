@@ -30,10 +30,29 @@ different one, so switching models means re-indexing (your documents are not
 touched; only the search index is rebuilt).`,
 }
 
+var modelsListFlags struct {
+	rerankers bool
+}
+
 var modelsListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "Show the models ZENITH can run and which are installed",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if modelsListFlags.rerankers {
+			printHeader("models", "cross-encoder reranker registry")
+			for _, m := range localembedder.RerankerModels() {
+				status := muted("not installed  (zenith models pull " + m.ID + ")")
+				if fileExists(filepath.Join(modelsDir(), m.ID, "model.onnx")) {
+					status = green("installed")
+				}
+				fmt.Printf("  %-24s ~%3d MB  %s\n", m.ID, m.SizeMB, status)
+				fmt.Printf("  %-24s %s\n", "", muted(m.Description))
+			}
+			printDivider()
+			printFooter("use one with", "--rerank --rerank-model <id>")
+			return nil
+		}
+
 		printHeader("models", "embedding model registry")
 		bundled := localembedder.BundledID()
 		for _, m := range localembedder.Models() {
@@ -48,7 +67,7 @@ var modelsListCmd = &cobra.Command{
 			fmt.Printf("  %-20s %s\n", "", muted(m.Description+" ["+m.Languages+"]"))
 		}
 		printDivider()
-		printFooter("use one with", "--model <id>")
+		printFooter("use one with", "--model <id>  (see also: zenith models list --rerankers)")
 		return nil
 	},
 }
@@ -58,20 +77,27 @@ var modelsPullCmd = &cobra.Command{
 	Short: "Download a model from the registry into ~/.zenith/models",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		spec, err := localembedder.Lookup(args[0])
-		if err != nil {
+		id, sizeMB, url, usage, isBundled := args[0], 0, "", "", false
+		if spec, err := localembedder.Lookup(args[0]); err == nil {
+			id, sizeMB, url = spec.ID, spec.SizeMB, spec.ModelURL
+			isBundled = strings.EqualFold(spec.ID, localembedder.BundledID())
+			usage = "use with --model " + spec.ID + " (needs a fresh index: vectors differ per model)"
+		} else if rspec, rerr := localembedder.LookupReranker(args[0]); rerr == nil {
+			id, sizeMB, url = rspec.ID, rspec.SizeMB, rspec.ModelURL
+			usage = "use with --rerank --rerank-model " + rspec.ID
+		} else {
 			return err
 		}
-		if strings.EqualFold(spec.ID, localembedder.BundledID()) {
-			fmt.Printf("%s is already bundled in this binary — nothing to download.\n", spec.ID)
+		if isBundled {
+			fmt.Printf("%s is already bundled in this binary — nothing to download.\n", id)
 			return nil
 		}
-		dir := filepath.Join(modelsDir(), spec.ID)
+		dir := filepath.Join(modelsDir(), id)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
-		printHeader("models pull", fmt.Sprintf("%s (~%d MB)", spec.ID, spec.SizeMB))
-		sum, n, err := downloadModel(spec.ModelURL, filepath.Join(dir, "model.onnx"))
+		printHeader("models pull", fmt.Sprintf("%s (~%d MB)", id, sizeMB))
+		sum, n, err := downloadModel(url, filepath.Join(dir, "model.onnx"))
 		if err != nil {
 			return fmt.Errorf("download failed: %w", err)
 		}
@@ -82,12 +108,14 @@ var modelsPullCmd = &cobra.Command{
 		fmt.Printf("  %s  %s (%s)\n", green("✓"), filepath.Join(dir, "model.onnx"), formatBytes(n))
 		fmt.Printf("  %s  sha256 %s\n", muted("·"), sum)
 		printDivider()
-		printFooter("installed", "use with --model "+spec.ID+" (needs a fresh index: vectors differ per model)")
+		printFooter("installed", usage)
 		return nil
 	},
 }
 
 func init() {
+	modelsListCmd.Flags().BoolVar(&modelsListFlags.rerankers, "rerankers", false,
+		"List cross-encoder rerankers instead of embedding models")
 	modelsCmd.AddCommand(modelsListCmd, modelsPullCmd)
 }
 

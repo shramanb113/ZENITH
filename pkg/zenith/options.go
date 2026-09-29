@@ -17,6 +17,8 @@ type options struct {
 	annMinDocs         int // -1 = engine default
 	model              string // registered embedding model id; "" = the bundled one
 	modelsDir          string
+	rerank             bool
+	rerankModel        string // registered reranker model id; "" = the default
 }
 
 func defaultOptions() *options {
@@ -186,6 +188,32 @@ func WithCheckpointInterval(d time.Duration) Option {
 			d = minInterval
 		}
 		o.checkpointInterval = d
+		return nil
+	}
+}
+
+// WithReranker enables cross-encoder reranking of the hybrid top candidates
+// before Search applies its result limit. It reorders quality, not recall: a
+// document absent from the hybrid candidate list is never added by reranking.
+// Off by default. Requires a CGO build and the reranker model to be installed
+// (see WithRerankerModel / `zenith models pull`); if enabled but the model
+// cannot be loaded, Open returns an error rather than silently disabling it.
+func WithReranker(enabled bool) Option {
+	return func(o *options) error {
+		o.rerank = enabled
+		return nil
+	}
+}
+
+// WithRerankerModel selects a registered cross-encoder by ID (see
+// localembedder's reranker registry). Only meaningful together with
+// WithReranker(true); "" uses the default (ms-marco-MiniLM-L-6-v2).
+func WithRerankerModel(id string) Option {
+	return func(o *options) error {
+		if strings.TrimSpace(id) == "" {
+			return ErrInvalidOption
+		}
+		o.rerankModel = id
 		return nil
 	}
 }

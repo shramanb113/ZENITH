@@ -100,3 +100,50 @@ func Lookup(id string) (Spec, error) {
 // new indexes are built with; existing indexes keep working because the model
 // they were built with is recorded in their header (and refused on mismatch).
 const DefaultID = "gte-small"
+
+// RerankerSpec describes a cross-encoder that reorders a shortlist of hybrid
+// search hits. Unlike Spec, a reranker jointly encodes (query, passage) pairs
+// and outputs one relevance logit rather than independent vectors — it has no
+// Dims/Pooling, and it is never bundled into the binary (opt-in only, fetched
+// with `zenith models pull` like a non-default embedding model).
+type RerankerSpec struct {
+	ID          string
+	Description string
+	ModelURL    string
+	SizeMB      int
+}
+
+// Rerankers share the embedding models' bert-base-uncased WordPiece vocabulary.
+var rerankerRegistry = []RerankerSpec{
+	{
+		ID:          "ms-marco-MiniLM-L-6-v2",
+		Description: "cross-encoder trained on MS MARCO; reorders the top hybrid hits, too slow to run over a whole corpus",
+		ModelURL:    "https://huggingface.co/Xenova/ms-marco-MiniLM-L-6-v2/resolve/main/onnx/model_quantized.onnx",
+		SizeMB:      23,
+	},
+}
+
+// RerankerModels returns every registered reranker, sorted by ID.
+func RerankerModels() []RerankerSpec {
+	out := append([]RerankerSpec(nil), rerankerRegistry...)
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// LookupReranker finds a reranker by ID (case-insensitive).
+func LookupReranker(id string) (RerankerSpec, error) {
+	for _, s := range rerankerRegistry {
+		if strings.EqualFold(s.ID, id) {
+			return s, nil
+		}
+	}
+	ids := make([]string, 0, len(rerankerRegistry))
+	for _, s := range rerankerRegistry {
+		ids = append(ids, s.ID)
+	}
+	return RerankerSpec{}, fmt.Errorf("modelspec: unknown reranker %q (available: %s)", id, strings.Join(ids, ", "))
+}
+
+// DefaultRerankerID is used by WithReranker(true) / --rerank when no specific
+// reranker model is named.
+const DefaultRerankerID = "ms-marco-MiniLM-L-6-v2"

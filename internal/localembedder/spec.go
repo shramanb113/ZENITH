@@ -20,3 +20,15 @@ func Models() []Spec { return modelspec.Models() }
 
 // Lookup finds a model by ID (case-insensitive).
 func Lookup(id string) (Spec, error) { return modelspec.Lookup(id) }
+
+// RerankerSpec describes a cross-encoder reranker (see internal/modelspec).
+type RerankerSpec = modelspec.RerankerSpec
+
+// RerankerModels returns every registered reranker, sorted by ID.
+func RerankerModels() []RerankerSpec { return modelspec.RerankerModels() }
+
+// LookupReranker finds a reranker by ID (case-insensitive).
+func LookupReranker(id string) (RerankerSpec, error) { return modelspec.LookupReranker(id) }
+
+// DefaultRerankerID is used when no specific reranker model is named.
+const DefaultRerankerID = modelspec.DefaultRerankerID

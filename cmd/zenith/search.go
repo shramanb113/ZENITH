@@ -6,13 +6,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shramanb113/ZENITH/internal/reranker"
 	"github.com/spf13/cobra"
 )
 
 var searchFlags struct {
-	maxResults int
-	where      []string
-	filter     string
+	maxResults  int
+	where       []string
+	filter      string
+	rerank      bool
+	rerankModel string
 }
 
 var searchCmd = &cobra.Command{
@@ -52,6 +55,15 @@ The query goes through the full pipeline:
 			return fmt.Errorf("search: %w", err)
 		}
 		alog.Log("SEARCH", fmt.Sprintf("%q → %d results", query, len(results)))
+
+		if searchFlags.rerank {
+			rr, err := reranker.New(searchFlags.rerankModel, modelsDir())
+			if err != nil {
+				return fmt.Errorf("rerank: %w", err)
+			}
+			defer rr.Close()
+			results = rr.Rerank(context.Background(), query, results, engine.GetText)
+		}
 		elapsed := time.Since(start)
 
 		if len(results) == 0 {
@@ -87,4 +99,8 @@ func init() {
 		"Only documents whose attribute matches: key=value, key!=value, key>=n, key<=n (repeatable; all must hold)")
 	searchCmd.Flags().StringVar(&searchFlags.filter, "filter", "",
 		`Only documents matching a JSON filter, e.g. '{"op":"or","args":[{"op":"eq","field":"lang","value":"en"},{"op":"exists","field":"pinned"}]}'`)
+	searchCmd.Flags().BoolVar(&searchFlags.rerank, "rerank", false,
+		"Rerank the top candidates with a cross-encoder (needs: zenith models pull ms-marco-MiniLM-L-6-v2)")
+	searchCmd.Flags().StringVar(&searchFlags.rerankModel, "rerank-model", "",
+		"Reranker model id from `zenith models list --rerankers` (default: ms-marco-MiniLM-L-6-v2)")
 }

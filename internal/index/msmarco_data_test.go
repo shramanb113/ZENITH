@@ -11,6 +11,26 @@ import (
 // Shared MS MARCO cache readers for the diagnostics and the real-corpus
 // lexical benchmarks. The dataset lives in bench/.cache (see bench/cmd/fetch).
 
+// MSMARCOQuery mirrors diagQuery for external test packages that cannot see
+// the unexported type (e.g. an index_test package importing internal/reranker,
+// which itself imports internal/index — an internal test file in package
+// index cannot import internal/reranker without an import cycle).
+type MSMARCOQuery struct {
+	ID   string
+	Text string
+}
+
+// LoadMSMARCOForTest exposes loadMSMARCO to such external test packages.
+func LoadMSMARCOForTest(t *testing.T, dir string, nDocs int) (passages, augmented map[string]string, queries []MSMARCOQuery, qrels map[string]string) {
+	t.Helper()
+	p, a, qs, q := loadMSMARCO(t, dir, nDocs)
+	out := make([]MSMARCOQuery, len(qs))
+	for i, x := range qs {
+		out[i] = MSMARCOQuery{ID: x.id, Text: x.text}
+	}
+	return p, a, out, q
+}
+
 func internalIDOf(originalID string) uint64 {
 	h := fnv.New64a()
 	h.Write([]byte(originalID))

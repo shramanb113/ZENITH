@@ -89,6 +89,62 @@ func (t *tokenizer) encodeIDs(text string, maxTokens int) []int64 {
 	return append(ids, tokenSEP)
 }
 
+// encodePair returns (inputIDs, attentionMask, tokenTypeIDs) for a cross-encoder
+// pair: [CLS] query [SEP] doc [SEP], with tokenTypeIDs 0 over the query+first
+// [SEP] and 1 over the doc+second [SEP]. The query is capped at maxQueryTokens
+// so a long document can't crowd it out entirely; no padding is applied here —
+// callers batch-pad to their chosen sequence length, same as encodeIDs.
+func (t *tokenizer) encodePair(query, doc string, maxLength int) ([]int64, []int64, []int64) {
+	const maxQueryTokens = 64
+	qPieces := t.wordpieceTokenize(strings.ToLower(query))
+	if len(qPieces) > maxQueryTokens {
+		qPieces = qPieces[:maxQueryTokens]
+	}
+	dPieces := t.wordpieceTokenize(strings.ToLower(doc))
+	budget := maxLength - 3 - len(qPieces) // [CLS] + [SEP] + [SEP]
+	if budget < 0 {
+		budget = 0
+	}
+	if len(dPieces) > budget {
+		dPieces = dPieces[:budget]
+	}
+
+	n := 3 + len(qPieces) + len(dPieces)
+	ids := make([]int64, 0, n)
+	mask := make([]int64, 0, n)
+	typeIDs := make([]int64, 0, n)
+
+	ids = append(ids, tokenCLS)
+	mask = append(mask, 1)
+	typeIDs = append(typeIDs, 0)
+	for _, tok := range qPieces {
+		id, ok := t.vocab[tok]
+		if !ok {
+			id = tokenUNK
+		}
+		ids = append(ids, id)
+		mask = append(mask, 1)
+		typeIDs = append(typeIDs, 0)
+	}
+	ids = append(ids, tokenSEP)
+	mask = append(mask, 1)
+	typeIDs = append(typeIDs, 0)
+	for _, tok := range dPieces {
+		id, ok := t.vocab[tok]
+		if !ok {
+			id = tokenUNK
+		}
+		ids = append(ids, id)
+		mask = append(mask, 1)
+		typeIDs = append(typeIDs, 1)
+	}
+	ids = append(ids, tokenSEP)
+	mask = append(mask, 1)
+	typeIDs = append(typeIDs, 1)
+
+	return ids, mask, typeIDs
+}
+
 func (t *tokenizer) wordpieceTokenize(text string) []string {
 	var out []string
 	for _, word := range splitOnWhitespaceAndPunct(text) {

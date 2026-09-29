@@ -37,6 +37,7 @@ import (
 	"github.com/shramanb113/ZENITH/internal/index"
 	"github.com/shramanb113/ZENITH/internal/localembedder"
 	"github.com/shramanb113/ZENITH/internal/ranking"
+	"github.com/shramanb113/ZENITH/internal/reranker"
 	"github.com/shramanb113/ZENITH/internal/storage/wal"
 )
 
@@ -57,6 +58,7 @@ type DB struct {
 	closeOnce sync.Once
 
 	engine   *index.Engine
+	reranker *reranker.Reranker // nil unless WithReranker(true)
 	path     string    // absolute path; empty for :memory:
 	lock     *fileLock // nil for :memory:
 	opts     *options
@@ -107,6 +109,18 @@ func Open(path string, opt ...Option) (*DB, error) {
 	db := &DB{
 		engine: eng,
 		opts:   o,
+	}
+
+	if o.rerank {
+		dir := o.modelsDir
+		if dir == "" {
+			dir = defaultModelsDir()
+		}
+		rr, err := reranker.New(o.rerankModel, dir)
+		if err != nil {
+			return nil, fmt.Errorf("zenith: %w", err)
+		}
+		db.reranker = rr
 	}
 
 	if path == ":memory:" {
@@ -408,6 +422,10 @@ func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) (r
 		return nil, fmt.Errorf("zenith: %w", err)
 	}
 
+	if db.reranker != nil {
+		raw = db.reranker.Rerank(ctx, query, raw, db.engine.GetText)
+	}
+
 	return buildResults(raw, so.limit), nil
 }
 
@@ -657,6 +675,11 @@ func (db *DB) Close() (err error) {
 			if closeErr := db.engine.Close(); closeErr != nil && err == nil {
 				err = closeErr
 			}
+		}
+
+		if db.reranker != nil {
+			db.reranker.Close()
+			db.reranker = nil
 		}
 
 		if db.lock != nil {
