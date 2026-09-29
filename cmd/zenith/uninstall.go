@@ -173,7 +173,14 @@ func runUninstall(input io.Reader) error {
 // example a 'go run' temp build or a test binary) when uninstall is invoked
 // from somewhere unexpected.
 func looksLikeZenith(p string) bool {
-	base := strings.ToLower(filepath.Base(p))
+	// Split on both '/' and '\' rather than filepath.Base, whose separator is
+	// OS-specific: the binary this checks always has native-format paths, but
+	// the check itself should not depend on which OS runs the test.
+	base := p
+	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
+		base = base[i+1:]
+	}
+	base = strings.ToLower(base)
 	base = strings.TrimSuffix(base, ".exe")
 	return base == "zenith" || strings.HasPrefix(base, "zenith-") || strings.HasPrefix(base, "zenith_")
 }

@@ -29,11 +29,22 @@ jobs:
           cache: true
 
       # windows-latest has no C compiler preinstalled; the other runners do.
-      - name: Set up MinGW (Windows, cgo=1 only)
+      # egor-tensin/setup-mingw@v2 is broken against current chocolatey mingw
+      # releases (its cleanup step removes a libpthread.dll.a that the
+      # posix-seh-ucrt package no longer ships), so use msys2's ucrt64 gcc
+      # instead — the same toolchain already used for local CGO dev builds.
+      - name: Set up MSYS2 / MinGW (Windows, cgo=1 only)
         if: matrix.os == 'windows-latest' && matrix.cgo == '1'
-        uses: egor-tensin/setup-mingw@v2
+        uses: msys2/setup-msys2@v2
         with:
-          platform: x64
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Add MSYS2 UCRT64 gcc to PATH (Windows, cgo=1 only)
+        if: matrix.os == 'windows-latest' && matrix.cgo == '1'
+        run: echo "C:\msys64\ucrt64\bin" >> $env:GITHUB_PATH
+        shell: pwsh
 
       # The ONNX model and runtime are gitignored build inputs
       # (internal/localembedder/assets). Only CGO builds embed them; CGO_ENABLED=0

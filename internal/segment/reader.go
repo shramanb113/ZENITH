@@ -202,10 +202,29 @@ func littleEndianHost() bool {
 	return *(*byte)(unsafe.Pointer(&x)) == 1
 }
 
+// alignTo returns b, copied into a fresh allocation if its address is not a
+// multiple of align. Sections are laid out back-to-back with no padding, so a
+// section's start offset into the mmap'd file is not guaranteed aligned for
+// the wider type its view functions below reinterpret it as. Reinterpreting
+// an unaligned byte slice via unsafe.Pointer is undefined behaviour: x86
+// tolerates it silently, but on arm64 (e.g. macOS CI runners) the compiler
+// can emit aligned-load or vectorized instructions for the resulting slice
+// that silently read from the wrong address, corrupting a handful of values
+// without a crash (observed as a rare score mismatch after a segment
+// reload — never reproduced on amd64). A fresh Go allocation is aligned to
+// at least 8 bytes, satisfying every width used here.
+func alignTo(b []byte, align uintptr) []byte {
+	if len(b) == 0 || uintptr(unsafe.Pointer(&b[0]))%align == 0 {
+		return b
+	}
+	return append([]byte(nil), b...)
+}
+
 func viewU64(b []byte) []uint64 {
 	if len(b) < 8 {
 		return nil
 	}
+	b = alignTo(b, 8)
 	return unsafe.Slice((*uint64)(unsafe.Pointer(&b[0])), len(b)/8)
 }
 
@@ -213,6 +232,7 @@ func viewU32(b []byte) []uint32 {
 	if len(b) < 4 {
 		return nil
 	}
+	b = alignTo(b, 4)
 	return unsafe.Slice((*uint32)(unsafe.Pointer(&b[0])), len(b)/4)
 }
 
@@ -220,6 +240,7 @@ func viewU16(b []byte) []uint16 {
 	if len(b) < 2 {
 		return nil
 	}
+	b = alignTo(b, 2)
 	return unsafe.Slice((*uint16)(unsafe.Pointer(&b[0])), len(b)/2)
 }
 
