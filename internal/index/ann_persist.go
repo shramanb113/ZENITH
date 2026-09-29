@@ -121,7 +121,9 @@ func (e *Engine) maybeSaveANNAsyncLocked(force bool) {
 	if !e.annSaving.CompareAndSwap(false, true) {
 		return
 	}
+	e.annWG.Add(1)
 	go func() {
+		defer e.annWG.Done()
 		defer e.annSaving.Store(false)
 		if err := e.SaveANN(); err != nil {
 			slog.Warn("index: could not save the ANN graph", "error", err)

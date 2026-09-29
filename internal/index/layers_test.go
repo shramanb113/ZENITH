@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/shramanb113/ZENITH/internal/analysis"
+	"github.com/shramanb113/ZENITH/internal/ann"
 	"github.com/shramanb113/ZENITH/internal/config"
 	"github.com/shramanb113/ZENITH/internal/ranking"
 )
@@ -80,6 +82,19 @@ func assertSame(t *testing.T, stage string, ref, got *Engine) {
 			}
 			for i := range want {
 				if want[i].ID != have[i].ID || math.Abs(want[i].Score-have[i].Score) > 1e-9*math.Max(1, math.Abs(want[i].Score)) {
+					// Diagnostic dump for a platform-specific divergence under
+					// investigation (macOS/arm64 CI only, never reproduced on
+					// amd64): capture the exact vector-candidate neighborhood
+					// and the BM25 keyword-side breakdown on both engines so a
+					// CI failure log carries enough detail to pin down the
+					// cause. Remove once resolved.
+					dumpVectorNeighborhood(t, stage+" ref", ref, q)
+					dumpVectorNeighborhood(t, stage+" got", got, q)
+					names := map[string]bool{want[i].ID: true, have[i].ID: true}
+					for name := range names {
+						dumpBM25Detail(t, stage+" ref", ref, q, name)
+						dumpBM25Detail(t, stage+" got", got, q, name)
+					}
 					t.Fatalf("%s: query %q (filter=%v) rank %d: got %s/%v want %s/%v",
 						stage, q, pred != nil, i, have[i].ID, have[i].Score, want[i].ID, want[i].Score)
 				}
@@ -88,6 +103,70 @@ func assertSame(t *testing.T, stage string, ref, got *Engine) {
 	}
 	if ref.Count() > 20 && hits < 50 {
 		t.Fatalf("%s: only %d total hits over %d queries — the comparison is not exercising ranking", stage, hits, len(diffQueries))
+	}
+}
+
+// dumpVectorNeighborhood logs the top vector-candidate ranking for a query
+// against a single engine, with full-precision scores, so a diverging
+// assertSame failure carries enough detail to compare rank-for-rank against
+// the other engine without a repro.
+func dumpVectorNeighborhood(t *testing.T, tag string, e *Engine, query string) {
+	t.Helper()
+	ctx := context.Background()
+	qv := e.EmbedText(ctx, query)
+	type sc struct {
+		id    uint64
+		score float64
+	}
+	var scores []sc
+	e.eachVector(func(id uint64, v []uint16) {
+		scores = append(scores, sc{id: id, score: ann.DotF32F16(qv, v)})
+	})
+	sort.Slice(scores, func(i, j int) bool { return scores[i].score > scores[j].score })
+	t.Logf("--- %s: vector neighborhood for %q ---", tag, query)
+	for i := 0; i < 10 && i < len(scores); i++ {
+		t.Logf("  rank %d: id=%d name=%s score=%.17g", i+1, scores[i].id, e.origID(scores[i].id), scores[i].score)
+	}
+}
+
+// dumpBM25Detail logs the BM25 keyword-side score for a specific document
+// against a query, both combined and per query-term in isolation, so a
+// keyword-side divergence (as opposed to the vector-side one
+// dumpVectorNeighborhood already rules out) can be compared term-by-term
+// between engines without a repro.
+func dumpBM25Detail(t *testing.T, tag string, e *Engine, query, targetName string) {
+	t.Helper()
+	var targetID uint64
+	found := false
+	e.eachVector(func(id uint64, v []uint16) {
+		if !found && e.origID(id) == targetName {
+			targetID, found = id, true
+		}
+	})
+	if !found {
+		t.Logf("--- %s: BM25 detail for %q against %q: document not found ---", tag, targetName, query)
+		return
+	}
+	e.mu.RLock()
+	rawTokens, _, bm25Results := e.lexicalPhase(query, nil)
+	e.mu.RUnlock()
+	var full float64
+	for _, r := range bm25Results {
+		if r.DocID == targetID {
+			full = r.Score
+			break
+		}
+	}
+	t.Logf("--- %s: BM25 detail for %q against %q: tokens=%v combined=%.17g ---", tag, targetName, query, rawTokens, full)
+	for _, term := range rawTokens {
+		var sc float64
+		for _, r := range e.bm25.Query([]string{term}) {
+			if r.DocID == targetID {
+				sc = r.Score
+				break
+			}
+		}
+		t.Logf("  term=%q isolated_score=%.17g", term, sc)
 	}
 }
 

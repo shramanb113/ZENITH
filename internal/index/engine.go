@@ -95,6 +95,7 @@ type Engine struct {
 	// mutations since the file was last written; guarded by mu.
 	annSaveMu   sync.Mutex
 	annSaving   atomic.Bool
+	annWG       sync.WaitGroup // outstanding background SaveANN goroutines; Close waits on this
 	annChanges  int64
 	annSaved    bool // the file on disk reflects the graph as of the last save
 	annFromDisk bool // the current graph was restored from the file

@@ -566,6 +566,13 @@ func (e *Engine) closeLayersLocked() {
 // Close releases the engine's memory maps. The engine must not be used
 // afterwards. Data is not saved: call Save first if there are unsaved changes.
 func (e *Engine) Close() error {
+	// Wait for any in-flight background ANN save (internal/index/ann_persist.go)
+	// before taking mu below: SaveANN itself needs mu.RLock while it runs, so
+	// waiting here (before Close holds the write lock) avoids a deadlock while
+	// still guaranteeing the goroutine's file writes finish before Close tears
+	// down the engine's files out from under it.
+	e.annWG.Wait()
+
 	e.compactMu.Lock()
 	defer e.compactMu.Unlock()
 	e.saveMu.Lock()
