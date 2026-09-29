@@ -424,7 +424,7 @@ zenith search <query>          ▼
 | Boot auto-start (Windows/Linux/macOS) | Active | |
 | Text, Markdown, Go, HTML extractors | Active | |
 | PDF extraction | Active | Pure Go via `ledongthuc/pdf` |
-| Image indexing (filename-based) | Active | |
+| Image indexing (filename + OCR) | Active | OCR opt-in: build with `-tags ocr` + `CGO_ENABLED=1` against libtesseract; falls back to filename-only otherwise |
 | In-memory mode (`:memory:`) | Active | Library — zero-cleanup testing |
 | OpenAI embedder | Planned | |
 | Prometheus metrics | Planned | |
@@ -470,7 +470,7 @@ Full LSM-tree — same architecture as RocksDB and LevelDB, built from scratch.
 | `.py` `.ts` `.js` `.jsx` `.tsx` `.rs` `.java` `.c` `.cpp` | Raw source |
 | `.html` `.htm` | Tag-stripped visible text |
 | `.pdf` | Pure-Go text extraction via `ledongthuc/pdf` |
-| `.jpg` `.jpeg` `.png` `.gif` `.bmp` `.webp` `.tiff` | Filename + directory path tokens |
+| `.jpg` `.jpeg` `.png` `.gif` `.bmp` `.webp` `.tiff` | Filename + directory path tokens, plus OCR'd pixel text when built with `-tags ocr` (Tesseract) |
 
 ---
 

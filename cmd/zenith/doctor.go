@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/shramanb113/ZENITH/internal/image"
 	"github.com/shramanb113/ZENITH/internal/index"
 	"github.com/shramanb113/ZENITH/internal/localembedder"
 )
@@ -107,6 +108,15 @@ func runDoctor() error {
 			fix: "use a build with CGO_ENABLED=1 and a C compiler, or run 'zenith index --embedder ollama'"})
 	} else {
 		checks = append(checks, doctorCheck{name: "embedder", ok: true, msg: "embedded ONNX model loads (semantic search on)"})
+	}
+
+	// Image OCR (opt-in, built with -tags ocr against libtesseract).
+	if image.OCRAvailable() {
+		checks = append(checks, doctorCheck{name: "image OCR", ok: true, msg: "Tesseract available (images indexed by pixel text + filename)"})
+	} else {
+		checks = append(checks, doctorCheck{name: "image OCR", warn: true,
+			msg: "Tesseract not built in — images indexed by filename only",
+			fix: "build with CGO_ENABLED=1 -tags ocr against libtesseract (see the Docker image)"})
 	}
 
 	// Go toolchain (only needed for 'zenith update').
