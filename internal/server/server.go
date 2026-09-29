@@ -44,7 +44,16 @@ func (s *ZenithServer) IndexDocuments(
 		}, status.Error(codes.InvalidArgument, "document data must not be empty")
 	}
 
-	if err := s.Engine.Add(ctx, req.GetId(), req.GetData()); err != nil {
+	attrs, err := attrsFromProto(req.GetAttrs())
+	if err != nil {
+		return &zenithproto.IndexResponse{Status: false, Message: err.Error()}, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if len(attrs) > 0 {
+		err = s.Engine.AddWithVectorAttrs(ctx, req.GetId(), req.GetData(), s.Engine.EmbedText(ctx, req.GetData()), attrs)
+	} else {
+		err = s.Engine.Add(ctx, req.GetId(), req.GetData())
+	}
+	if err != nil {
 		slog.Error("Failed to index document", "id", req.GetId(), "error", err)
 		msg := fmt.Sprintf("indexing failed: %v", err)
 		return &zenithproto.IndexResponse{
@@ -68,7 +77,14 @@ func (s *ZenithServer) Search(
 		return nil, status.Error(codes.InvalidArgument, "query must not be empty")
 	}
 
-	results, err := s.Engine.Search(ctx, req.GetQuery())
+	var filter *index.Filter
+	if req.GetFilter() != nil {
+		var ferr error
+		if filter, ferr = filterFromProto(req.GetFilter()); ferr != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid filter: %v", ferr)
+		}
+	}
+	results, err := s.Engine.SearchFiltered(ctx, req.GetQuery(), filter)
 	if err != nil {
 		slog.Error("Search failed", "query", req.GetQuery(), "error", err)
 		return nil, status.Errorf(codes.Internal, "search failed: %v", err)
@@ -84,6 +100,7 @@ func (s *ZenithServer) Search(
 			Score:        r.Score,
 			Fields:       parseChunkFields(r.ID),
 			OriginalText: text,
+			Attrs:        attrsToProto(s.Engine.GetAttrs(r.ID)),
 		})
 	}
 

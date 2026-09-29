@@ -188,6 +188,9 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 type docIn struct {
 	ID   string `json:"id"`
 	Text string `json:"text"`
+	// Attrs is optional metadata (string, number or bool values) that a search's
+	// "filter" can test.
+	Attrs map[string]any `json:"attrs,omitempty"`
 }
 
 func (s *Server) putDocs(w http.ResponseWriter, r *http.Request) {
@@ -203,6 +206,7 @@ func (s *Server) putDocs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	docs := make(map[string]string, len(req.Docs))
+	attrs := make(map[string]zenith.Attrs)
 	for _, d := range req.Docs {
 		if d.ID == "" || strings.TrimSpace(d.Text) == "" {
 			writeErr(w, http.StatusBadRequest, "every doc needs a non-empty id and text")
@@ -213,6 +217,9 @@ func (s *Server) putDocs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		docs[d.ID] = d.Text
+		if len(d.Attrs) > 0 {
+			attrs[d.ID] = zenith.Attrs(d.Attrs)
+		}
 	}
 
 	opts := []zenith.Option{zenith.WithoutWordVectors(), zenith.WithLimit(s.cfg.MaxDocs)}
@@ -227,8 +234,12 @@ func (s *Server) putDocs(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "open failed")
 		return
 	}
-	if err := db.AddBatch(r.Context(), docs); err != nil {
+	if err := db.AddBatchWithAttrs(r.Context(), docs, attrs); err != nil {
 		_ = db.Close()
+		if errors.Is(err, zenith.ErrInvalidAttrs) {
+			writeErr(w, http.StatusBadRequest, "attrs must be non-empty keys with string, number or bool values")
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "index failed")
 		return
 	}
@@ -302,9 +313,21 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		} `json:"queries"`
 		Limit       int     `json:"limit"`
 		MinSemantic float64 `json:"min_semantic"`
+		// Filter restricts the search to documents whose attrs match; see
+		// zenith.FilterFromJSON for the format.
+		Filter json.RawMessage `json:"filter"`
 	}
 	if !decode(w, r, &req) {
 		return
+	}
+	var searchOpts []zenith.SearchOption
+	if len(req.Filter) > 0 && string(req.Filter) != "null" {
+		f, err := zenith.FilterFromJSON(req.Filter)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid filter: "+strings.TrimPrefix(err.Error(), "zenith: "))
+			return
+		}
+		searchOpts = append(searchOpts, zenith.WithFilter(f))
 	}
 	if len(req.Queries) == 0 || len(req.Queries) > s.cfg.MaxQueries {
 		writeErr(w, http.StatusBadRequest, "queries must contain 1..MaxQueries entries")
@@ -331,7 +354,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	out := make(map[string]queryOut, len(req.Queries))
 	for _, q := range req.Queries {
-		res, err := n.db.Search(r.Context(), q.Text, zenith.Explain(), zenith.Limit(limit))
+		res, err := n.db.Search(r.Context(), q.Text, append([]zenith.SearchOption{zenith.Explain(), zenith.Limit(limit)}, searchOpts...)...)
 		if err != nil {
 			if errors.Is(err, zenith.ErrClosed) {
 				writeErr(w, http.StatusNotFound, "namespace closed")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+	"time"
 	"unicode/utf8"
 
 	"github.com/shramanb113/ZENITH/internal/analysis"
@@ -12,26 +13,37 @@ import (
 	"github.com/shramanb113/ZENITH/internal/ranking"
 )
 
-// SearchWithFilter is Search restricted to documents whose attributes satisfy
+// / SearchWithFilter is Search restricted to documents whose attributes satisfy
 // pred (nil = no restriction). The predicate is applied to the lexical and
 // vector candidate sets before rank fusion.
 func (e *Engine) SearchWithFilter(ctx context.Context, query string, pred Predicate) ([]SearchResponse, error) {
-	queryVec, embErr := embedding.EmbedQuery(ctx, e.embedder, query)
-	if embErr != nil {
-		slog.Warn("Search vectors degraded — embedder unreachable", "error", embErr)
+	if pred == nil {
+		return e.SearchFiltered(ctx, query, nil)
 	}
-	queryVec = normalizeVector(queryVec)
+	return e.SearchFiltered(ctx, query, &Filter{Pred: pred})
+}
 
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+// embedHoldMax bounds how long a search holds the engine read lock waiting for
+// the query embedding. A pending writer makes new readers queue behind it, so a
+// slow embedder (a network call) must never be waited for with the lock held.
+const embedHoldMax = 100 * time.Millisecond
 
+type queryEmbedding struct {
+	vec []float32
+	err error
+}
+
+// lexicalPhase is everything a search does before it needs the query vector:
+// analysis, the lexical candidate pass, attribute filtering and BM25.
+// Engine.mu held for reading.
+func (e *Engine) lexicalPhase(query string, f *Filter) (rawTokens []string, keywordScores map[uint64]float64, bm25Results []ranking.BM25Result) {
 	var tokens []analysis.Token
 	if qa, ok := e.analyzer.(analysis.QueryAnalyzer); ok {
 		tokens = qa.AnalyzeQuery(query)
 	} else {
 		tokens = e.analyzer.Analyze(query)
 	}
-	rawTokens := make([]string, 0, len(tokens))
+	rawTokens = make([]string, 0, len(tokens))
 	for _, t := range tokens {
 		rawTokens = append(rawTokens, t.Term)
 	}
@@ -41,23 +53,89 @@ func (e *Engine) SearchWithFilter(ctx context.Context, query string, pred Predic
 	// to whatever the fallback/embedder considers "nothing", which returned
 	// arbitrary top-N results instead of no results.
 	if len(rawTokens) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	e.inverted.RLock()
 	e.phonetics.RLock()
-	keywordScores := e.lexicalPass(rawTokens)
+	keywordScores = e.lexicalPass(rawTokens)
 	e.phonetics.RUnlock()
 	e.inverted.RUnlock()
-	e.filterCandidates(pred, keywordScores)
-
-	e.vectors.RLock()
-	vectorScores := e.vectorPass(queryVec, pred)
-	e.vectors.RUnlock()
+	e.filterCandidates(f.pred(), keywordScores)
 
 	// BM25 over the literal query terms is needed by every fusion below and by
 	// the weak-result check; compute it once.
-	bm25Results := e.bm25.Query(rawTokens)
+	bm25Results = e.bm25.Query(rawTokens)
+	return rawTokens, keywordScores, bm25Results
+}
+
+// SearchFiltered is SearchWithFilter with the filter as data: when f carries a
+// Spec, selective conditions are answered from the attribute index instead of
+// by testing documents one by one. f may be nil.
+//
+// The query embedding runs concurrently with the lexical phase (the two are
+// independent), so a hybrid search costs the longer of them instead of their
+// sum. The embedding starts before the engine lock is taken and is waited for
+// with the lock held only briefly (see embedHoldMax).
+func (e *Engine) SearchFiltered(ctx context.Context, query string, f *Filter) ([]SearchResponse, error) {
+	embedded := make(chan queryEmbedding, 1)
+	go func() {
+		v, err := embedding.EmbedQuery(ctx, e.embedder, query)
+		embedded <- queryEmbedding{v, err}
+	}()
+	var early *queryEmbedding
+	if e.serialEmbed { // test hook: embed first, as searches did before the overlap
+		qe := <-embedded
+		early = &qe
+	}
+
+	e.mu.RLock()
+	locked := true
+	defer func() {
+		if locked {
+			e.mu.RUnlock()
+		}
+	}()
+
+	rawTokens, keywordScores, bm25Results := e.lexicalPhase(query, f)
+	if len(rawTokens) == 0 {
+		return nil, nil
+	}
+
+	var qe queryEmbedding
+	if early != nil {
+		qe = *early
+	} else {
+		select {
+		case qe = <-embedded:
+		default:
+			timer := time.NewTimer(embedHoldMax)
+			select {
+			case qe = <-embedded:
+				timer.Stop()
+			case <-timer.C:
+				// Slow embedder: let writers in while it finishes, then redo the
+				// lexical phase against whatever the index has become.
+				e.mu.RUnlock()
+				locked = false
+				qe = <-embedded
+				e.mu.RLock()
+				locked = true
+				rawTokens, keywordScores, bm25Results = e.lexicalPhase(query, f)
+				if len(rawTokens) == 0 {
+					return nil, nil
+				}
+			}
+		}
+	}
+	if qe.err != nil {
+		slog.Warn("Search vectors degraded — embedder unreachable", "error", qe.err)
+	}
+	queryVec := normalizeVector(qe.vec)
+
+	e.vectors.RLock()
+	vectorScores := e.vectorPass(queryVec, f)
+	e.vectors.RUnlock()
 
 	ranks := e.rankAndFuse(keywordScores, bm25Results, vectorScores)
 
@@ -67,8 +145,8 @@ func (e *Engine) SearchWithFilter(ctx context.Context, query string, pred Predic
 	// fires in hybrid mode: vectorPass keeps every document with a positive
 	// dot product against the query vector (roughly half the corpus for a
 	// real embedder), so ranks is essentially never empty even when the
-	// literal query terms match nothing. Instead, treat "no real BM25 hit
-	// for the literal terms" as weak — that's independent of how permissive
+	// literal query terms match nothing. Instead, treat "no real BM25 hit for the
+	// literal terms" as weak — that's independent of how permissive
 	// the vector pass was.
 	weakResults := len(ranks) == 0
 	if !weakResults && e.config.WordVectors && len(bm25Results) == 0 {
@@ -81,7 +159,7 @@ func (e *Engine) SearchWithFilter(ctx context.Context, query string, pred Predic
 		e.inverted.RLock()
 		expandedKeywords := e.neuralExpand(expandedTokens)
 		e.inverted.RUnlock()
-		e.filterCandidates(pred, expandedKeywords)
+		e.filterCandidates(f.pred(), expandedKeywords)
 
 		for id, score := range keywordScores {
 			expandedKeywords[id] += score
@@ -218,10 +296,33 @@ func (e *Engine) bkTree() *analysis.BKTree {
 // once an ANN graph exists and the filter is broad, the graph returns the
 // top annK candidates instead of scoring every document. pred (may be nil)
 // is applied here, before fusion.
-func (e *Engine) vectorPass(queryVec []float32, pred Predicate) map[uint64]float64 {
+func (e *Engine) vectorPass(queryVec []float32, f *Filter) map[uint64]float64 {
 	scores := make(map[uint64]float64)
 	if len(queryVec) == 0 {
 		return scores
+	}
+	pred := f.pred()
+
+	// A selective filter with a structured description is answered from the
+	// attribute index: the few matching documents are scored exactly, which is
+	// both faster than a graph search that has to wander to find them and exact.
+	if spec := f.spec(); pred != nil && spec != nil && e.attrIdx != nil {
+		limit := max(2000, e.docCountLocked()/50)
+		if est, ok := e.attrIdx.estimate(spec); ok && est <= limit {
+			if ords, exact, ok := e.attrIdx.candidates(spec); ok {
+				for _, id := range e.attrIdx.docIDs(ords) {
+					if !exact && !pred(e.attrs[id]) {
+						continue
+					}
+					if v := e.vecOf(id); v != nil {
+						if s := ann.DotF32F16(queryVec, v); s > 0 {
+							scores[id] = s
+						}
+					}
+				}
+				return scores
+			}
+		}
 	}
 
 	if e.ann != nil && e.ann.Len() > 0 {

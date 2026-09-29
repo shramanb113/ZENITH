@@ -112,6 +112,10 @@ func (r *RRFRanker) Score(
 		return n
 	}
 
+	if out, ok := r.hybridTop(keywordIDs, keywordScores, vectorIDs, vectorScores, nameOf); ok {
+		return out
+	}
+
 	type kwEntry struct {
 		id  uint64
 		kw  float64

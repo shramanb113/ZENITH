@@ -10,10 +10,15 @@ import (
 
 	"github.com/shramanb113/ZENITH/internal/crawler"
 	"github.com/shramanb113/ZENITH/internal/fileindex"
+	"github.com/shramanb113/ZENITH/internal/index"
 	imageindexer "github.com/shramanb113/ZENITH/internal/image"
 	"github.com/shramanb113/ZENITH/internal/pdf"
 	"github.com/spf13/cobra"
 )
+
+var indexFlags struct {
+	attrs []string
+}
 
 var indexCmd = &cobra.Command{
 	Use:   "index <directory>",
@@ -37,6 +42,11 @@ Supported formats:
 			return fmt.Errorf("not a directory: %s", dir)
 		}
 
+		attrs, err := parseAttrs(indexFlags.attrs)
+		if err != nil {
+			return err
+		}
+
 		printHeader("index", dir)
 
 		engine, alog, teardown, err := buildEngine(true)
@@ -47,7 +57,11 @@ Supported formats:
 
 		// Wrap the indexer to count files as they are processed.
 		var count atomic.Int64
-		counted := &countingIndexer{inner: engine, n: &count}
+		var inner crawler.Indexer = engine
+		if len(attrs) > 0 {
+			inner = &attrIndexer{engine: engine, attrs: attrs}
+		}
+		counted := &countingIndexer{inner: inner, n: &count}
 
 		w, err := crawler.NewWatcher(counted, alog)
 		if err != nil {
@@ -56,9 +70,11 @@ Supported formats:
 		defer w.Close()
 
 		pi := pdf.NewIndexer(engine, alog)
+		pi.SetAttrs(attrs)
 		w.RegisterFileIndexer(".pdf", pi)
 
 		ii := imageindexer.NewIndexer(engine, alog)
+		ii.SetAttrs(attrs)
 		for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"} {
 			w.RegisterFileIndexer(ext, ii)
 		}
@@ -98,6 +114,22 @@ Supported formats:
 
 func init() {
 	addEngineFlags(indexCmd)
+	indexCmd.Flags().StringArrayVar(&indexFlags.attrs, "attr", nil,
+		"Attach metadata to every indexed document: key=value (repeatable), e.g. --attr tenant=acme --attr year=2024. Search with --where / --filter")
+}
+
+// attrIndexer indexes text with fixed attributes attached.
+type attrIndexer struct {
+	engine *index.Engine
+	attrs  index.Attrs
+}
+
+func (a *attrIndexer) Add(ctx context.Context, id, text string) error {
+	return a.engine.AddWithVectorAttrs(ctx, id, text, a.engine.EmbedText(ctx, text), a.attrs)
+}
+
+func (a *attrIndexer) Remove(ctx context.Context, id string) error {
+	return a.engine.Remove(ctx, id)
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────

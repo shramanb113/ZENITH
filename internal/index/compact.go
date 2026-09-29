@@ -10,6 +10,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/shramanb113/ZENITH/internal/fsx"
 	"github.com/shramanb113/ZENITH/internal/segment"
 )
 
@@ -255,19 +256,33 @@ func (e *Engine) exportLocked(path string) error {
 	for _, l := range e.segs {
 		inputs = append(inputs, mergeInput{seg: l.seg, dead: l.dead})
 	}
-	if len(e.idMapping) > 0 || len(e.vectors.GetWordVectors()) > 0 {
-		tmp := path + ".export-tmp"
-		if err := e.writeMemSegment(tmp); err != nil {
-			os.Remove(tmp)
+	// The frozen layer (a flush that failed earlier) and the active delta go in
+	// as extra inputs, oldest first.
+	for i, m := range []*memLayer{e.frozen, e.activeMemLocked()} {
+		if m == nil || (len(m.idMapping) == 0 && len(m.vectors.GetWordVectors()) == 0) {
+			continue
+		}
+		tmp := fmt.Sprintf("%s.export-tmp%d", path, i)
+		if err := e.writeMem(m, tmp); err != nil {
+			fsx.Remove(tmp)
 			return fmt.Errorf("index: export: %w", err)
 		}
-		defer os.Remove(tmp)
+		defer fsx.Remove(tmp)
 		seg, err := segment.Open(tmp)
 		if err != nil {
 			return fmt.Errorf("index: export: %w", err)
 		}
 		defer seg.Close()
-		inputs = append(inputs, mergeInput{seg: seg})
+		in := mergeInput{seg: seg}
+		if len(m.dead) > 0 {
+			in.dead = make([]uint64, (seg.NumDocs()+63)/64)
+			for id := range m.dead {
+				if row, ok := seg.FindDoc(id); ok {
+					in.dead[row>>6] |= 1 << uint(row&63)
+				}
+			}
+		}
+		inputs = append(inputs, in)
 	}
 
 	name, dims := e.embedderIdentity()
@@ -275,7 +290,7 @@ func (e *Engine) exportLocked(path string) error {
 	file := segmentFileName(path, 1)
 	docs, err := mergeSegments(file, segDims, inputs, name, dims)
 	if err != nil {
-		os.Remove(file)
+		fsx.Remove(file)
 		return fmt.Errorf("index: export: %w", err)
 	}
 	var size int64
@@ -284,7 +299,7 @@ func (e *Engine) exportLocked(path string) error {
 	}
 	m := manifestBody{Generation: 1, NextGen: 2, Segments: []manifestSegment{{File: pathutil.Base(file), Gen: 1, Docs: docs, Bytes: size}}}
 	if err := writeManifest(path, name, dims, m); err != nil {
-		os.Remove(file)
+		fsx.Remove(file)
 		return err
 	}
 	gcSegments(path, m)
@@ -325,13 +340,13 @@ func (e *Engine) Compact() error {
 	// 2. Merge without the engine lock.
 	docs, err := mergeSegments(file, max(dims, 1), inputs, name, dims)
 	if err != nil {
-		os.Remove(file)
+		fsx.Remove(file)
 		return fmt.Errorf("index: compact: %w", err)
 	}
 	failpoint("compact-after-segment")
 	merged, err := segment.Open(file)
 	if err != nil {
-		os.Remove(file)
+		fsx.Remove(file)
 		return fmt.Errorf("index: compact: reopen merged segment: %w", err)
 	}
 
@@ -344,7 +359,7 @@ func (e *Engine) Compact() error {
 	}
 	if !same {
 		merged.Close()
-		os.Remove(file)
+		fsx.Remove(file)
 		return fmt.Errorf("index: compact: engine changed underneath the merge; retry")
 	}
 	nl := newSegLayer(merged, file, gen)
@@ -364,17 +379,23 @@ func (e *Engine) Compact() error {
 	if err := e.commitManifestLocked(); err != nil {
 		e.segs = old
 		merged.Close()
-		os.Remove(file)
+		fsx.Remove(file)
 		return err
 	}
 	failpoint("compact-after-manifest")
 	// Rebind anything aliasing the old mappings before they are unmapped.
 	e.rebindANNLocked()
+	// The graph file's tags name the segments that no longer exist: rewrite it.
+	if e.ann != nil {
+		e.annSaved = false
+		e.annChanges = max(e.annChanges, 1)
+		e.maybeSaveANNAsyncLocked(true)
+	}
 	for _, l := range snap {
 		if err := l.seg.Close(); err != nil {
 			slog.Warn("index: closing compacted segment", "file", l.file, "error", err)
 		}
-		os.Remove(l.file)
+		fsx.Remove(l.file)
 	}
 	slog.Info("Index compacted", "segments_in", len(snap), "docs", docs, "duration", time.Since(start))
 	return nil

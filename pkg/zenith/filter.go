@@ -1,6 +1,7 @@
 package zenith
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -63,91 +64,184 @@ func toIndexAttrs(a Attrs) (index.Attrs, error) {
 }
 
 // Filter restricts Search to documents whose attributes match. Build one with
-// Eq, In, Range, Exists and combine with And, Or, Not. A document with no
-// value for a key never matches a condition on that key (except under Not).
+// Eq, In, Range, Exists and combine with And, Or, Not — or decode one with
+// FilterFromJSON. A document with no value for a key never matches a condition
+// on that key (except under Not).
+//
+// A Filter is data as well as a function: it can be encoded with JSON (the
+// format is documented on index.FilterSpec) and, on a large index, the engine
+// answers selective conditions from an attribute index instead of testing every
+// document.
 type Filter struct {
 	pred index.Predicate
+	spec *index.FilterSpec
+}
+
+func (f Filter) indexFilter() *index.Filter {
+	if f.pred == nil {
+		return nil
+	}
+	return &index.Filter{Pred: f.pred, Spec: f.spec}
+}
+
+// FilterFromJSON decodes a filter such as
+//
+//	{"op":"and","args":[
+//	   {"op":"eq","field":"tenant","value":"acme"},
+//	   {"op":"range","field":"year","min":2020}]}
+//
+// Operators: eq, in, range, exists, and, or, not — the same meaning as the
+// functions of the same names. Malformed or oversized input is rejected.
+func FilterFromJSON(data []byte) (Filter, error) {
+	spec, err := index.ParseFilterSpec(data)
+	if err != nil {
+		return Filter{}, fmt.Errorf("zenith: %w", err)
+	}
+	f, err := spec.Compile()
+	if err != nil {
+		return Filter{}, fmt.Errorf("zenith: %w", err)
+	}
+	return Filter{pred: f.Pred, spec: f.Spec}, nil
+}
+
+// JSON encodes the filter (see FilterFromJSON). The zero Filter, which matches
+// everything, encodes as {"op":"and"}.
+func (f Filter) JSON() ([]byte, error) {
+	if f.spec == nil {
+		return json.Marshal(index.FilterSpec{Op: "and"})
+	}
+	return json.Marshal(f.spec)
+}
+
+func noneSpec() *index.FilterSpec { return &index.FilterSpec{Op: "none"} }
+
+func specValue(v any) (index.SpecValue, bool) {
+	av, err := toAttrValue(v)
+	if err != nil {
+		return index.SpecValue{}, false
+	}
+	return index.SpecValue{AttrValue: av}, true
 }
 
 // Eq matches documents whose attribute key equals value. Strings compare
 // exactly; numbers compare as float64; bools as bools. A type mismatch
 // (e.g. Eq("year", "2024") against a numeric attribute) does not match.
 func Eq(key string, value any) Filter {
-	want, err := toAttrValue(value)
-	if err != nil {
-		return Filter{pred: func(index.Attrs) bool { return false }}
+	sv, ok := specValue(value)
+	if !ok {
+		return Filter{pred: func(index.Attrs) bool { return false }, spec: noneSpec()}
 	}
-	return Filter{pred: func(a index.Attrs) bool {
-		got, ok := a[key]
-		return ok && got == want
-	}}
+	want := sv.AttrValue
+	return Filter{
+		pred: func(a index.Attrs) bool {
+			got, ok := a[key]
+			return ok && got == want
+		},
+		spec: &index.FilterSpec{Op: "eq", Field: key, Value: &sv},
+	}
 }
 
 // In matches documents whose attribute key equals any of values.
 func In(key string, values ...any) Filter {
-	fs := make([]Filter, len(values))
-	for i, v := range values {
-		fs[i] = Eq(key, v)
+	spec := &index.FilterSpec{Op: "in", Field: key}
+	fs := make([]Filter, 0, len(values))
+	for _, v := range values {
+		if sv, ok := specValue(v); ok {
+			spec.Values = append(spec.Values, sv)
+		}
+		fs = append(fs, Eq(key, v))
 	}
-	return Or(fs...)
+	f := Or(fs...)
+	f.spec = spec
+	return f
 }
 
 // Range matches documents whose numeric attribute key lies in [min, max]
 // (inclusive). Use math.Inf(-1) / math.Inf(1) for an open end. Non-numeric
 // attributes never match.
 func Range(key string, min, max float64) Filter {
-	return Filter{pred: func(a index.Attrs) bool {
+	pred := func(a index.Attrs) bool {
 		got, ok := a[key]
 		return ok && got.Kind == index.AttrNumber && got.N >= min && got.N <= max
-	}}
+	}
+	if math.IsNaN(min) || math.IsNaN(max) {
+		return Filter{pred: pred, spec: noneSpec()}
+	}
+	spec := &index.FilterSpec{Op: "range", Field: key}
+	if !math.IsInf(min, -1) {
+		spec.Min = &min
+	}
+	if !math.IsInf(max, 1) {
+		spec.Max = &max
+	}
+	return Filter{pred: pred, spec: spec}
 }
 
 // Exists matches documents that have any value for key.
 func Exists(key string) Filter {
-	return Filter{pred: func(a index.Attrs) bool {
-		_, ok := a[key]
-		return ok
-	}}
+	return Filter{
+		pred: func(a index.Attrs) bool { _, ok := a[key]; return ok },
+		spec: &index.FilterSpec{Op: "exists", Field: key},
+	}
 }
 
 // And matches when every filter matches (no filters: matches everything).
 func And(fs ...Filter) Filter {
-	return Filter{pred: func(a index.Attrs) bool {
-		for _, f := range fs {
-			if f.pred != nil && !f.pred(a) {
-				return false
-			}
+	spec := &index.FilterSpec{Op: "and"}
+	for _, f := range fs {
+		if f.pred != nil {
+			spec.Args = append(spec.Args, *f.spec)
 		}
-		return true
-	}}
+	}
+	return Filter{
+		pred: func(a index.Attrs) bool {
+			for _, f := range fs {
+				if f.pred != nil && !f.pred(a) {
+					return false
+				}
+			}
+			return true
+		},
+		spec: spec,
+	}
 }
 
 // Or matches when any filter matches (no filters: matches nothing).
 func Or(fs ...Filter) Filter {
-	return Filter{pred: func(a index.Attrs) bool {
-		for _, f := range fs {
-			if f.pred != nil && f.pred(a) {
-				return true
-			}
+	spec := &index.FilterSpec{Op: "or"}
+	for _, f := range fs {
+		if f.pred != nil {
+			spec.Args = append(spec.Args, *f.spec)
 		}
-		return false
-	}}
+	}
+	return Filter{
+		pred: func(a index.Attrs) bool {
+			for _, f := range fs {
+				if f.pred != nil && f.pred(a) {
+					return true
+				}
+			}
+			return false
+		},
+		spec: spec,
+	}
 }
 
 // Not inverts a filter. A document lacking the attribute matches Not(Eq(...)).
 func Not(f Filter) Filter {
-	return Filter{pred: func(a index.Attrs) bool {
-		if f.pred == nil {
-			return true
-		}
-		return !f.pred(a)
-	}}
+	if f.pred == nil {
+		return Filter{pred: func(index.Attrs) bool { return true }, spec: &index.FilterSpec{Op: "and"}}
+	}
+	return Filter{
+		pred: func(a index.Attrs) bool { return !f.pred(a) },
+		spec: &index.FilterSpec{Op: "not", Args: []index.FilterSpec{*f.spec}},
+	}
 }
 
 // WithFilter restricts a Search to documents matching f. The filter is
 // applied to the lexical and vector candidate sets before rank fusion, so
 // results are the top matches among the filtered documents rather than a
-// filtered view of the global top results. Cannot be combined with Explain.
+// filtered view of the global top results. It may be combined with Explain.
 func WithFilter(f Filter) SearchOption {
 	return func(o *searchOptions) { o.filter = &f }
 }
@@ -157,4 +251,11 @@ func (o *searchOptions) predicate() index.Predicate {
 		return nil
 	}
 	return o.filter.pred
+}
+
+func (o *searchOptions) indexFilter() *index.Filter {
+	if o.filter == nil {
+		return nil
+	}
+	return o.filter.indexFilter()
 }

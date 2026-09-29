@@ -151,22 +151,55 @@ func TestMSMARCOHybrid(t *testing.T) {
 	}
 	pct := func(l []time.Duration, p float64) time.Duration { return l[int(float64(len(l)-1)*p)] }
 
+	// A query costs its embedding (model inference) plus the engine's work. The
+	// caching embedder makes a repeated query free, so to price a search honestly
+	// every "cold" pass starts from an empty cache, and the "warm" pass right
+	// after it (same queries, cache full) isolates the engine's own cost.
+	freshCache := func() {
+		c, err := embedding.NewCachingEmbedder(localEmb, 10_000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eng.embedder = c
+	}
+	freshCache()
+	embLat := make([]time.Duration, 0, len(queries))
+	for _, q := range queries {
+		t0 := time.Now()
+		if _, err := eng.embedder.Embed(ctx, q.text); err != nil {
+			t.Fatal(err)
+		}
+		embLat = append(embLat, time.Since(t0))
+	}
+	sort.Slice(embLat, func(i, j int) bool { return embLat[i] < embLat[j] })
+
+	coldWarm := func(label string, serial bool) (cold, warm run) {
+		eng.serialEmbed = serial
+		freshCache()
+		cold = measure(label + ", cold cache")
+		warm = measure(label + ", warm cache (engine only)")
+		eng.serialEmbed = false
+		return cold, warm
+	}
+
 	eng.SetANNThreshold(0)
-	exact := measure("exact vector scan")
+	exactSerial, _ := coldWarm("exact scan, embed then search", true)
+	exactCold, exactWarm := coldWarm("exact scan, embed overlapped", false)
 	eng.SetANNThreshold(defaultANNMinDocs)
 	if !eng.ANNActive() {
 		t.Fatal("ANN did not activate")
 	}
-	ann := measure("ANN (HNSW)")
+	annSerial, _ := coldWarm("ANN, embed then search", true)
+	annCold, annWarm := coldWarm("ANN, embed overlapped", false)
 
 	var overlap float64
 	for i := range queries {
 		want := map[string]bool{}
-		for _, id := range exact.top[i] {
+		for _, id := range exactWarm.top[i] {
 			want[id] = true
 		}
 		hit := 0
-		for _, id := range ann.top[i] {
+		for _, id := range annWarm.top[i] {
 			if want[id] {
 				hit++
 			}
@@ -177,12 +210,15 @@ func TestMSMARCOHybrid(t *testing.T) {
 	}
 	overlap /= float64(len(queries))
 
-	for _, r := range []run{exact, ann} {
-		t.Logf("%-18s Recall@10=%.4f  p50=%s p95=%s p99=%s  (%d queries)", r.name, r.recall,
+	t.Logf("query embedding alone (%s): p50 %s  p95 %s  p99 %s", modelID,
+		pct(embLat, 0.50).Round(10*time.Microsecond), pct(embLat, 0.95).Round(10*time.Microsecond), pct(embLat, 0.99).Round(10*time.Microsecond))
+	for _, r := range []run{exactSerial, exactCold, exactWarm, annSerial, annCold, annWarm} {
+		t.Logf("%-52s Recall@10=%.4f  p50=%s p95=%s p99=%s  (%d queries)", r.name, r.recall,
 			pct(r.lat, 0.50).Round(10*time.Microsecond), pct(r.lat, 0.95).Round(10*time.Microsecond), pct(r.lat, 0.99).Round(10*time.Microsecond), r.samples)
 	}
 	t.Logf("ANN vs exact: top-10 overlap %.4f on real %s embeddings", overlap, modelID)
-	fmt.Fprintf(os.Stderr, "RESULT hybrid model="+modelID+" exact_recall=%.4f exact_p50=%s ann_recall=%.4f ann_p50=%s overlap=%.4f\n",
-		exact.recall, pct(exact.lat, 0.5), ann.recall, pct(ann.lat, 0.5), overlap)
+	fmt.Fprintf(os.Stderr, "RESULT hybrid model=%s embed_p50=%s exact_recall=%.4f exact_serial_p50=%s exact_overlapped_p50=%s exact_engine_p50=%s ann_recall=%.4f ann_serial_p50=%s ann_overlapped_p50=%s ann_engine_p50=%s overlap=%.4f\n",
+		modelID, pct(embLat, 0.5), exactWarm.recall, pct(exactSerial.lat, 0.5), pct(exactCold.lat, 0.5), pct(exactWarm.lat, 0.5),
+		annWarm.recall, pct(annSerial.lat, 0.5), pct(annCold.lat, 0.5), pct(annWarm.lat, 0.5), overlap)
 	runtime.KeepAlive(eng)
 }

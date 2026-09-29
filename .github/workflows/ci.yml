@@ -98,6 +98,15 @@ jobs:
           -run 'TestCrash|TestLayered|TestGolden|TestMigrate|TestSave_Refuses|TestOpen_Legacy'
           -count=1 -timeout 20m -v
 
+      # Power loss (every fsync/rename/dir-sync boundary, torn pages), full disk,
+      # the non-blocking checkpoint and WAL rotation, and the persisted ANN graph.
+      # On Linux and macOS this is also the first execution of the mmap path.
+      - name: Power loss, disk full, checkpoints, frozen layer, ANN persistence
+        run: >
+          go test ./internal/fsx/ ./internal/index/ ./internal/ann/ ./internal/storage/wal/ ./pkg/zenith/
+          -run 'TestPowerLoss|TestDiskFull|TestCheckpoint|TestFrozen|TestANNPersist|TestPersist|TestRotate|TestAppend_DiskFull|TestRecorder|TestAttrIndex|TestFilter'
+          -count=1 -timeout 30m -v
+
   # Latency and recall regression gate for the lexical query path. Deterministic
   # synthetic corpus (no download); asserts a recall floor, a bound on candidates
   # per query (machine-independent, the sharp check), and a loose p50 ceiling.

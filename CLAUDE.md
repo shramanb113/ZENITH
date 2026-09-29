@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository. You don't have explicit permission to commit you will not commit and add to github under any circumstance.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Commands
 
@@ -49,7 +49,7 @@ The search orchestrator — owns all sub-indexes and the scoring pipeline:
 
 **Add pipeline** (per document): `Analyzer.Analyze` → embed (in-process ONNX call via `internal/localembedder`) → write postings to the delta's InvertedIndex + PhoneticIndex + BM25. (The BK-tree is built lazily and TF-IDF is no longer maintained.)
 
-**Search pipeline**: lexical pass (capped n-gram prefixes + phonetic + FST fuzzy) → vector pass (exact dot-product scan below `WithANNThreshold` docs, default 20k; HNSW graph in `internal/ann` above it — not persisted, rebuilt on Load and re-pointed at the new mapping after each flush/compaction) → `rankAndFuse` (RRF + BM25 tiebreak) → neural expansion if results are absent or weak
+**Search pipeline**: lexical pass (capped n-gram prefixes + phonetic + FST fuzzy) → vector pass (exact dot-product scan below `WithANNThreshold` docs, default 20k; HNSW graph in `internal/ann` above it — persisted as the `<db>.ann` sidecar, see "Frozen layer, checkpoints, ANN sidecar" below) → `rankAndFuse` (RRF + BM25 tiebreak) → neural expansion if results are absent or weak
 
 ### 3. Analysis (`internal/analysis/`)
 
@@ -81,7 +81,7 @@ RRFRanker
 index.NewEngine(config, embedder, scorer, analyzer) → gRPC server
 ```
 
-Index persistence is **not** the LSM storage engine (that is wired in `storage_engine.go` for the term store/WAL). `engine.Save(path)` / `engine.Load(path)` use the segment format documented in `FORMAT.md`: `zenith.db` is a small manifest, segments live beside it as `zenith.db.seg-NNNNNN`. `Save` to the bound path is an *incremental flush* (the delta becomes one new segment; cost ∝ the delta, not the index), `Save` to another path exports a merged copy, `Compact()` merges segments without holding the engine lock, and `Load` memory-maps the files. Commit = fsync the segment, then atomically rename the manifest; orphans are deleted on open. Old gob files (v4/v5) are refused with `*LegacyFormatError` (matches `ErrIncompatibleVersion`) until `zenith migrate` converts them; `Save` will not overwrite one.
+Index persistence is **not** the LSM storage engine (that is wired in `storage_engine.go` for the term store/WAL). `engine.Save(path)` / `engine.Load(path)` use the segment format documented in `FORMAT.md`: `zenith.db` is a small manifest, segments live beside it as `zenith.db.seg-NNNNNN`. `Save` to the bound path is an _incremental flush_ (the delta becomes one new segment; cost ∝ the delta, not the index), `Save` to another path exports a merged copy, `Compact()` merges segments without holding the engine lock, and `Load` memory-maps the files. Commit = fsync the segment, then atomically rename the manifest; orphans are deleted on open. Old gob files (v4/v5) are refused with `*LegacyFormatError` (matches `ErrIncompatibleVersion`) until `zenith migrate` converts them; `Save` will not overwrite one.
 
 ## Configuration
 
@@ -96,9 +96,22 @@ All tuneable parameters live in `internal/config/config.go` (`DefaultConfig()`).
 
 ### Metadata filtering, file format, install
 
-- **Filtering**: `AddWithAttrs` / `AddBatchWithAttrs` attach string/bool/number attributes; `Search(..., WithFilter(Eq/In/Range/Exists/And/Or/Not))` applies them to the lexical and vector candidate sets *before* rank fusion. Attrs are persisted in the snapshot and in WAL records. `WithFilter` cannot be combined with `Explain`.
+- **Filtering**: `AddWithAttrs` / `AddBatchWithAttrs` attach string/bool/number attributes; `Search(..., WithFilter(Eq/In/Range/Exists/And/Or/Not))` applies them to the lexical and vector candidate sets _before_ rank fusion. Attrs are persisted in the snapshot and in WAL records. `WithFilter` combines with `Explain`.
+  - A filter is data (`index.FilterSpec`, JSON ops `eq`, `in`, `range`, `exists`, `and`, `or`, `not`, `none`; depth ≤ 16, ≤ 512 nodes), so the same filter works on every surface: `zenith.FilterFromJSON`, gRPC `SearchRequest.filter` (`FilterNode`) and `IndexRequest.attrs`, the sidecar's JSON body, and the CLI (`zenith index --attr k=v`, `zenith search --where k=v` / `--filter '<json>'`).
+  - `attrIndex` (`internal/index/attrindex.go`) keeps per-field value → ordinal postings. A selective filter (estimate ≤ `max(2000, docs/50)`) is resolved to a candidate set and the vector pass scores only those; `Not` falls back to a scan. The index-path result equals the scan-path result (property test).
+  - Journal value format with attrs: `0xFF 'Z' 'A' '1' | uvarint(len) | attrs JSON | text` (`internal/index/journal.go`).
+
+### Frozen layer, checkpoints, ANN sidecar
+
+- **Non-blocking flush.** A flush freezes the delta in O(1) under `Engine.mu` into `Engine.frozen` (a read-only layer that is still searched, with its own dead set), swaps in fresh sub-indexes, writes the segment with no engine lock, then swaps it in and commits the manifest. A failed write leaves the frozen layer for a retry. Deletions of frozen docs are carried in `pendingDels` to the next flush. See `internal/index/frozen.go`.
+- **Non-blocking checkpoint** (`pkg/zenith/checkpoint.go`): under `db.mu` freeze + `WAL.Rotate` to `<db>.wal.old-NNNNNN`; then, unlocked, `FinishCheckpoint` and delete the archives. Recovery replays archives oldest first, then the live WAL (adds are idempotent, later deletes win).
+- **Fault-injection filesystem** (`internal/fsx`): a `Recorder` that reconstructs the on-disk state after a power cut (`Nothing` / `Everything` / `Torn` at 4 KiB page granularity, directory-op prefixes, atomic rename) and a `DiskFull` byte budget (ENOSPC). `internal/index/powerloss_test.go` and `pkg/zenith/powerloss_test.go` sweep every cut point. Segment `Finish` syncs the directory before the manifest rename; `OpenWAL` syncs the directory when it creates the file.
+- **ANN sidecar** `<db>.ann` (`internal/ann/persist.go`, `internal/index/ann_persist.go`): magic `ZANN`, version, params, embedder identity, CRC32C. It is a _hint_: nodes carry the segment-generation tag and are bound by id + tag at load; docs the graph lacks are inserted, nodes it holds for docs that are gone are tombstoned, and the file is ignored if more than half the docs would need inserting or the identity differs. Written after compaction, on `Close`, and in the background after 50,000 graph changes.
+- **Real full-disk test**: `pkg/zenith/realfs_full_test.go` (`TestRealFS_DiskFull`) runs against a real small filesystem when `ZENITH_SMALLFS` points at one (e.g. a 6 MB tmpfs on Linux/WSL; cross-compile with `GOOS=linux CGO_ENABLED=0 go test -c ./pkg/zenith`). It skips otherwise. Real _power loss_ is only modelled (fsx).
+- **Hybrid fusion shortcut**: `internal/ranking/rrf_hybrid.go` computes the exact top-N of weighted RRF without sorting every keyword candidate when the vector list is small (≤ 4096); it is tested equal to the full sort. ANN candidate counts are `annK=300` / `annEF=400` in `internal/index/ann_glue.go` (the knee of the measured recall/latency sweep — see ROADMAP P1-5 before changing them).
+- **Query embedding overlap**: `SearchFiltered` starts the query embedding in a goroutine and runs the lexical phase meanwhile; if the embedding is not ready within `embedHoldMax` (100 ms) it releases the read lock, waits, and redoes the lexical phase.
 - **Format v6**: manifest header = magic + version + embedder name + vector dim, then a JSON segment list (CRC-checked). `Load` returns `ErrEmbedderMismatch` on a different embedder identity (custom embedders opt in via an optional `Name() string`; without it they're recorded as "unknown" and never checked). Migration only from the previous format (`zenith migrate` / `zenith.Migrate`, keeps a `.v<N>.bak`); a mismatch is a hard error. `zenith compact` merges segments; `zenith doctor` re-verifies every checksum. Crash safety is exercised by `internal/index/crash_test.go` (named failpoints via `ZENITH_FAILPOINT` plus hard-kill loops).
-- **WAL**: Put records carry text + vector + attrs so replay never re-embeds documents; a WAL over 64MB triggers a synchronous checkpoint.
+- **WAL**: Put records carry text + vector + attrs so replay never re-embeds documents; a WAL over 64MB triggers a checkpoint that does not block searches (freeze + WAL rotation under the lock, the segment write outside it).
 - **CLI install**: `zenith install` (per-user dir + PATH), `zenith doctor [--json]`, `zenith uninstall [--purge] [--yes]`. Uninstall keeps `~/.zenith` (the index) unless `--purge`.
 
 ### Result limits
@@ -121,12 +134,12 @@ Storage engine config (`internal/storage/storage_engine.go`, `DefaultEngineConfi
 
 ## Storage implementation status
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| WAL | Done | CRC-framed, SyncAlways mode; SyncPeriodic/GroupCommit stub-blocked |
-| MemTable | Done | Skip-list backed (`internal/storage/memtable/skiplist.go`); O(log n) ops, pre-sorted iterator |
-| SSTable | Done | Block-structured, CRC per block, Bloom filter + sparse index per file |
-| Group Committer | Done | Batches concurrent flushes into one fsync |
-| Leveled Compaction | Done | Background goroutine; L0 threshold + Ln size triggers; tombstone pruning at last level |
-| FST dictionary | Done | Rebuilt after every flush; wired into StandardAnalyzer for prefix-search query resolution |
-| WAL benchmarks | Done | `internal/storage/wal/wal_bench_test.go` — append, parallel, mixed, recovery at 1K/10K/100K |
+| Component          | Status | Notes                                                                                         |
+| ------------------ | ------ | --------------------------------------------------------------------------------------------- |
+| WAL                | Done   | CRC-framed, SyncAlways mode; SyncPeriodic/GroupCommit stub-blocked                            |
+| MemTable           | Done   | Skip-list backed (`internal/storage/memtable/skiplist.go`); O(log n) ops, pre-sorted iterator |
+| SSTable            | Done   | Block-structured, CRC per block, Bloom filter + sparse index per file                         |
+| Group Committer    | Done   | Batches concurrent flushes into one fsync                                                     |
+| Leveled Compaction | Done   | Background goroutine; L0 threshold + Ln size triggers; tombstone pruning at last level        |
+| FST dictionary     | Done   | Rebuilt after every flush; wired into StandardAnalyzer for prefix-search query resolution     |
+| WAL benchmarks     | Done   | `internal/storage/wal/wal_bench_test.go` — append, parallel, mixed, recovery at 1K/10K/100K   |

@@ -273,6 +273,9 @@ zenith index --db my-index.db ~/Projects
 --embedder     string   auto | local | ollama | deterministic  (default: auto)
 --ollama-url   string   Ollama server URL               (default: http://localhost:11434)
 --ollama-model string   Ollama embedding model          (default: nomic-embed-text)
+--attr         key=value  Attach metadata to every indexed document (repeatable), e.g.
+                           --attr tenant=acme --attr year=2024 --attr public=true.
+                           Search it back with --where / --filter (see "Metadata filtering").
 ```
 
 ---
@@ -291,6 +294,10 @@ zenith search --db my-index.db "query"
 -n, --max int    Maximum results to display             (default: 10)
 --db      string Index database file                   (default: ~/.zenith/zenith.db)
 --embedder string auto | local | ollama | deterministic (default: auto)
+--where   string Attribute condition, repeatable, all must hold: key=value, key!=value,
+                  key>=n, key<=n. See "Metadata filtering".
+--filter  string Full JSON filter expression (and/or/not of eq/in/range/exists), combined
+                  with any --where conditions. See "Metadata filtering".
 ```
 
 ---
@@ -479,7 +486,62 @@ service SearchService {
 }
 ```
 
-`Search` fuses lexical (BM25 + n-gram + phonetic + BK-tree fuzzy) and vector scoring via RRF — there's no separate `FuzzySearch`/`HybridSearch` RPC, it's all one `Search` call. `SearchRequest` takes an optional `limit`/`offset` for pagination (default limit: 10). See `internal/proto/document.proto` for the source of truth.
+`Search` fuses lexical (BM25 + n-gram + phonetic + BK-tree fuzzy) and vector scoring via RRF — there's no separate `FuzzySearch`/`HybridSearch` RPC, it's all one `Search` call. `SearchRequest` takes an optional `limit`/`offset` for pagination (default limit: 10), and an optional `filter` (`FilterNode`) — see "Metadata filtering" below. See `internal/proto/document.proto` for the source of truth.
+
+---
+
+## Metadata filtering
+
+Every document can carry string/number/bool attributes, attached at index time and matched
+at search time — before rank fusion, on both the lexical and vector candidate sets, not as a
+post-filter on the final page of results.
+
+**Attach attrs when indexing:**
+```bash
+zenith index --attr tenant=acme --attr year=2024 --attr public=true ~/Documents
+```
+A value that reads as `true`/`false` is a bool, one that parses as a number is a number,
+anything else is a string; quote a value (`"2024"`) to force a string.
+
+**Filter when searching**, three equivalent surfaces:
+
+1. **CLI `--where`** — quick key/value conditions (repeatable; all must hold):
+   ```bash
+   zenith search --where tenant=acme --where "year>=2020" --where "lang!=fr" "kubernetes oom"
+   ```
+   Supported operators: `=`, `!=`, `>=`, `<=`.
+
+2. **CLI `--filter` / gRPC `FilterNode` / HTTP `"filter"`** — the full JSON expression, for
+   `and`/`or`/`not` combinations `--where` can't express:
+   ```json
+   {"op":"or","args":[
+     {"op":"eq",     "field":"lang",   "value":"en"},
+     {"op":"exists", "field":"pinned"}
+   ]}
+   ```
+   Operators: `eq` (equals), `in` (equals any of `values`), `range` (numeric, `min`/`max`
+   either optional), `exists` (field present), `and`/`or`/`not` (nest other conditions).
+   A document missing the field never matches a condition on it (`not` is the one operator
+   that matches documents *without* the field). Expressions are capped at depth 16 / 512
+   nodes so a filter arriving over the network can't be used as a denial-of-service vector.
+   The same grammar is accepted by:
+   - CLI: `zenith search --filter '{"op":"or","args":[...]}'` (combined with any `--where`
+     conditions — everything must hold)
+   - gRPC: `SearchRequest.filter` (`FilterNode` in `document.proto` — a typed oneof of the
+     same operators, not JSON on the wire)
+   - HTTP sidecar: `"filter"` in the `POST /v1/ns/{ns}/search` body (raw JSON, same shape)
+   - Go library: `zenith.FilterFromJSON([]byte)`, or build one directly with `zenith.Eq`,
+     `zenith.In`, `zenith.Range`, `zenith.Exists`, `zenith.And`, `zenith.Or`, `zenith.Not`,
+     passed via `zenith.WithFilter(f)`
+
+A filter that only touches a handful of documents (estimated ≤ `max(2000, docs/50)`) is
+resolved through a per-field attribute index instead of scanning every document; `not`
+always falls back to a scan. Either path returns identical results — this is a property
+test, not just documentation.
+
+**Not in scope (deferred):** the attribute index currently stores sorted ordinal postings per
+value, not roaring-bitmap-compressed postings. That's a pure efficiency project with no
+correctness or feature gap at today's scale, so it stays on the backlog (see ROADMAP.md).
 
 ---
 
@@ -577,7 +639,7 @@ are not written in Go can use ZENITH's hybrid matching without gRPC code generat
 |---|---|
 | `GET /healthz` | version, embedding model id (e.g. `gte-small`, `deterministic` or `none`), synonyms hash |
 | `PUT /v1/ns/{ns}/docs` | build (or replace) a namespace from `{"docs":[{"id","text"}]}` |
-| `POST /v1/ns/{ns}/search` | many queries at once with `explain`: raw BM25, cosine, and per-term exact / synonym / fuzzy hits with character spans |
+| `POST /v1/ns/{ns}/search` | many queries at once with `explain`: raw BM25, cosine, and per-term exact / synonym / fuzzy hits with character spans; optional `"filter"` restricts to matching attrs — see "Metadata filtering" |
 | `DELETE /v1/ns/{ns}` | drop a namespace (idle namespaces also expire after 10 min; max 200, LRU) |
 
 Flags:

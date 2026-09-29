@@ -114,36 +114,67 @@ func TestFlushPause(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// A concurrent searcher records the longest gap between completed searches.
+		// Two concurrent searchers. The probe runs a query that matches almost
+		// nothing (about a millisecond of work), so a long probe latency can only
+		// be time spent waiting for the engine lock. The load searcher runs
+		// ordinary queries so the flush competes with real traffic. Each records
+		// (start, duration) so latencies before and during the flush compare.
+		type sample struct {
+			at  time.Time
+			dur time.Duration
+		}
 		var stop atomic.Bool
 		var wg sync.WaitGroup
-		var maxLat atomic.Int64
-		wg.Add(1)
-		go func() {
+		var mu sync.Mutex
+		var probeS, loadS []sample
+		run := func(qs []string, out *[]sample) {
 			defer wg.Done()
-			qs := []string{"kubernetes cluster", "search index ranking", "tokyo weather", words[10] + " " + words[40]}
 			for i := 0; !stop.Load(); i++ {
 				t0 := time.Now()
 				eng.Search(ctx, qs[i%len(qs)])
-				if d := int64(time.Since(t0)); d > maxLat.Load() {
-					maxLat.Store(d)
-				}
+				d := time.Since(t0)
+				mu.Lock()
+				*out = append(*out, sample{t0, d})
+				mu.Unlock()
 			}
-		}()
-		time.Sleep(200 * time.Millisecond) // warm: steady-state latency before the flush
-		steady := time.Duration(maxLat.Swap(0))
+		}
+		wg.Add(2)
+		go run([]string{"zzqxunique"}, &probeS)
+		go run([]string{"kubernetes cluster", "search index ranking", words[10] + " " + words[40]}, &loadS)
+		time.Sleep(3 * time.Second) // steady state before the flush
 
 		t0 := time.Now()
 		if err := eng.Save(path); err != nil {
 			t.Fatal(err)
 		}
-		flush := time.Since(t0)
-		time.Sleep(100 * time.Millisecond)
+		flushEnd := time.Now()
+		flush := flushEnd.Sub(t0)
+		time.Sleep(500 * time.Millisecond)
 		stop.Store(true)
 		wg.Wait()
-		worst := time.Duration(maxLat.Load())
-		t.Logf("delta %6d docs: flush took %8s; longest search stall during it %8s (steady-state max before: %s)",
-			delta, flush.Round(time.Millisecond), worst.Round(time.Millisecond), steady.Round(time.Millisecond))
+
+		stat := func(ss []sample, from, to time.Time) (n int, p50, max time.Duration) {
+			var ds []time.Duration
+			for _, s := range ss {
+				if !s.at.Before(from) && s.at.Before(to) {
+					ds = append(ds, s.dur)
+				}
+			}
+			if len(ds) == 0 {
+				return 0, 0, 0
+			}
+			sort.Slice(ds, func(i, j int) bool { return ds[i] < ds[j] })
+			return len(ds), ds[len(ds)/2], ds[len(ds)-1]
+		}
+		bn, bp50, bmax := stat(probeS, t0.Add(-3*time.Second), t0)
+		dn, dp50, dmax := stat(probeS, t0, flushEnd)
+		ln, lp50, lmax := stat(loadS, t0.Add(-3*time.Second), t0)
+		mn, mp50, mmax := stat(loadS, t0, flushEnd)
+		t.Logf("delta %6d docs: Save took %s", delta, flush.Round(time.Millisecond))
+		t.Logf("    probe (~1ms query) before: n=%d p50=%s max=%s | during Save: n=%d p50=%s max=%s",
+			bn, bp50.Round(10*time.Microsecond), bmax.Round(10*time.Microsecond), dn, dp50.Round(10*time.Microsecond), dmax.Round(10*time.Microsecond))
+		t.Logf("    load  (typical queries) before: n=%d p50=%s max=%s | during Save: n=%d p50=%s max=%s",
+			ln, lp50.Round(time.Millisecond), lmax.Round(time.Millisecond), mn, mp50.Round(time.Millisecond), mmax.Round(time.Millisecond))
 	}
 
 	// Compaction runs outside the engine lock: stall should stay small.

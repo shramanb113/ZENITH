@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/shramanb113/ZENITH/internal/fsx"
 )
 
 // Write Ahead Log
@@ -49,11 +51,12 @@ type WAL struct {
 	mu          sync.Mutex
 	seq         atomic.Uint64
 	closed      atomic.Bool
-	file        *os.File
+	file        *fsx.File
 	buf         *bufio.Writer
 	syncCh      chan struct{}
 	syncDone    chan struct{}
 	byteWritten uint64
+	path        string
 }
 
 type OpType byte
@@ -233,14 +236,17 @@ func (w *WAL) Append(ctx context.Context, r *Record) (uint64, error) {
 
 	w.mu.Lock()
 
+	start := w.byteWritten
 	r.Seq = w.seq.Add(1)
 
 	n, err := w.buf.Write(entry)
 	if err != nil {
+		w.abortAppendLocked(start, 1)
 		w.mu.Unlock()
 		return 0, err
 	}
 	if n != len(entry) {
+		w.abortAppendLocked(start, 1)
 		w.mu.Unlock()
 		return 0, errors.New("partial write")
 	}
@@ -249,10 +255,12 @@ func (w *WAL) Append(ctx context.Context, r *Record) (uint64, error) {
 
 	if w.cfg.SyncMode == SyncAlways {
 		if err := w.buf.Flush(); err != nil {
+			w.abortAppendLocked(start, 1)
 			w.mu.Unlock()
 			return 0, err
 		}
 		if err := w.file.Sync(); err != nil {
+			w.abortAppendLocked(start, 1)
 			w.mu.Unlock()
 			return 0, err
 		}
@@ -261,6 +269,20 @@ func (w *WAL) Append(ctx context.Context, r *Record) (uint64, error) {
 	w.mu.Unlock()
 
 	return r.Seq, nil
+}
+
+// abortAppendLocked undoes a failed append (disk full, I/O error): the record
+// was never acknowledged, so the log is cut back to where it stood — otherwise
+// the half-written bytes stay in the file (and, through bufio's sticky error,
+// every later append would fail too), and a later successful record would sit
+// behind a torn one that recovery stops at. w.mu held.
+func (w *WAL) abortAppendLocked(start uint64, records uint64) {
+	w.seq.Add(^(records - 1))
+	w.byteWritten = start
+	w.buf.Reset(w.file)
+	if err := w.file.Truncate(int64(start)); err == nil {
+		w.file.Seek(int64(start), io.SeekStart)
+	}
 }
 
 // Recover reads all valid records from file, returning:
@@ -275,7 +297,10 @@ func (w *WAL) Append(ctx context.Context, r *Record) (uint64, error) {
 // declared length against the bytes physically remaining in the file, not
 // against a fixed byte ceiling. A record legitimately larger than any fixed
 // ceiling (e.g. a big document) must never be treated as corruption.
-func Recover(file *os.File) ([]Record, int64, error) {
+func Recover(file interface {
+	io.ReadSeeker
+	Stat() (os.FileInfo, error)
+}) ([]Record, int64, error) {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, 0, err
 	}
@@ -368,9 +393,17 @@ func Recover(file *os.File) ([]Record, int64, error) {
 }
 
 func OpenWAL(path string, cfg WALConfig) (*WAL, []Record, error) {
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+	_, statErr := os.Stat(path)
+	created := os.IsNotExist(statErr)
+	file, err := fsx.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return nil, nil, err
+	}
+	if created {
+		// The records fsynced into this file are only as durable as its directory
+		// entry: without this a power cut after the first acknowledged append can
+		// leave no file at all.
+		syncDir(filepath.Dir(path))
 	}
 
 	if cfg.SyncMode == SyncPeriodic || cfg.SyncMode == SyncGroupCommit {
@@ -411,6 +444,7 @@ func OpenWAL(path string, cfg WALConfig) (*WAL, []Record, error) {
 	seq.Store(maxSeq)
 
 	wal := &WAL{
+		path:        path,
 		file:        file,
 		buf:         bufio.NewWriterSize(file, 64*1024),
 		byteWritten: uint64(offset),
@@ -463,6 +497,7 @@ func (w *WAL) AppendBatch(ctx context.Context, records []*Record) ([]uint64, err
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	start := w.byteWritten
 	seqs := make([]uint64, len(records))
 	for i, entry := range entries {
 		records[i].Seq = w.seq.Add(1)
@@ -470,9 +505,11 @@ func (w *WAL) AppendBatch(ctx context.Context, records []*Record) ([]uint64, err
 
 		n, err := w.buf.Write(entry)
 		if err != nil {
+			w.abortAppendLocked(start, uint64(i+1))
 			return nil, err
 		}
 		if n != len(entry) {
+			w.abortAppendLocked(start, uint64(i+1))
 			return nil, errors.New("partial write")
 		}
 		w.byteWritten += uint64(len(entry))
@@ -481,9 +518,11 @@ func (w *WAL) AppendBatch(ctx context.Context, records []*Record) ([]uint64, err
 	// Single fsync for the entire batch.
 	if w.cfg.SyncMode == SyncAlways {
 		if err := w.buf.Flush(); err != nil {
+			w.abortAppendLocked(start, uint64(len(records)))
 			return nil, err
 		}
 		if err := w.file.Sync(); err != nil {
+			w.abortAppendLocked(start, uint64(len(records)))
 			return nil, err
 		}
 	}

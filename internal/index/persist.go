@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/shramanb113/ZENITH/internal/analysis"
+	"github.com/shramanb113/ZENITH/internal/fsx"
 	"github.com/shramanb113/ZENITH/internal/segment"
 )
 
@@ -32,28 +33,93 @@ func (e *Engine) checkEmbedder(savedName string, savedDims int) error {
 // it writes a complete, compacted copy there ("export") and leaves the engine
 // bound to its own file.
 //
-// Save holds the engine's write lock while it writes: searches and writes
-// wait for the flush. Because the delta is bounded by the checkpoint policy,
-// that is short; large merges (Compact) run without the lock.
+// A flush does not stall searches or writes: the delta is frozen in O(1) under
+// the engine lock (see frozen.go), the segment is written and synced with no
+// engine lock held, and the engine lock is taken again only to swap the new
+// segment in and commit the manifest. Only an export to another path (a merged
+// copy) holds the lock for its whole duration.
 func (e *Engine) Save(path string) error {
 	e.saveMu.Lock()
 	defer e.saveMu.Unlock()
-	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	path = pathutil.Clean(path)
 	start := time.Now()
+	e.mu.RLock()
+	bound := e.dbPath
+	e.mu.RUnlock()
 	var err error
-	if e.dbPath == "" || samePath(path, e.dbPath) {
-		err = e.flushLocked(path)
+	if bound == "" || samePath(path, bound) {
+		err = e.flushAll(path)
 	} else {
+		e.mu.Lock()
 		err = e.exportLocked(path)
+		e.mu.Unlock()
 	}
 	if err != nil {
 		return err
 	}
-	slog.Info("Index saved", "path", path, "segments", len(e.segs), "duration", time.Since(start))
+	e.mu.RLock()
+	nsegs := len(e.segs)
+	e.mu.RUnlock()
+	slog.Info("Index saved", "path", path, "segments", nsegs, "duration", time.Since(start))
 	return nil
+}
+
+// BeginCheckpoint freezes the documents added so far so FinishCheckpoint can
+// write them without holding any engine lock. It is O(1) plus a copy of the
+// frozen documents' attributes. froze is true when a new frozen layer was
+// created; pending is true when a frozen layer exists on return — the new one,
+// or one left by an earlier failed flush, which FinishCheckpoint will write.
+//
+// A caller that keeps its own journal (pkg/zenith's WAL) must rotate it in the
+// same critical section as BeginCheckpoint, so that exactly the journalled
+// mutations before the freeze are covered by what FinishCheckpoint writes.
+func (e *Engine) BeginCheckpoint(path string) (froze, pending bool, err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, err := e.bindLocked(pathutil.Clean(path)); err != nil {
+		return false, false, err
+	}
+	if e.frozen != nil {
+		return false, true, nil
+	}
+	if e.memEmptyLocked() {
+		return false, false, nil
+	}
+	e.freezeLocked()
+	return true, true, nil
+}
+
+// FinishCheckpoint writes the frozen layer (if any) as a segment and commits it.
+// Searches and writes proceed meanwhile. It does nothing when nothing is frozen.
+func (e *Engine) FinishCheckpoint(path string) error {
+	e.saveMu.Lock()
+	defer e.saveMu.Unlock()
+	start := time.Now()
+	if err := e.flushFrozen(pathutil.Clean(path)); err != nil {
+		return err
+	}
+	slog.Info("Checkpoint written", "path", path, "duration", time.Since(start))
+	return nil
+}
+
+// bindLocked binds the engine to path on the first flush, refusing to replace a
+// readable old-format index. adopting reports whether this call bound it.
+func (e *Engine) bindLocked(path string) (adopting bool, err error) {
+	if e.dbPath != "" {
+		return false, nil
+	}
+	// Never silently replace a readable old-format index with a new one that
+	// holds different documents: that is the one way an upgrade could lose data.
+	if _, _, _, err := readManifest(path); err != nil {
+		var lfe *LegacyFormatError
+		if errors.As(err, &lfe) && !e.replaceLegacy {
+			return false, fmt.Errorf("index: refusing to overwrite %s: %w", path, err)
+		}
+	}
+	e.dbPath = path
+	e.needGC = true
+	return true, nil
 }
 
 // nextGen allocates a segment file number.
@@ -83,83 +149,126 @@ func (e *Engine) commitManifestLocked() error {
 	return nil
 }
 
-// memEmpty reports whether the delta holds nothing that needs flushing.
+// memEmptyLocked reports whether the active delta holds nothing that needs flushing.
 func (e *Engine) memEmptyLocked() bool {
 	return len(e.idMapping) == 0 && len(e.vectors.GetWordVectors()) == 0 && len(e.pendingDels) == 0
 }
 
-// flushLocked writes the delta as a new segment and commits it. Engine.mu held for writing.
-func (e *Engine) flushLocked(path string) error {
-	adopting := e.dbPath == ""
-	if adopting {
-		// Never silently replace a readable old-format index with a new one that
-		// holds different documents: that is the one way an upgrade could lose data.
-		if _, _, _, err := readManifest(path); err != nil {
-			var lfe *LegacyFormatError
-			if errors.As(err, &lfe) && !e.replaceLegacy {
-				return fmt.Errorf("index: refusing to overwrite %s: %w", path, err)
-			}
-		}
-		e.dbPath = path
+// flushAll makes everything added before the call durable at path. saveMu held.
+func (e *Engine) flushAll(path string) error {
+	e.mu.Lock()
+	adopting, err := e.bindLocked(path)
+	if err != nil {
+		e.mu.Unlock()
+		return err
 	}
-	if e.memEmptyLocked() {
+	if e.frozen == nil && e.memEmptyLocked() {
 		// Nothing new. Still make sure a manifest exists so the path is a valid
 		// (possibly empty) index file.
+		defer e.mu.Unlock()
 		if _, err := os.Stat(path); err != nil || adopting {
 			if err := e.commitManifestLocked(); err != nil {
 				return err
 			}
-			if adopting {
+			if e.needGC {
 				gcSegments(path, e.manifestLocked())
+				e.needGC = false
 			}
 		}
 		return nil
 	}
+	leftover := e.frozen != nil // a layer whose flush failed earlier
+	e.mu.Unlock()
 
+	for pass := 0; pass < 2; pass++ {
+		e.mu.Lock()
+		if e.frozen == nil {
+			if e.memEmptyLocked() {
+				e.mu.Unlock()
+				return nil
+			}
+			e.freezeLocked()
+		}
+		e.mu.Unlock()
+		if err := e.flushFrozen(path); err != nil {
+			return err
+		}
+		if !leftover {
+			break // documents added during the flush belong to the next checkpoint
+		}
+	}
+	return nil
+}
+
+// flushFrozen writes the frozen layer as a new segment and swaps it in. The
+// engine lock is not held while the segment is written, synced or mapped.
+// saveMu held. On failure the frozen layer stays for the next attempt.
+func (e *Engine) flushFrozen(path string) error {
+	e.mu.Lock()
+	f := e.frozen
+	if f == nil {
+		e.mu.Unlock()
+		return nil
+	}
 	gen := e.nextGenLocked()
+	e.mu.Unlock()
+
 	file := segmentFileName(path, gen)
-	if err := e.writeMemSegment(file); err != nil {
-		os.Remove(file)
+	if err := e.writeMem(f, file); err != nil {
+		fsx.Remove(file)
 		return fmt.Errorf("index: write segment: %w", err)
 	}
 	failpoint("flush-after-segment")
 
 	seg, err := segment.Open(file)
 	if err != nil {
-		os.Remove(file)
+		fsx.Remove(file)
 		return fmt.Errorf("index: reopen segment: %w", err)
 	}
-	e.segs = append(e.segs, newSegLayer(seg, file, gen))
+	nl := newSegLayer(seg, file, gen)
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.segs = append(e.segs, nl)
 	if err := e.commitManifestLocked(); err != nil {
 		// The segment is not committed: drop it again so memory and disk agree.
 		e.segs = e.segs[:len(e.segs)-1]
 		seg.Close()
-		os.Remove(file)
+		fsx.Remove(file)
 		return err
 	}
 	failpoint("flush-after-manifest")
-	if adopting {
+	if e.needGC {
 		gcSegments(path, e.manifestLocked())
+		e.needGC = false
 	}
 
-	// The documents now live in the new segment: empty the delta and point
-	// everything that referenced the heap copies at the mapping.
-	var flushedVecIDs []uint64
+	// The frozen documents now live in the new segment. Those deleted or replaced
+	// since the freeze were written into it; mark them dead there.
+	var moved []uint64
 	if e.ann != nil {
-		for id := range e.vectors.GetVectors() {
-			flushedVecIDs = append(flushedVecIDs, id)
+		for id := range f.vectors.GetVectors() {
+			if _, gone := f.dead[id]; !gone {
+				moved = append(moved, id)
+			}
 		}
 	}
-	e.resetMemLocked()
-	e.pendingDels = nil
-	e.rebindANNSomeLocked(flushedVecIDs) // O(delta): earlier segments did not move
-	e.fstDirty = false
+	for id := range f.dead {
+		if row, ok := seg.FindDoc(id); ok {
+			nl.kill(row)
+		}
+	}
+	e.frozen = nil
+	e.rebindANNSomeLocked(moved) // O(delta): earlier segments did not move
 	e.maybeCompactLocked()
+	e.maybeSaveANNAsyncLocked(false)
 	return nil
 }
 
-// resetMemLocked empties the mutable delta (documents already persisted).
+// resetMemLocked empties the mutable delta and drops any frozen layer
+// (Load and legacy import replace the whole state).
 func (e *Engine) resetMemLocked() {
+	e.frozen = nil
 	e.inverted.Lock()
 	e.vectors.Lock()
 	e.phonetics.Lock()
@@ -174,10 +283,12 @@ func (e *Engine) resetMemLocked() {
 	e.bm25.Reset()
 }
 
-// writeMemSegment writes the delta to file as a segment, without touching engine state.
-func (e *Engine) writeMemSegment(file string) error {
-	ids := make([]uint64, 0, len(e.idMapping))
-	for id := range e.idMapping {
+// writeMem writes a memory layer to file as a segment, without touching engine
+// state. The layer must not be mutated while this runs: a frozen layer is
+// immutable by construction, the active delta is only written under Engine.mu.
+func (e *Engine) writeMem(m *memLayer, file string) error {
+	ids := make([]uint64, 0, len(m.idMapping))
+	for id := range m.idMapping {
 		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
@@ -186,8 +297,8 @@ func (e *Engine) writeMemSegment(file string) error {
 		rowOf[id] = r
 	}
 
-	lengths, termFreqs, _, _, _ := e.bm25.State()
-	vecs := e.vectors.GetVectors()
+	lengths, termFreqs, _, _, _ := m.bm25.State()
+	vecs := m.vectors.GetVectors()
 
 	_, dims := e.embedderIdentity()
 	if dims == 0 { // lexical-only engine: dimension is irrelevant but must be consistent
@@ -201,8 +312,8 @@ func (e *Engine) writeMemSegment(file string) error {
 	w.WriteDocs(len(ids), func(i int) segment.DocIn {
 		id := ids[i]
 		d := segment.DocIn{
-			ID: id, Orig: e.idMapping[id], Text: e.docText[id],
-			Attrs: encodeAttrs(e.attrs[id]), Len: lengths[id],
+			ID: id, Orig: m.idMapping[id], Text: m.docText[id],
+			Attrs: encodeAttrs(m.attrs[id]), Len: lengths[id],
 		}
 		if ent, ok := vecs[id]; ok && len(ent.Vector) == dims {
 			d.Vec = ent.Vector
@@ -271,8 +382,8 @@ func (e *Engine) writeMemSegment(file string) error {
 			return segment.KeyIn{Key: k, Docs: rows}, true
 		}
 	}
-	w.WriteFrags(keyIter(e.inverted.GetData()))
-	w.WritePhon(keyIter(e.phonetics.GetData()))
+	w.WriteFrags(keyIter(m.inverted.GetData()))
+	w.WritePhon(keyIter(m.phonetics.GetData()))
 
 	w.WriteForward(len(ids), func(i int) []segment.TermFreq {
 		tf := termFreqs[ids[i]]
@@ -284,19 +395,19 @@ func (e *Engine) writeMemSegment(file string) error {
 		return out
 	})
 
-	words := make([]string, 0, len(e.vectors.GetWordVectors()))
-	for word, ent := range e.vectors.GetWordVectors() {
+	words := make([]string, 0, len(m.vectors.GetWordVectors()))
+	for word, ent := range m.vectors.GetWordVectors() {
 		if len(ent.Vector) == dims {
 			words = append(words, word)
 		}
 	}
 	sort.Strings(words)
 	w.WriteWords(len(words), func(i int) (string, []uint16) {
-		return words[i], e.vectors.GetWordVectors()[words[i]].Vector
+		return words[i], m.vectors.GetWordVectors()[words[i]].Vector
 	})
 
-	dels := make([]uint64, 0, len(e.pendingDels))
-	for id := range e.pendingDels {
+	dels := make([]uint64, 0, len(m.dels))
+	for id := range m.dels {
 		dels = append(dels, id)
 	}
 	sort.Slice(dels, func(i, j int) bool { return dels[i] < dels[j] })
@@ -320,6 +431,8 @@ func (e *Engine) writeMemSegment(file string) error {
 func (e *Engine) Load(path string) error {
 	e.compactMu.Lock() // a running merge reads the mapped segments Load would unmap
 	defer e.compactMu.Unlock()
+	e.saveMu.Lock() // and so does a running flush
+	defer e.saveMu.Unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.loadLocked(pathutil.Clean(path))
@@ -367,6 +480,7 @@ func (e *Engine) loadLocked(path string) error {
 	e.attrs = make(map[uint64]Attrs)
 	e.segs = layers
 	e.dbPath = path
+	e.needGC = false
 	e.nextGen = m.NextGen
 	e.manifestGen = m.Generation
 	e.pendingDels = nil
@@ -398,6 +512,8 @@ func (e *Engine) loadLocked(path string) error {
 			}
 		}
 	}
+
+	e.attrIdx = rebuildAttrIndex(e.attrs)
 
 	gcSegments(path, m)
 	e.rebuildANNAfterLoadLocked()

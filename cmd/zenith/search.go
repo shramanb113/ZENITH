@@ -11,6 +11,8 @@ import (
 
 var searchFlags struct {
 	maxResults int
+	where      []string
+	filter     string
 }
 
 var searchCmd = &cobra.Command{
@@ -30,6 +32,11 @@ The query goes through the full pipeline:
 		setupLogger()
 		query := strings.Join(args, " ")
 
+		filter, err := buildFilter(searchFlags.where, searchFlags.filter)
+		if err != nil {
+			return err
+		}
+
 		printHeader("search", fmt.Sprintf("%q", query))
 
 		engine, alog, teardown, err := buildEngine(true)
@@ -40,7 +47,7 @@ The query goes through the full pipeline:
 		_ = teardown
 
 		start := time.Now()
-		results, err := engine.Search(context.Background(), query)
+		results, err := engine.SearchFiltered(context.Background(), query, filter)
 		if err != nil {
 			return fmt.Errorf("search: %w", err)
 		}
@@ -76,4 +83,8 @@ The query goes through the full pipeline:
 func init() {
 	addEngineFlags(searchCmd)
 	searchCmd.Flags().IntVarP(&searchFlags.maxResults, "max", "n", 10, "Maximum results to display")
+	searchCmd.Flags().StringArrayVar(&searchFlags.where, "where", nil,
+		"Only documents whose attribute matches: key=value, key!=value, key>=n, key<=n (repeatable; all must hold)")
+	searchCmd.Flags().StringVar(&searchFlags.filter, "filter", "",
+		`Only documents matching a JSON filter, e.g. '{"op":"or","args":[{"op":"eq","field":"lang","value":"en"},{"op":"exists","field":"pinned"}]}'`)
 }

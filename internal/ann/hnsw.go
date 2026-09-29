@@ -93,6 +93,11 @@ type Index struct {
 	live     int
 	entry    int32
 	maxLevel int
+
+	// Only between Read and Finish: the tag recorded for each loaded node and
+	// whether a live vector has been bound to it.
+	tags  []uint64
+	bound []bool
 }
 
 // New creates an empty index. m is the max links per node above layer 0

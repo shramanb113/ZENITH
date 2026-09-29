@@ -125,6 +125,9 @@ func (e *Engine) hasDoc(id uint64) bool {
 	if _, ok := e.idMapping[id]; ok {
 		return true
 	}
+	if e.frozen != nil && e.frozen.live(id) {
+		return true
+	}
 	_, _, ok := e.locate(id)
 	return ok
 }
@@ -133,6 +136,9 @@ func (e *Engine) hasDoc(id uint64) bool {
 func (e *Engine) origID(id uint64) string {
 	if s, ok := e.idMapping[id]; ok {
 		return s
+	}
+	if e.frozen != nil && e.frozen.live(id) {
+		return e.frozen.idMapping[id]
 	}
 	if li, row, ok := e.locate(id); ok {
 		return e.segs[li].seg.Orig(row)
@@ -145,6 +151,9 @@ func (e *Engine) textOf(id uint64) (string, bool) {
 	if t, ok := e.docText[id]; ok {
 		return t, true
 	}
+	if e.frozen != nil && e.frozen.live(id) {
+		return e.frozen.docText[id], true
+	}
 	if li, row, ok := e.locate(id); ok {
 		return e.segs[li].seg.Text(row), true
 	}
@@ -154,6 +163,9 @@ func (e *Engine) textOf(id uint64) (string, bool) {
 // liveSegDocs is the number of live documents held in segments.
 func (e *Engine) liveSegDocs() int {
 	n := 0
+	if e.frozen != nil {
+		n += e.frozen.liveDocs()
+	}
 	for _, l := range e.segs {
 		n += l.liveDocs()
 	}
@@ -163,6 +175,20 @@ func (e *Engine) liveSegDocs() int {
 // killBase marks the live segment copy of id (if any) dead and reports whether
 // there was one. The ID is remembered so the next flush persists the deletion.
 func (e *Engine) killBase(id uint64) bool {
+	if f := e.frozen; f != nil && f.live(id) {
+		// The document is in the layer being flushed: it stays in that layer's
+		// segment, but is dead from now on and its deletion is recorded for the
+		// next flush.
+		gone := f.kill(id)
+		for _, t := range gone {
+			if e.termRefs(t) == 0 {
+				e.fstDirty = true
+				break
+			}
+		}
+		e.notePendingDel(id)
+		return true
+	}
 	li, row, ok := e.locate(id)
 	if !ok {
 		return false
@@ -178,19 +204,28 @@ func (e *Engine) killBase(id uint64) bool {
 			break
 		}
 	}
+	e.notePendingDel(id)
+	return true
+}
+
+// notePendingDel records a deletion of a document that is no longer in the
+// mutable delta, for the next flush to persist, and drops its derived state.
+func (e *Engine) notePendingDel(id uint64) {
 	if e.pendingDels == nil {
 		e.pendingDels = make(map[uint64]struct{})
 	}
 	e.pendingDels[id] = struct{}{}
-	delete(e.attrs, id)
+	e.dropAttrsLocked(id)
 	e.annDeleteLocked(id)
-	return true
 }
 
 // termRefs is the live occurrence count of term across the mutable delta and
 // every segment (0 = the term is not in the index).
 func (e *Engine) termRefs(term string) int {
 	n := e.inverted.GetGlobalSeen()[term]
+	if f := e.frozen; f != nil {
+		n += f.inverted.GetGlobalSeen()[term] - f.deadCF[term]
+	}
 	for _, l := range e.segs {
 		if t := l.seg.FindTerm(term); t >= 0 {
 			n += l.seg.TermCF(t) - l.deadTermCF[t]
@@ -204,6 +239,13 @@ func (e *Engine) termRefs(term string) int {
 func (e *Engine) eachFragDoc(frag string, fn func(id uint64)) {
 	for _, id := range e.inverted.GetData()[frag] {
 		fn(id)
+	}
+	if f := e.frozen; f != nil {
+		for _, id := range f.inverted.GetData()[frag] {
+			if _, gone := f.dead[id]; !gone {
+				fn(id)
+			}
+		}
 	}
 	for _, l := range e.segs {
 		if fi := l.seg.FindFrag(frag); fi >= 0 {
@@ -222,6 +264,13 @@ func (e *Engine) eachPhonDoc(code string, fn func(id uint64)) {
 	for _, id := range e.phonetics.GetData()[code] {
 		fn(id)
 	}
+	if f := e.frozen; f != nil {
+		for _, id := range f.phonetics.GetData()[code] {
+			if _, gone := f.dead[id]; !gone {
+				fn(id)
+			}
+		}
+	}
 	for _, l := range e.segs {
 		if pi := l.seg.FindPhon(code); pi >= 0 {
 			l.seg.PhonPostings(pi, func(row int) bool {
@@ -239,6 +288,13 @@ func (e *Engine) eachVector(fn func(id uint64, v []uint16)) {
 	for id, ent := range e.vectors.GetVectors() {
 		fn(id, ent.Vector)
 	}
+	if f := e.frozen; f != nil {
+		for id, ent := range f.vectors.GetVectors() {
+			if _, gone := f.dead[id]; !gone {
+				fn(id, ent.Vector)
+			}
+		}
+	}
 	for _, l := range e.segs {
 		for row, n := 0, l.seg.NumDocs(); row < n; row++ {
 			if l.isDead(row) {
@@ -251,9 +307,44 @@ func (e *Engine) eachVector(fn func(id uint64, v []uint16)) {
 	}
 }
 
+// eachVectorGen is eachVector plus the generation of the segment holding the
+// vector (0 for the delta and the frozen layer, which have no generation): the
+// tag the ANN sidecar uses to tell whether a node's links were built for this
+// exact vector.
+func (e *Engine) eachVectorGen(fn func(id uint64, v []uint16, gen uint64)) {
+	for id, ent := range e.vectors.GetVectors() {
+		fn(id, ent.Vector, 0)
+	}
+	if f := e.frozen; f != nil {
+		for id, ent := range f.vectors.GetVectors() {
+			if _, gone := f.dead[id]; !gone {
+				fn(id, ent.Vector, 0)
+			}
+		}
+	}
+	for _, l := range e.segs {
+		for row, n := 0, l.seg.NumDocs(); row < n; row++ {
+			if l.isDead(row) {
+				continue
+			}
+			if v := l.seg.Vec(row); v != nil {
+				fn(l.seg.DocID(row), v, l.gen)
+			}
+		}
+	}
+}
+
 // vectorCount is the number of live documents that have a vector.
 func (e *Engine) vectorCount() int {
 	n := len(e.vectors.GetVectors())
+	if f := e.frozen; f != nil {
+		n += len(f.vectors.GetVectors())
+		for id := range f.dead {
+			if _, ok := f.vectors.GetVectors()[id]; ok {
+				n--
+			}
+		}
+	}
 	for _, l := range e.segs {
 		if l.nDead == 0 {
 			n += l.seg.NumVecs()
@@ -273,6 +364,9 @@ func (e *Engine) vecOf(id uint64) []uint16 {
 	if ent, ok := e.vectors.GetVectors()[id]; ok {
 		return ent.Vector
 	}
+	if e.frozen != nil && e.frozen.live(id) {
+		return e.frozen.vectors.GetVectors()[id].Vector
+	}
 	if li, row, ok := e.locate(id); ok {
 		return e.segs[li].seg.Vec(row)
 	}
@@ -282,6 +376,9 @@ func (e *Engine) vecOf(id uint64) []uint16 {
 // hasWordVector reports whether a word vector exists in the delta or any segment.
 func (e *Engine) hasWordVector(word string) bool {
 	if e.vectors.HasWordVector(word) {
+		return true
+	}
+	if e.frozen != nil && e.frozen.vectors.HasWordVector(word) {
 		return true
 	}
 	for _, l := range e.segs {
@@ -297,6 +394,11 @@ func (e *Engine) wordVec(word string) ([]uint16, bool) {
 	if ent, ok := e.vectors.GetWordVectors()[word]; ok {
 		return ent.Vector, true
 	}
+	if e.frozen != nil {
+		if ent, ok := e.frozen.vectors.GetWordVectors()[word]; ok {
+			return ent.Vector, true
+		}
+	}
 	for _, l := range e.segs {
 		if i := l.seg.FindWord(word); i >= 0 {
 			return l.seg.WordVec(i), true
@@ -310,6 +412,11 @@ func (e *Engine) eachWordVector(fn func(word string, v []uint16)) {
 	for w, ent := range e.vectors.GetWordVectors() {
 		fn(w, ent.Vector)
 	}
+	if e.frozen != nil {
+		for w, ent := range e.frozen.vectors.GetWordVectors() {
+			fn(w, ent.Vector)
+		}
+	}
 	for _, l := range e.segs {
 		for i, n := 0, l.seg.NumWords(); i < n; i++ {
 			fn(l.seg.Word(i), l.seg.WordVec(i))
@@ -319,7 +426,7 @@ func (e *Engine) eachWordVector(fn func(word string, v []uint16)) {
 
 // liveTerms returns the sorted set of terms with at least one live occurrence.
 func (e *Engine) liveTerms() []string {
-	if len(e.segs) == 0 {
+	if len(e.segs) == 0 && e.frozen == nil {
 		glob := e.inverted.GetGlobalSeen()
 		terms := make([]string, 0, len(glob))
 		for t := range glob {
@@ -330,6 +437,11 @@ func (e *Engine) liveTerms() []string {
 	refs := make(map[string]int, len(e.inverted.GetGlobalSeen()))
 	for t, n := range e.inverted.GetGlobalSeen() {
 		refs[t] = n
+	}
+	if f := e.frozen; f != nil {
+		for t, n := range f.inverted.GetGlobalSeen() {
+			refs[t] += n - f.deadCF[t]
+		}
 	}
 	for _, l := range e.segs {
 		for t, n := 0, l.seg.NumTerms(); t < n; t++ {
@@ -358,6 +470,18 @@ func (e *Engine) eachDocTerms(fn func(id uint64, has func(term string) bool)) {
 		}
 		fn(id, func(t string) bool { _, ok := set[t]; return ok })
 	}
+	if f := e.frozen; f != nil {
+		for id, toks := range f.inverted.GetDocTokens() {
+			if _, gone := f.dead[id]; gone {
+				continue
+			}
+			set := make(map[string]struct{}, len(toks))
+			for _, t := range toks {
+				set[t] = struct{}{}
+			}
+			fn(id, func(t string) bool { _, ok := set[t]; return ok })
+		}
+	}
 	for _, l := range e.segs {
 		for row, n := 0, l.seg.NumDocs(); row < n; row++ {
 			if l.isDead(row) {
@@ -376,10 +500,20 @@ func (e *Engine) eachDocTerms(fn func(id uint64, has func(term string) bool)) {
 func (e *Engine) sampleVectorIDs(n int) []uint64 {
 	ids := make([]uint64, 0, n)
 	for id := range e.vectors.GetVectors() {
-		if len(ids) >= n/2 {
+		if len(ids) >= n/4 {
 			break
 		}
 		ids = append(ids, id)
+	}
+	if f := e.frozen; f != nil {
+		for id := range f.vectors.GetVectors() {
+			if len(ids) >= n/2 {
+				break
+			}
+			if _, gone := f.dead[id]; !gone {
+				ids = append(ids, id)
+			}
+		}
 	}
 	for _, l := range e.segs {
 		rows := l.seg.NumDocs()
@@ -403,6 +537,11 @@ func (e *Engine) sampleVectorIDs(n int) []uint64 {
 type segBacking struct{ e *Engine }
 
 func (b segBacking) Totals() (docs, totalLen int) {
+	if f := b.e.frozen; f != nil {
+		d, l := f.bm25.LocalTotals()
+		docs += d - len(f.dead)
+		totalLen += l - f.deadLen
+	}
 	for _, l := range b.e.segs {
 		docs += l.liveDocs()
 		totalLen += l.totalLen - l.deadLen
@@ -412,6 +551,9 @@ func (b segBacking) Totals() (docs, totalLen int) {
 
 func (b segBacking) DocFreq(term string) int {
 	df := 0
+	if f := b.e.frozen; f != nil {
+		df += f.bm25.LocalDocFreq(term) - f.deadDF[term]
+	}
 	for _, l := range b.e.segs {
 		if t := l.seg.FindTerm(term); t >= 0 {
 			df += l.seg.TermDF(t) - l.deadTermDF[t]
@@ -421,6 +563,13 @@ func (b segBacking) DocFreq(term string) int {
 }
 
 func (b segBacking) EachPosting(term string, fn func(docID uint64, tf, docLen int)) {
+	if f := b.e.frozen; f != nil {
+		f.bm25.EachLocalPosting(term, func(id uint64, tf, dl int) {
+			if _, gone := f.dead[id]; !gone {
+				fn(id, tf, dl)
+			}
+		})
+	}
 	for _, l := range b.e.segs {
 		t := l.seg.FindTerm(term)
 		if t < 0 {
@@ -436,6 +585,10 @@ func (b segBacking) EachPosting(term string, fn func(docID uint64, tf, docLen in
 }
 
 func (b segBacking) TermFreq(docID uint64, term string) (tf, docLen int, ok bool) {
+	if f := b.e.frozen; f != nil && f.live(docID) {
+		m, dl, _ := f.bm25.LocalTermFreqs(docID)
+		return m[term], dl, true
+	}
 	li, row, found := b.e.locate(docID)
 	if !found {
 		return 0, 0, false
@@ -459,6 +612,9 @@ func (b segBacking) TermFreq(docID uint64, term string) (tf, docLen int, ok bool
 // generate candidates from, where an upper bound is what is wanted.
 func (e *Engine) fragCount(frag string) int {
 	n := len(e.inverted.GetData()[frag])
+	if f := e.frozen; f != nil {
+		n += len(f.inverted.GetData()[frag])
+	}
 	for _, l := range e.segs {
 		if fi := l.seg.FindFrag(frag); fi >= 0 {
 			n += l.seg.FragCount(fi)

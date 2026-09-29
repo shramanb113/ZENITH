@@ -15,7 +15,12 @@ import (
 type Indexer struct {
 	engine *index.Engine
 	logger *activitylog.Logger
+	attrs  index.Attrs
 }
+
+// SetAttrs attaches metadata to every image indexed from now on (used by
+// `zenith index --attr`); nil clears it.
+func (idx *Indexer) SetAttrs(a index.Attrs) { idx.attrs = a }
 
 // NewIndexer creates an Indexer. An optional logger may be supplied.
 func NewIndexer(e *index.Engine, logger ...*activitylog.Logger) *Indexer {
@@ -35,7 +40,13 @@ func (idx *Indexer) Index(ctx context.Context, docID, filePath string) (int, err
 	if text == "" {
 		return 0, nil
 	}
-	if err := idx.engine.Add(ctx, docID, text); err != nil {
+	var err error
+	if len(idx.attrs) > 0 {
+		err = idx.engine.AddWithVectorAttrs(ctx, docID, text, idx.engine.EmbedText(ctx, text), idx.attrs)
+	} else {
+		err = idx.engine.Add(ctx, docID, text)
+	}
+	if err != nil {
 		return 0, fmt.Errorf("image: index %s: %w", docID, err)
 	}
 	idx.logger.Log("IMAGE", fmt.Sprintf("%s → filename indexed", docID))

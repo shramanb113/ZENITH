@@ -12,9 +12,52 @@ service SearchService {
     rpc DeleteDocument(DeleteDocumentRequest) returns (DeleteDocumentResponse);
 }
 
+// AttrValue is one typed metadata value: a string, a number or a bool.
+message AttrValue {
+    oneof kind {
+        string string_value = 1;
+        double number_value = 2;
+        bool   bool_value   = 3;
+    }
+}
+
 message IndexRequest {
     string id = 1;
     string data = 2;
+    // attrs is metadata stored with the document; SearchRequest.filter can
+    // restrict a search to documents whose attrs match.
+    map<string, AttrValue> attrs = 3;
+}
+
+// FilterNode is a filter expression: a condition, or and/or/not of others.
+// The operators mean the same as Eq/In/Range/Exists/And/Or/Not in the Go
+// package: a document without the field never matches a condition on it, a
+// type mismatch never matches, and NOT matches documents that lack the field.
+message FilterNode {
+    oneof node {
+        FilterCondition condition = 1;
+        FilterGroup     and       = 2;
+        FilterGroup     or        = 3;
+        FilterNode      not       = 4;
+    }
+}
+
+message FilterGroup {
+    repeated FilterNode nodes = 1;
+}
+
+message FilterCondition {
+    enum Op {
+        EQ     = 0; // values[0] equals the field
+        IN     = 1; // the field equals any of values
+        RANGE  = 2; // numeric field within [min, max]; either bound may be omitted
+        EXISTS = 3; // the field is present
+    }
+    string field = 1;
+    Op op = 2;
+    repeated AttrValue values = 3;
+    optional double min = 4;
+    optional double max = 5;
 }
 
 message IndexResponse {
@@ -28,6 +71,8 @@ message SearchRequest{
     int32 limit = 2;
     // offset skips this many results from the top of the ranked list, for pagination.
     int32 offset = 3;
+    // filter, when set, restricts the search to documents whose attrs match.
+    FilterNode filter = 4;
 }
 
 message SearchResult {
@@ -35,6 +80,8 @@ message SearchResult {
     double score = 2;
     map<string, string> fields = 3;
     string original_text = 4;
+    // attrs are the document's metadata (empty if it has none).
+    map<string, AttrValue> attrs = 5;
 }
 
 message SearchResponse {

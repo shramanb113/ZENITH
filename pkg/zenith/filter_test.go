@@ -193,13 +193,33 @@ func TestFilter_InvalidAttrs(t *testing.T) {
 	}
 }
 
-func TestFilter_CannotCombineWithExplain(t *testing.T) {
+// Explain used to reject WithFilter; now the two combine: only documents that
+// satisfy the filter are explained, with their signals.
+func TestFilter_CombinesWithExplain(t *testing.T) {
 	db := openMem(t)
-	mustAdd(t, db, "d", "text here")
-	_, err := db.Search(bgCtx(), "text", zenith.Explain(), zenith.WithFilter(zenith.Exists("k")))
-	if !errors.Is(err, zenith.ErrInvalidOption) {
-		t.Fatalf("err = %v, want ErrInvalidOption", err)
+	seedFilterDocs(t, db)
+	res, err := db.Search(bgCtx(), "kubernetes networking", zenith.Explain(), zenith.Limit(100),
+		zenith.WithFilter(zenith.And(zenith.Eq("lang", "en"), zenith.Eq("public", true))))
+	if err != nil {
+		t.Fatal(err)
 	}
+	sameIDs(t, res, "en2020")
+	if res[0].Signals == nil || len(res[0].Signals.Terms) == 0 {
+		t.Fatalf("explained result has no signals: %+v", res[0])
+	}
+	// Without a filter, every document is explained.
+	all, err := db.Search(bgCtx(), "kubernetes networking", zenith.Explain(), zenith.Limit(100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameIDs(t, all, "en2020", "en2024", "fr2022", "noattrs")
+	// Not() matches the document that has no attributes at all.
+	res, err = db.Search(bgCtx(), "kubernetes networking", zenith.Explain(), zenith.Limit(100),
+		zenith.WithFilter(zenith.Not(zenith.Exists("lang"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameIDs(t, res, "noattrs")
 }
 
 func TestFilter_SurvivesCleanReopen(t *testing.T) {

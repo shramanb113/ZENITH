@@ -13,12 +13,43 @@ An index named `zenith.db` is a small **manifest** plus one or more immutable
 zenith.db                 manifest: which segments make up the index (a few hundred bytes)
 zenith.db.seg-000001      immutable segment (documents, postings, vectors …)
 zenith.db.seg-000004      a later flush; segment numbers only grow
+zenith.db.ann             the HNSW graph, so opening a large index does not rebuild it (optional)
 zenith.db.wal             write-ahead journal of changes not yet flushed (pkg/zenith / server)
+zenith.db.wal.old-000007  a journal a checkpoint has cut but not yet made redundant (transient)
 zenith.db.lock            single-writer lock (pkg/zenith)
 ```
 
-Everything except the `.wal` and `.lock` is described here; delete nothing by
-hand — `zenith compact` and open-time cleanup manage the files.
+Everything except the `.wal`, `.wal.old-*` and `.lock` is described here; delete
+nothing by hand — `zenith compact` and open-time cleanup manage the files.
+
+### Graph file (`zenith.db.ann`)
+
+A *hint*, never the truth: the segments are authoritative, and a missing, damaged,
+foreign or stale graph file only costs a rebuild at open — it can never change an
+answer. It holds the HNSW links (not the vectors, which already live in the
+segments): a small header (graph parameters, and an identity string naming the
+embedder and dimension it was built for), then per node its document ID, the
+generation of the segment its vector lived in when the file was written, and its
+links per layer; a CRC-32C closes the file. At open every live vector is bound to
+its node by document ID and generation: a match reuses the node's links, a
+document added or replaced since (different or missing generation) is inserted
+into the graph afterwards, and a node no live vector claims is dropped. If more
+than half of the documents would need inserting, the file is ignored and the graph
+is rebuilt. The file is rewritten after a compaction, on a clean close, and in the
+background once 50,000 graph changes have accumulated since the last write — never
+on every flush, whose cost stays proportional to the delta.
+
+### Journal (`zenith.db.wal`, `zenith.db.wal.old-*`)
+
+Every add and delete is appended to the journal and `fsync`ed before it is
+acknowledged. A checkpoint (a flush of the in-memory delta to a new segment) cuts
+the journal at one instant: everything acknowledged so far becomes the archive
+`zenith.db.wal.old-NNNNNN` and a fresh journal takes over, while the delta is
+frozen and written as a segment *without* blocking searches or writes. Only after
+the manifest commit are the archives deleted. Recovery replays archives oldest
+first, then the live journal, on top of the last committed manifest; replaying a
+document that already is in a segment is harmless (adding is idempotent, and a
+later delete in the journal still wins).
 
 ### Manifest (format version 6)
 
@@ -75,11 +106,34 @@ is no state in between. Deletions are recorded in the *next* segment (a
 `zenith doctor` re-verifies every section checksum; a torn or bit-rotted segment
 is reported instead of being searched.
 
-This is tested, not just argued: `internal/index/crash_test.go` kills a child
-process at named points inside flush and compaction (before and after the
-manifest commit) and, separately, hard-kills a busy writer at random moments, then
-checks that the index opens, every acknowledged document is present with its exact
-text, and no acknowledged deletion reappears.
+This is tested, not just argued:
+
+- `internal/index/crash_test.go` kills a child process at named points inside
+  flush and compaction (before and after the manifest commit) and, separately,
+  hard-kills a busy writer at random moments (`kill -9`), then checks that the
+  index opens, every acknowledged document is present with its exact text, and no
+  acknowledged deletion reappears.
+- `kill -9` cannot lose data the operating system already holds, a power failure
+  can. `internal/fsx` routes every write, fsync, rename, remove and directory
+  fsync of the segment writer, the manifest and the journal through hooks that
+  record them; `internal/index/powerloss_test.go` and `pkg/zenith/powerloss_test.go`
+  then rebuild the directory as it could look after a power cut **after every
+  recorded operation** — with only fsynced data and fsynced directory entries
+  (nothing else survives), with everything surviving, and with random torn subsets
+  (unsynced pages persisting independently, in any order, 4 KiB at a time; directory
+  operations persisting as a prefix; renames atomic) — and require the index to
+  open, pass checksum verification, and hold exactly the state after the last
+  acknowledged operation or the one in flight. Removing the segment fsync or the
+  manifest fsync makes these tests fail. They found one real bug: a journal file's
+  directory entry was never fsynced when it was first created, so a power cut right
+  after the first acknowledged write could lose the whole journal.
+- A full disk is injected at byte granularity (`fsx.DiskFull`): a failed flush,
+  compaction or journal append returns the out-of-space error, leaves no partial
+  file behind, never acknowledges the write, keeps the previous on-disk state
+  intact and the engine serving, and succeeds once space returns.
+
+What is not modelled: hardware that lies about `fsync`, torn writes below 4 KiB
+(sector-atomicity is assumed), and filesystems that reorder directory operations.
 
 ## Compatibility policy
 

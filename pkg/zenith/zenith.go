@@ -62,6 +62,14 @@ type DB struct {
 	opts     *options
 	docWAL   *wal.WAL      // nil for :memory:
 	ckptStop chan struct{} // closed to stop background checkpoint goroutine; nil if not running
+
+	// Checkpointing (checkpoint.go).
+	walPath     string
+	walSeq      int            // highest WAL archive number used; guarded by mu
+	walMu       sync.Mutex     // guards walArchives
+	walArchives []string       // journal archives not yet deleted, oldest first
+	ckptBusy    atomic.Bool    // a checkpoint is in flight
+	ckptWG      sync.WaitGroup // background checkpoint goroutines
 }
 
 // Open opens or creates a ZENITH index at path.
@@ -119,13 +127,23 @@ func Open(path string, opt ...Option) (*DB, error) {
 
 	// Open (or create) the WAL journal alongside the gob file.
 	walPath := absPath + ".wal"
+	db.walPath = walPath
+	// A crash mid-checkpoint leaves archived journals beside the live one; they
+	// hold the oldest records, so they replay first.
+	archives, archivedRecords, archiveSeq, err := walOpenArchives(walPath)
+	if err != nil {
+		fl.release()
+		return nil, err
+	}
+	db.walArchives, db.walSeq = archives, archiveSeq
 	walCfg := wal.WALConfig{SyncMode: wal.SyncAlways, Dir: filepath.Dir(absPath)}
-	docWAL, walRecords, err := wal.OpenWAL(walPath, walCfg)
+	docWAL, liveRecords, err := wal.OpenWAL(walPath, walCfg)
 	if err != nil {
 		fl.release()
 		return nil, fmt.Errorf("zenith: open wal: %w", err)
 	}
 	db.docWAL = docWAL
+	walRecords := append(archivedRecords, liveRecords...)
 
 	// Load the gob snapshot. Corruption-resistant: if the gob is unreadable
 	// (but not a version mismatch) and the WAL has records, rebuild from WAL
@@ -374,21 +392,18 @@ func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) (r
 	}
 
 	if so.explain {
-		if so.filter != nil {
-			return nil, fmt.Errorf("%w: WithFilter cannot be combined with Explain", ErrInvalidOption)
-		}
-		terms, hits, err := db.engine.Explain(ctx, query)
+		terms, hits, err := db.engine.ExplainFiltered(ctx, query, so.indexFilter())
 		if err != nil {
 			return nil, fmt.Errorf("zenith: %w", err)
 		}
-		raw, err := db.engine.Search(ctx, query)
+		raw, err := db.engine.SearchFiltered(ctx, query, so.indexFilter())
 		if err != nil {
 			return nil, fmt.Errorf("zenith: %w", err)
 		}
 		return buildExplained(terms, hits, raw, so.limit), nil
 	}
 
-	raw, err := db.engine.SearchWithFilter(ctx, query, so.predicate())
+	raw, err := db.engine.SearchFiltered(ctx, query, so.indexFilter())
 	if err != nil {
 		return nil, fmt.Errorf("zenith: %w", err)
 	}
@@ -552,40 +567,25 @@ func decodeWALValue(raw []byte) (text string, vec []float32, attrs index.Attrs) 
 // this many bytes, the next Add/AddBatch/Delete triggers a synchronous
 // checkpoint. 64MB matches the MemTableMaxSize convention used elsewhere in
 // this codebase (see CLAUDE.md) rather than measured WAL-replay cost.
-const defaultWALCheckpointThreshold uint64 = 64 * 1024 * 1024
+var defaultWALCheckpointThreshold uint64 = 64 * 1024 * 1024 // a var so tests can shrink it
 
-// checkpointIfWALTooLarge triggers a synchronous checkpoint once the WAL
-// exceeds defaultWALCheckpointThreshold. Must be called with db.mu held
-// (write lock) — same requirement as checkpoint. A failure here is logged,
-// not returned: the document that triggered the check is already safely
-// durable in the (still-growing) WAL, so a bookkeeping checkpoint failing
-// must not fail the caller's Add/AddBatch/Delete.
+// checkpointIfWALTooLarge starts a checkpoint once the WAL exceeds
+// defaultWALCheckpointThreshold. Must be called with db.mu held (write lock).
+// The checkpoint runs in the background (checkpoint.go): only its O(1) freeze
+// happens here, so the Add that crossed the threshold — and every search — is
+// not held up while the segment is written. A failure is logged, not returned:
+// the document that triggered the check is already safely durable in the
+// (still-growing) WAL, so a bookkeeping checkpoint failing must not fail the
+// caller's Add/AddBatch/Delete.
 func (db *DB) checkpointIfWALTooLarge() {
 	if db.docWAL == nil || db.docWAL.Size() < defaultWALCheckpointThreshold {
 		return
 	}
-	if err := db.checkpoint(); err != nil {
-		slog.Warn("zenith: size-triggered checkpoint failed", "error", err)
-	}
-}
-
-// checkpoint saves the gob snapshot and resets the WAL.
-// MUST be called with db.mu held (write lock).
-func (db *DB) checkpoint() error {
-	if db.path == "" || db.docWAL == nil {
-		return nil
-	}
-	if err := db.engine.Save(db.path); err != nil {
-		return fmt.Errorf("zenith: %w", err)
-	}
-	if err := db.docWAL.Reset(); err != nil {
-		slog.Warn("zenith: WAL reset failed after checkpoint", "error", err)
-	}
-	return nil
+	db.startCheckpointAsyncLocked()
 }
 
 // checkpointLoop runs as a background goroutine when WithCheckpointInterval is set.
-// It periodically saves the gob and resets the WAL, bounding WAL growth.
+// It periodically checkpoints, bounding WAL growth.
 func (db *DB) checkpointLoop(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -596,9 +596,7 @@ func (db *DB) checkpointLoop(interval time.Duration) {
 		case <-ticker.C:
 			db.mu.Lock()
 			if !db.closed.Load() {
-				if err := db.checkpoint(); err != nil {
-					slog.Warn("zenith: background checkpoint failed", "error", err)
-				}
+				db.startCheckpointAsyncLocked()
 			}
 			db.mu.Unlock()
 		}
@@ -631,8 +629,12 @@ func (db *DB) Close() (err error) {
 
 		db.closed.Store(true)
 
+		// A background checkpoint needs neither db.mu nor the WAL handle, so it
+		// can be waited for here.
+		db.ckptWG.Wait()
+
 		if db.path != "" {
-			if saveErr := db.checkpoint(); saveErr != nil {
+			if saveErr := db.checkpointSyncLocked(); saveErr != nil {
 				err = saveErr
 			}
 		}
@@ -642,8 +644,15 @@ func (db *DB) Close() (err error) {
 			db.docWAL = nil
 		}
 
-		// Unmap the segment files (required on Windows before they can be
-		// deleted or replaced, and releases address space everywhere).
+		// Persist the ANN graph so the next open does not rebuild it (best
+		// effort: without it the open just rebuilds), then unmap the segment
+		// files (required on Windows before they can be deleted or replaced, and
+		// releases address space everywhere).
+		if db.engine != nil && db.path != "" {
+			if saveErr := db.engine.SaveANN(); saveErr != nil {
+				slog.Warn("zenith: could not save the ANN graph", "error", saveErr)
+			}
+		}
 		if db.engine != nil {
 			if closeErr := db.engine.Close(); closeErr != nil && err == nil {
 				err = closeErr

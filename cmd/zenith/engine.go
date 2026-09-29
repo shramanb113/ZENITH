@@ -120,6 +120,9 @@ func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) 
 		} else {
 			alog.Log("SAVED", cliFlags.dbPath)
 		}
+		if err := engine.SaveANN(); err != nil {
+			slog.Warn("Could not save the ANN graph; the next open will rebuild it", "error", err)
+		}
 		if err := engine.Close(); err != nil {
 			slog.Error("Failed to release index files", "error", err)
 		}

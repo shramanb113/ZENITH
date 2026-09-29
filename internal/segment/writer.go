@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"hash/crc32"
 	"os"
+	"path/filepath"
 	"unsafe"
+
+	"github.com/shramanb113/ZENITH/internal/fsx"
 )
 
 // DocIn is one document to write. Docs must be supplied in ascending ID order.
@@ -58,7 +61,7 @@ type TermFreq struct {
 // no-ops, and Finish reports it.
 type Writer struct {
 	path string
-	f    *os.File
+	f    *fsx.File
 	bw   *bufio.Writer
 	pos  int64
 	dir  []dirEntry
@@ -69,7 +72,7 @@ type Writer struct {
 
 // Create starts a new segment at path (truncating any existing file).
 func Create(path string, dims int) (*Writer, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o644)
+	f, err := fsx.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, err
 	}
@@ -403,13 +406,18 @@ func (w *Writer) Finish(meta []byte) error {
 	}
 	cerr := w.f.Close()
 	if w.err != nil {
-		os.Remove(w.path)
+		fsx.Remove(w.path)
 		return w.err
 	}
 	if cerr != nil {
-		os.Remove(w.path)
+		fsx.Remove(w.path)
+		return cerr
 	}
-	return cerr
+	// Make the new directory entry durable before anyone commits a reference to
+	// this file (the manifest rename): with the data fsynced above, a crash can
+	// then never leave a manifest that names a segment whose file is missing.
+	fsx.SyncDir(filepath.Dir(w.path))
+	return nil
 }
 
 // Abort discards a partially written segment.
@@ -419,7 +427,7 @@ func (w *Writer) Abort() {
 	}
 	w.done = true
 	w.f.Close()
-	os.Remove(w.path)
+	fsx.Remove(w.path)
 }
 
 // Err reports the first write error, if any.

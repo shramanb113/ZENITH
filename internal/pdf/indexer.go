@@ -23,7 +23,12 @@ type PDFIndexer struct {
 	engine      *index.Engine
 	logger      *activitylog.Logger
 	allowedRoot string // if set, Index rejects any path resolving outside this directory
+	attrs       index.Attrs
 }
+
+// SetAttrs attaches metadata to every chunk indexed from now on (used by
+// `zenith index --attr`); nil clears it.
+func (p *PDFIndexer) SetAttrs(a index.Attrs) { p.attrs = a }
 
 // NewIndexer creates a PDFIndexer. An optional logger may be supplied.
 func NewIndexer(e *index.Engine, logger ...*activitylog.Logger) *PDFIndexer {
@@ -107,7 +112,7 @@ func (p *PDFIndexer) Index(ctx context.Context, docID, filePath string) (int, er
 		for chunkIdx, chunk := range splitChunks(text) {
 			docs = append(docs, index.BatchDoc{
 				ID:   fmt.Sprintf("%s||p%d||c%d||text||0.00,0.00,0.00,0.00", docID, pageNum, chunkIdx),
-				Text: chunk,
+				Text: chunk, Attrs: p.attrs,
 			})
 		}
 	}

@@ -127,6 +127,10 @@ func (e *Engine) LoadLegacy(path string) error {
 	e.idMapping = li.IDMapping
 	e.docText = li.DocText
 	e.attrs = li.Attrs
+	if e.attrs == nil {
+		e.attrs = make(map[uint64]Attrs)
+	}
+	e.attrIdx = rebuildAttrIndex(e.attrs)
 	e.inverted.Unlock()
 	e.vectors.Unlock()
 	e.phonetics.Unlock()

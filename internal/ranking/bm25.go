@@ -74,6 +74,43 @@ func (s *BM25Scorer) SetBacking(b BM25Backing) {
 	s.back = b
 }
 
+// The Local* methods read only the documents the scorer holds itself (never the
+// backing). They let an engine keep a retired scorer as a read-only layer of
+// its own while a new scorer takes over writes; the retired one is no longer
+// mutated, so no locking beyond the scorer's own is needed.
+
+// LocalTotals is the number of documents the scorer holds and their total length.
+func (s *BM25Scorer) LocalTotals() (docs, totalLen int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.totalDocs, s.totalLen
+}
+
+// LocalDocFreq is how many of the scorer's own documents contain term.
+func (s *BM25Scorer) LocalDocFreq(term string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.docFreq[term]
+}
+
+// EachLocalPosting calls fn once per document the scorer holds that contains term.
+func (s *BM25Scorer) EachLocalPosting(term string, fn func(docID uint64, tf, docLen int)) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, id := range s.postings[term] {
+		fn(id, s.termFreqs[id][term], s.docLengths[id])
+	}
+}
+
+// LocalTermFreqs returns a held document's term frequencies (read-only: the map
+// is the scorer's own) and its length.
+func (s *BM25Scorer) LocalTermFreqs(docID uint64) (tf map[string]int, docLen int, ok bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tf, ok = s.termFreqs[docID]
+	return tf, s.docLengths[docID], ok
+}
+
 // Reset drops every document the scorer holds itself (not the backing).
 func (s *BM25Scorer) Reset() {
 	s.mu.Lock()

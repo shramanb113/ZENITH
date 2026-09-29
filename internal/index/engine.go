@@ -85,6 +85,19 @@ type Engine struct {
 	nextGen     uint64              // next segment file number
 	manifestGen uint64              // generation of the last committed manifest
 	pendingDels map[uint64]struct{} // segment docs deleted since the last flush
+	// frozen is the delta a flush is writing (nil when none): read-only, still
+	// searched, and replaced by a segment when the flush commits. See frozen.go.
+	frozen *memLayer
+	// needGC: the engine was just bound to a path, so the first commit must
+	// delete segment files the new manifest does not name.
+	needGC bool
+	// ANN sidecar bookkeeping (ann_persist.go). annChanges counts graph
+	// mutations since the file was last written; guarded by mu.
+	annSaveMu   sync.Mutex
+	annSaving   atomic.Bool
+	annChanges  int64
+	annSaved    bool // the file on disk reflects the graph as of the last save
+	annFromDisk bool // the current graph was restored from the file
 	autoCompact bool
 	// replaceLegacy lets the first Save replace an old-format file at dbPath.
 	// Only Migrate sets it, after it has copied the original aside.
@@ -100,6 +113,7 @@ type Engine struct {
 	idMapping map[uint64]string
 	docText   map[uint64]string // original full text per document, for GetText
 	attrs     map[uint64]Attrs  // per-document metadata for filtered search; absent = no attrs
+	attrIdx   *attrIndex        // inverted index over attrs, for selective filters (attrindex.go)
 
 	// ann is the HNSW graph over document vectors. nil while the corpus is
 	// below annMinDocs (brute force is exact and fast enough there); built
@@ -107,6 +121,9 @@ type Engine struct {
 	// not persisted: Load rebuilds it from the stored vectors.
 	ann        *ann.Index
 	annMinDocs int
+	// serialEmbed makes a search embed its query before starting the lexical
+	// phase instead of overlapping them. Test hook for measuring the overlap.
+	serialEmbed bool
 
 	fst      *analysis.FSTDictionary
 	fstSize  int  // informational only — last rebuild's term count
@@ -130,6 +147,7 @@ func NewEngine(cfg *config.Config, emb embedding.Embedder, scr ranking.Scorer, a
 		idMapping:   make(map[uint64]string),
 		docText:     make(map[uint64]string),
 		attrs:       make(map[uint64]Attrs),
+		attrIdx:     newAttrIndex(),
 		annMinDocs:  defaultANNMinDocs,
 		autoCompact: true,
 		nextGen:     1,
@@ -482,7 +500,7 @@ func (e *Engine) Remove(ctx context.Context, originalID string) error {
 	delete(docVecStore, internalID)
 	delete(e.idMapping, internalID)
 	delete(e.docText, internalID)
-	delete(e.attrs, internalID)
+	e.dropAttrsLocked(internalID)
 	e.annDeleteLocked(internalID)
 
 	// Decrement globalSeen reference counts for this document's raw tokens.
@@ -570,7 +588,7 @@ func (e *Engine) Count() int {
 
 func (e *Engine) addInternal(ctx context.Context, originalID string, fullText string, preVec []float32, attrs Attrs) error {
 	if e.journal != nil {
-		if err := e.journal.Put(ctx, []byte(originalID), []byte(fullText)); err != nil {
+		if err := e.journal.Put(ctx, []byte(originalID), encodeJournalValue(fullText, attrs)); err != nil {
 			return fmt.Errorf("index: journal write: %w", err)
 		}
 	}
@@ -679,11 +697,7 @@ func (e *Engine) addInternal(ctx context.Context, originalID string, fullText st
 
 	e.idMapping[internalID] = originalID
 	e.docText[internalID] = fullText
-	if a := copyAttrs(attrs); a != nil {
-		e.attrs[internalID] = a
-	} else {
-		delete(e.attrs, internalID)
-	}
+	e.setAttrsLocked(internalID, copyAttrs(attrs))
 
 	if docVec != nil {
 		docVecStore[internalID] = VectorEntry{
@@ -904,6 +918,13 @@ func dedupe(in []string) []string {
 // a positive semantic score, its raw signals. It scans every document, so it is meant for small
 // per-request namespaces (hundreds of documents), not the persistent index.
 func (e *Engine) Explain(ctx context.Context, query string) ([]string, []ExplainHit, error) {
+	return e.ExplainFiltered(ctx, query, nil)
+}
+
+// ExplainFiltered is Explain restricted to documents whose attributes satisfy
+// f (nil = no restriction).
+func (e *Engine) ExplainFiltered(ctx context.Context, query string, f *Filter) ([]string, []ExplainHit, error) {
+	pred := f.pred()
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -978,6 +999,9 @@ func (e *Engine) Explain(ctx context.Context, query string) ([]string, []Explain
 
 	hits := make([]ExplainHit, 0)
 	e.eachDocTerms(func(id uint64, has func(string) bool) {
+		if pred != nil && !pred(e.attrs[id]) {
+			return
+		}
 		var terms []TermHit
 		for _, t := range base {
 			for _, c := range cands[t] {

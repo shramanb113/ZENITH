@@ -12,6 +12,8 @@ import (
 	"os"
 	pathutil "path/filepath"
 	"strings"
+
+	"github.com/shramanb113/ZENITH/internal/fsx"
 )
 
 // The index "file" a caller names (e.g. zenith.db) is a small manifest, not the
@@ -78,11 +80,11 @@ func writeManifest(path, embName string, dims int, m manifestBody) error {
 		return err
 	}
 	tmp := path + ".tmp"
-	f, err := os.Create(tmp)
+	f, err := fsx.Create(tmp)
 	if err != nil {
 		return err
 	}
-	fail := func(err error) error { f.Close(); os.Remove(tmp); return err }
+	fail := func(err error) error { f.Close(); fsx.Remove(tmp); return err }
 
 	w := bufio.NewWriter(f)
 	w.WriteString("ZNTH")
@@ -107,11 +109,11 @@ func writeManifest(path, embName string, dims int, m manifestBody) error {
 		return fail(err)
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmp)
+		fsx.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+	if err := fsx.Rename(tmp, path); err != nil {
+		fsx.Remove(tmp)
 		return err
 	}
 	syncDir(pathutil.Dir(path))
@@ -121,11 +123,8 @@ func writeManifest(path, embName string, dims int, m manifestBody) error {
 // syncDir makes a rename durable where the platform supports it (best effort:
 // Windows cannot fsync a directory handle).
 func syncDir(dir string) {
-	if d, err := os.Open(dir); err == nil {
-		if err := d.Sync(); err != nil {
-			slog.Debug("index: directory fsync failed", "error", err)
-		}
-		d.Close()
+	if err := fsx.SyncDir(dir); err != nil {
+		slog.Debug("index: directory fsync failed", "error", err)
 	}
 }
 
@@ -248,7 +247,7 @@ func gcSegments(path string, m manifestBody) {
 		if keep[name] {
 			continue
 		}
-		if err := os.Remove(pathutil.Join(dir, name)); err == nil {
+		if err := fsx.Remove(pathutil.Join(dir, name)); err == nil {
 			slog.Info("index: removed orphaned file", "file", name)
 		}
 	}

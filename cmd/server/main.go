@@ -97,7 +97,14 @@ func main() {
 	for _, r := range storageEng.Records() {
 		switch r.Op {
 		case wal.OpTypePut:
-			if err := engine.Add(replayCtx, string(r.Key), string(r.Value)); err != nil {
+			text, attrs := index.DecodeJournalValue(r.Value)
+			var err error
+			if len(attrs) > 0 {
+				err = engine.AddWithVectorAttrs(replayCtx, string(r.Key), text, engine.EmbedText(replayCtx, text), attrs)
+			} else {
+				err = engine.Add(replayCtx, string(r.Key), text)
+			}
+			if err != nil {
 				slog.Warn("WAL replay: re-index failed", "id", string(r.Key), "error", err)
 			}
 		case wal.OpTypeDelete:
@@ -149,6 +156,9 @@ func main() {
 		if err := storageEng.Checkpoint(); err != nil {
 			slog.Error("WAL checkpoint failed", "error", err)
 		}
+	}
+	if err := engine.SaveANN(); err != nil {
+		slog.Warn("Could not save the ANN graph; the next start will rebuild it", "error", err)
 	}
 	if err := engine.Close(); err != nil {
 		slog.Error("Failed to release index files", "error", err)

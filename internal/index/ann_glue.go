@@ -15,16 +15,25 @@ const (
 
 	annM              = 16
 	annEFConstruction = 100
-	// annK is how many nearest documents the graph returns to rank fusion.
-	// RRF gives rank r a weight of about 1/(k+r), so documents beyond the top
-	// few hundred contribute almost nothing; scanning the whole corpus for
-	// them was the cost being removed.
-	annK  = 150
-	annEF = 200
 	// annMinSelectivity: below this fraction of allowed documents a filtered
 	// graph traversal has to wander too far to find matches, so an exact scan
 	// over the (few) allowed documents is both faster and exact.
 	annMinSelectivity = 0.10
+)
+
+// Search-time ANN parameters. Variables only so the tuning test can sweep them;
+// nothing else assigns them.
+var (
+	// annK is how many nearest documents the graph returns to rank fusion.
+	// RRF gives rank r a weight of about 1/(k+r), so documents beyond the top
+	// few hundred contribute almost nothing; scanning the whole corpus for
+	// them was the cost being removed. Swept on 107k MS MARCO passages with
+	// gte-small (hybrid, engine only; exact scan Recall@10 0.962): 150/200 →
+	// 0.951 at 12.5 ms p50, 300/400 → 0.957 at 14.5 ms, 600/800 → 0.958 at
+	// 18 ms, 2000/2400 → 0.960 at 30 ms. 300/400 is the knee.
+	annK = 300
+	// annEF is the graph search's candidate-list width (must be >= annK).
+	annEF = 400
 )
 
 // SetANNThreshold sets the corpus size at which vector search uses the ANN
@@ -70,14 +79,23 @@ func (e *Engine) rebuildANNLocked() {
 		g.Insert(it.id, Float16ToFloats(it.v), it.v)
 	}
 	e.ann = g
+	e.annFromDisk = false
+	e.annSaved = false
+	e.annChanges = 0
 }
 
-// rebuildANNAfterLoadLocked builds the graph after a snapshot load if the
-// corpus is large enough; the graph itself is never persisted.
+// rebuildANNAfterLoadLocked restores the graph after a load if the corpus is
+// large enough: from its sidecar file when there is a usable one, otherwise by
+// building it from the stored vectors.
 func (e *Engine) rebuildANNAfterLoadLocked() {
 	e.ann = nil
+	e.annFromDisk = false
 	if e.annMinDocs > 0 && e.vectorCount() >= e.annMinDocs {
-		e.rebuildANNLocked()
+		if !e.tryLoadANNLocked() {
+			e.rebuildANNLocked()
+			e.annChanges = 1
+			e.maybeSaveANNAsyncLocked(true) // so the next open does not rebuild again
+		}
 	}
 }
 
@@ -114,6 +132,7 @@ func (e *Engine) annInsertLocked(id uint64, vec []float32, bits []uint16) {
 		return
 	}
 	e.ann.Insert(id, vec, bits)
+	e.annChanges++
 	if e.ann.NeedsRebuild() {
 		e.rebuildANNLocked()
 	}
@@ -122,6 +141,7 @@ func (e *Engine) annInsertLocked(id uint64, vec []float32, bits []uint16) {
 func (e *Engine) annDeleteLocked(id uint64) {
 	if e.ann != nil {
 		e.ann.Delete(id)
+		e.annChanges++
 	}
 }
 
