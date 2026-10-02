@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ZENITH — Local-First Hybrid Neural Search Engine in Go</title>
+  <meta name="description" content="A local-first hybrid search engine with an LSM-backed index, written in Go. Combines BM25 lexical search, BK-tree fuzzy matching, and neural vector embeddings.">
+  <meta property="og:title" content="ZENITH — Local-First Hybrid Neural Search Engine">
+  <meta property="og:description" content="Fast, private local directory indexing and hybrid semantic search powered by Go, LSM trees, and neural sidecar embeddings.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Navigation Bar -->
+  <nav class="navbar">
+    <div class="container nav-container">
+      <a href="#" class="logo-brand">
+        <div class="logo-icon">Z</div>
+        <span>ZENITH</span>
+        <span class="logo-badge">v1.0.0</span>
+      </a>
+
+      <button class="nav-toggle" id="nav-toggle" aria-label="Toggle Navigation Menu" aria-expanded="false">
+        <span class="hamburger-bar"></span>
+        <span class="hamburger-bar"></span>
+        <span class="hamburger-bar"></span>
+      </button>
+
+      <ul class="nav-links">
+        <li><a href="#demo" class="nav-link">Live Demo</a></li>
+        <li><a href="#architecture" class="nav-link">Architecture</a></li>
+        <li><a href="#features" class="nav-link">Features</a></li>
+        <li><a href="#cli" class="nav-link">CLI Reference</a></li>
+        <li><a href="#quickstart" class="nav-link">Quickstart</a></li>
+      </ul>
+
+      <div class="nav-actions">
+        <a href="https://github.com/shramanb113/ZENITH" target="_blank" rel="noopener" class="btn btn-secondary">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+          GitHub
+        </a>
+        <a href="#quickstart" class="btn btn-primary">Install CLI</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero Section -->
+  <section class="hero">
+    <div class="bg-orb orb-1"></div>
+    <div class="bg-orb orb-2"></div>
+    <div class="container hero-grid">
+      <div class="hero-content">
+        <div class="eyebrow">
+          <span class="eyebrow-dot"></span>
+          Go 1.24 • Ground-Up LSM Storage Engine
+        </div>
+
+        <h1 class="hero-title">
+          Local-First <br>
+          <span class="gradient-text">Hybrid Neural Search</span>
+        </h1>
+
+        <p class="hero-subtitle">
+          ZENITH indexes your local codebase and documentation for instant natural language query resolution. Powered by a custom LSM tree, BM25 scoring, BK-tree fuzzy matching, and automated vector embeddings.
+        </p>
+
+        <!-- Command Widget -->
+        <div class="install-widget">
+          <div class="install-cmd">
+            <span class="cmd-prefix">$</span>
+            <code>go install github.com/shramanb113/ZENITH/cmd/zenith@latest</code>
+          </div>
+          <button class="copy-btn" id="copy-cmd-btn" title="Copy command">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 2 0 0 1-2-2V4a2 2 2 0 0 1 2-2h9a2 2 2 0 0 1 2 2v1"></path></svg>
+            Copy
+          </button>
+        </div>
+
+        <div class="hero-stats">
+          <div class="stat-item">
+            <h4>&lt; 5ms</h4>
+            <p>Average Search Latency</p>
+          </div>
+          <div class="stat-item">
+            <h4>384-Dim</h4>
+            <p>Neural Embeddings</p>
+          </div>
+          <div class="stat-item">
+            <h4>O(log n)</h4>
+            <p>BK-Tree Fuzzy Lookup</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Hero Visual -->
+      <div class="hero-visual">
+        <div class="hero-card">
+          <img src="hero_icon.png" alt="ZENITH Neural Search Core" class="hero-img" width="1024" height="1024">
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Interactive Live Search Simulator Section -->
+  <section id="demo" class="simulator-section">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag">Interactive Playground</span>
+        <h2 class="section-title">Experience Hybrid Search</h2>
+        <p class="section-desc">Type a query below to see how ZENITH merges BM25 lexical rankings, vector cosine similarity, and BK-tree typo tolerance in real-time.</p>
+      </div>
+
+      <div class="simulator-box">
+        <div class="search-input-wrapper">
+          <span class="search-icon">🔍</span>
+          <input type="text" id="sim-input" class="sim-input" placeholder="Try searching: kubernetes memory debugging..." value="kubernetes memory debugging">
+        </div>
+
+        <div class="sim-controls">
+          <div class="preset-queries">
+            <button type="button" class="chip active" data-query="kubernetes memory debugging">kubernetes memory debugging</button>
+            <button type="button" class="chip" data-query="kubernets deployement">kubernets deployement (typo)</button>
+            <button type="button" class="chip" data-query="lsm memtable sstable bloom">lsm memtable sstable</button>
+            <button type="button" class="chip" data-query="rank fusion cosine scoring">rank fusion cosine</button>
+          </div>
+
+          <div class="mode-selector">
+            <button class="mode-btn active" data-mode="nerve">Nerve (MiniLM-L6)</button>
+            <button class="mode-btn" data-mode="ollama">Ollama (nomic-embed)</button>
+            <button class="mode-btn" data-mode="deterministic">Deterministic Hash</button>
+          </div>
+        </div>
+
+        <!-- Live Results Container -->
+        <div id="sim-results" class="sim-results-grid">
+          <!-- Dynamic JS Injection -->
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Storage Engine & Search Architecture Visualizer -->
+  <section id="architecture" class="arch-section">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag">Zero External KV Dependencies</span>
+        <h2 class="section-title">Ground-Up LSM Architecture</h2>
+        <p class="section-desc">Click any component in the storage and query pipeline below to examine its internal Go data structures and performance specifications.</p>
+      </div>
+
+      <div class="arch-visualizer">
+        <!-- Interactive Flowchart -->
+        <div class="flowchart">
+          <!-- Write Pipeline -->
+          <div class="pipeline-group">
+            <span class="pipeline-title">1. Storage Engine (Write Path)</span>
+            <div class="nodes-row">
+              <button type="button" class="arch-node active" data-node="wal">
+                <div class="node-icon">📜</div>
+                <div class="node-title">Write-Ahead Log</div>
+              </button>
+              <button type="button" class="arch-node" data-node="memtable">
+                <div class="node-icon">⚡</div>
+                <div class="node-title">MemTable Skip-List</div>
+              </button>
+              <button type="button" class="arch-node" data-node="sstable">
+                <div class="node-icon">💾</div>
+                <div class="node-title">SSTable Files</div>
+              </button>
+              <button type="button" class="arch-node" data-node="bloom">
+                <div class="node-icon">🎯</div>
+                <div class="node-title">Bloom Filter</div>
+              </button>
+            </div>
+          </div>
+
+          <!-- Query Pipeline -->
+          <div class="pipeline-group">
+            <span class="pipeline-title">2. Intelligence & Hybrid Query Path</span>
+            <div class="nodes-row">
+              <button type="button" class="arch-node" data-node="bktree">
+                <div class="node-icon">🌲</div>
+                <div class="node-title">BK-Tree Fuzzy</div>
+              </button>
+              <button type="button" class="arch-node" data-node="nerve">
+                <div class="node-icon">🧠</div>
+                <div class="node-title">Nerve Embedder</div>
+              </button>
+              <button type="button" class="arch-node" data-node="rrf">
+                <div class="node-icon">⚖️</div>
+                <div class="node-title">RRF Rank Fusion</div>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Detail Card -->
+        <div class="arch-detail-card">
+          <h3 class="detail-title" id="arch-detail-title">Write-Ahead Log (WAL)</h3>
+          <p class="detail-desc" id="arch-detail-desc">Every write operation is first appended to a crash-safe WAL file with CRC32 verification frames before updating the in-memory MemTable.</p>
+          <div class="detail-specs" id="arch-detail-specs">
+            <!-- Dynamic JS Injection -->
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features Grid -->
+  <section id="features" class="features-section">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag">Engineering Highlights</span>
+        <h2 class="section-title">Built For Speed & Intelligence</h2>
+        <p class="section-desc">Designed from first principles to bring server-grade hybrid search capabilities directly to your local workstation.</p>
+      </div>
+
+      <div class="bento-grid">
+        <div class="bento-card span-2">
+          <div>
+            <div class="card-icon">⚡</div>
+            <h3 class="card-title">Custom LSM-Tree Engine</h3>
+            <p class="card-text">Built entirely without SQLite, LevelDB, or third-party storage libraries. Implements crash-safe WAL appending, skip-list MemTables, block-structured SSTables, background leveled compaction, and per-segment sparse index maps.</p>
+          </div>
+        </div>
+
+        <div class="bento-card">
+          <div>
+            <div class="card-icon">🤖</div>
+            <h3 class="card-title">Nerve Neural Sidecar</h3>
+            <p class="card-text">Baked directly into the Go binary. Automatically manages a lightweight Python sidecar virtual environment for 384-dim <code>all-MiniLM-L6-v2</code> embeddings, with instant fallback to Ollama or offline hash embeddings.</p>
+          </div>
+        </div>
+
+        <div class="bento-card">
+          <div>
+            <div class="card-icon">🌲</div>
+            <h3 class="card-title">O(log n) BK-Tree Fuzzy Search</h3>
+            <p class="card-text">Prunes candidate term lookups using metric tree triangle inequality over Levenshtein distance. Tolerates up to 2 typos without scanning the full inverted index.</p>
+          </div>
+        </div>
+
+        <div class="bento-card">
+          <div>
+            <div class="card-icon">🔄</div>
+            <h3 class="card-title">Real-Time Watcher & Boot Auto-Start</h3>
+            <p class="card-text">Uses <code>fsnotify</code> to continuously index file modifications. Registers native OS boot tasks (Windows Task Scheduler, Linux systemd, macOS LaunchAgents) with zero admin rights.</p>
+          </div>
+        </div>
+
+        <div class="bento-card">
+          <div>
+            <div class="card-icon">📡</div>
+            <h3 class="card-title">High-Performance gRPC API</h3>
+            <p class="card-text">Exposes index, search, fuzzy, and stats endpoints via standard Protobuf contracts (<code>zenith serve --port 8080</code>) for effortless integration with custom microservices or editor plugins.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Interactive Terminal CLI Reference Section -->
+  <section id="cli" class="cli-section">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag">Command Line Interface</span>
+        <h2 class="section-title">Clean, Intuitive Tooling</h2>
+        <p class="section-desc">Manage indexing, querying, directory watching, server mode, and activity logs through a unified command suite.</p>
+      </div>
+
+      <div class="terminal-window">
+        <div class="terminal-header">
+          <div class="window-dots">
+            <span class="dot dot-red"></span>
+            <span class="dot dot-yellow"></span>
+            <span class="dot dot-green"></span>
+          </div>
+
+          <div class="cli-tabs" role="tablist" aria-label="CLI commands">
+            <button type="button" class="cli-tab active" role="tab" aria-selected="true" aria-controls="terminal-body" data-cmd="index">zenith index</button>
+            <button type="button" class="cli-tab" role="tab" aria-selected="false" aria-controls="terminal-body" data-cmd="search">zenith search</button>
+            <button type="button" class="cli-tab" role="tab" aria-selected="false" aria-controls="terminal-body" data-cmd="watch">zenith watch</button>
+            <button type="button" class="cli-tab" role="tab" aria-selected="false" aria-controls="terminal-body" data-cmd="log">zenith log</button>
+            <button type="button" class="cli-tab" role="tab" aria-selected="false" aria-controls="terminal-body" data-cmd="serve">zenith serve</button>
+          </div>
+        </div>
+
+        <div class="terminal-body" id="terminal-body" role="tabpanel" aria-live="polite"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Technical Comparison Matrix -->
+  <section class="comparison-section">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag">Comparison Matrix</span>
+        <h2 class="section-title">How ZENITH Compares</h2>
+        <p class="section-desc">Blending the instant speed of local search CLI tools with modern neural understanding.</p>
+      </div>
+
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Feature</th>
+              <th>Standard Grep / Ripgrep</th>
+              <th>Vector Databases</th>
+              <th>ZENITH</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Semantic Intent Understanding</strong></td>
+              <td class="cross">✕ Exact match only</td>
+              <td class="check">✓ Vector similarity</td>
+              <td class="check">✓ Hybrid (BM25 + Vector RRF)</td>
+            </tr>
+            <tr>
+              <td><strong>Typo Tolerance</strong></td>
+              <td class="cross">✕ Regex edit distance scan</td>
+              <td class="cross">✕ Poor lexical fuzzy</td>
+              <td class="check">✓ O(log n) BK-Tree Metric</td>
+            </tr>
+            <tr>
+              <td><strong>Storage Engine</strong></td>
+              <td class="t-dim">None (Disk scan)</td>
+              <td class="t-dim">External HNSW / Disk</td>
+              <td class="check">✓ Ground-Up LSM-Tree Engine</td>
+            </tr>
+            <tr>
+              <td><strong>Installation & Setup</strong></td>
+              <td class="check">✓ Single binary</td>
+              <td class="cross">✕ Docker / Server cluster</td>
+              <td class="check">✓ Single binary (Self-contained)</td>
+            </tr>
+            <tr>
+              <td><strong>Offline Fallback Mode</strong></td>
+              <td class="check">✓ N/A</td>
+              <td class="cross">✕ Requires remote API key</td>
+              <td class="check">✓ Zero-dependency Hash Embedder</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Quickstart Section -->
+  <section id="quickstart" class="quickstart-section">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag">Get Started in 60 Seconds</span>
+        <h2 class="section-title">Simple 3-Step Setup</h2>
+        <p class="section-desc">Zero manual configuration files required. ZENITH automatically initializes its embedding pipeline on first run.</p>
+      </div>
+
+      <div class="quickstart-steps">
+        <div class="step-card">
+          <div class="step-number">01</div>
+          <h3 class="step-title">Install Executable</h3>
+          <p class="card-text">Install the latest compiled binary directly via Go toolchain onto Linux, macOS, or Windows.</p>
+          <div class="step-code">go install github.com/shramanb113/ZENITH/cmd/zenith@latest</div>
+        </div>
+
+        <div class="step-card">
+          <div class="step-number">02</div>
+          <h3 class="step-title">Index a Directory</h3>
+          <p class="card-text">Walks documents, extracts text & AST tokens, generates vector embeddings, and builds the LSM tree index.</p>
+          <div class="step-code">zenith index ~/Documents</div>
+        </div>
+
+        <div class="step-card">
+          <div class="step-number">03</div>
+          <h3 class="step-title">Run Hybrid Queries</h3>
+          <p class="card-text">Query with natural language, code fragments, or fuzzy terms to receive rank-fused results instantly.</p>
+          <div class="step-code">zenith search "kubernetes memory debugging"</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer>
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <a href="#" class="logo-brand">
+            <div class="logo-icon">Z</div>
+            <span>ZENITH</span>
+          </a>
+          <p>A local-first hybrid search engine with an LSM-backed index, written in Go. Created for developers who demand instant, intelligent search over local files.</p>
+        </div>
+
+        <div class="footer-col">
+          <h5>Product</h5>
+          <ul>
+            <li><a href="#demo">Live Demo</a></li>
+            <li><a href="#architecture">LSM Architecture</a></li>
+            <li><a href="#features">Features</a></li>
+            <li><a href="#cli">CLI Reference</a></li>
+          </ul>
+        </div>
+
+        <div class="footer-col">
+          <h5>Community & Docs</h5>
+          <ul>
+            <li><a href="https://github.com/shramanb113/ZENITH" target="_blank" rel="noopener">GitHub Repository</a></li>
+            <li><a href="https://github.com/shramanb113/ZENITH/blob/main/README.md" target="_blank" rel="noopener">Documentation</a></li>
+            <li><a href="https://github.com/shramanb113/ZENITH/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="footer-bottom">
+        <p>© 2026 ZENITH Project. Released under the MIT License.</p>
+        <p>Built with Go 1.24 & Vanilla Web Technologies.</p>
+      </div>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
