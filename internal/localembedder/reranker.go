@@ -43,7 +43,7 @@ func NewReranker(id, modelsDir string) (*Reranker, error) {
 	}
 	// Rerankers in the registry share the bundled BERT-uncased vocab, same as
 	// every embedding model (see modelspec's registry comment).
-	tok, err := newTokenizerFromBytes(vocabBytes)
+	tok, err := newTokenizerFromBytes(vocabBytes, false)
 	if err != nil {
 		return nil, fmt.Errorf("localembedder: tokenizer: %w", err)
 	}

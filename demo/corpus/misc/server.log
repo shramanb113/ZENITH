@@ -1,0 +1,4 @@
+2026-10-01T09:14:02Z INFO  engine flush completed in 1.07s delta=10000 docs
+2026-10-01T09:14:05Z WARN  checkpoint rotation took longer than expected: 240ms
+2026-10-01T09:14:08Z INFO  ANN sidecar saved after 50000 graph changes
+2026-10-01T09:15:00Z ERROR disk usage above 90 percent on volume /data

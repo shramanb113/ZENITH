@@ -1,0 +1,16 @@
+services:
+  zenith:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zenith-demo:latest
+    volumes:
+      - zenith-home:/home/zenith
+      - ./demo/corpus:/home/zenith/corpus:ro
+    ports:
+      - "8080:8080"   # gRPC — the persistent engine (cmd/client, CLI)
+      - "7700:7700"   # HTTP namespace sidecar — in-memory only, see CLAUDE.md
+    command: ["serve", "--db", "/home/zenith/data/zenith.db"]
+
+volumes:
+  zenith-home:

@@ -33,6 +33,22 @@ type Spec struct {
 	DocPrefix   string
 	// ModelURL is the quantized ONNX export the model is fetched from.
 	ModelURL string
+	// VocabURL is a model-specific vocab.txt, fetched alongside ModelURL when
+	// non-empty. Empty for every model that shares the bundled bert-base-uncased
+	// vocabulary; set for models (e.g. cased or multilingual ones) that need a
+	// different one.
+	VocabURL string
+	// DenseURL is a small safetensors file holding a trained linear+tanh
+	// projection (sentence-transformers' "Dense" module) applied after
+	// pooling, fetched alongside ModelURL when non-empty. Most ONNX exports
+	// only expose last_hidden_state with no such layer; when the upstream
+	// sentence-transformers model ships one separately (e.g. LaBSE's
+	// 2_Dense), wiring it in here closes that gap without re-exporting the
+	// (much larger) base model.
+	DenseURL string
+	// Cased, when true, skips lowercasing before WordPiece tokenization. False
+	// (the default) matches every existing model's bert-base-uncased vocabulary.
+	Cased bool
 	// SizeMB is the approximate download size, for user-facing messages.
 	SizeMB int
 	// Languages is a short human-readable coverage note.
@@ -42,10 +58,13 @@ type Spec struct {
 // IndexName is the embedder identity recorded in saved index files.
 func (s Spec) IndexName() string { return "onnx:" + s.ID }
 
-// All models here share the bert-base-uncased WordPiece vocabulary (30522
+// Models here mostly share the bert-base-uncased WordPiece vocabulary (30522
 // entries), which is why one bundled vocab.txt serves all of them. Models with
-// a different tokenizer (e.g. multilingual-e5-small, which needs SentencePiece)
-// are deliberately not listed until a tokenizer for them exists.
+// a different tokenizer family (e.g. multilingual-e5-small, which needs
+// SentencePiece) are deliberately not listed until a tokenizer for them
+// exists. labse (LaBSE) is the exception that fits: it is still WordPiece,
+// just with its own (much larger, cased) vocab fetched via VocabURL — see
+// Spec.VocabURL / Spec.Cased.
 var registry = []Spec{
 	{
 		ID:          "all-MiniLM-L6-v2",
@@ -71,6 +90,17 @@ var registry = []Spec{
 		ModelURL:    "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model_quantized.onnx",
 		SizeMB:      34,
 		Languages:   "English",
+	},
+	{
+		ID:          "labse",
+		Description: "LaBSE: BERT-based cross-lingual sentence embeddings trained for translation ranking across 109 languages; opt-in, never the bundled default. The base ONNX export exposes last_hidden_state only, so the real sentence-transformers pipeline (CLS pool -> trained dense+tanh projection -> normalize) is reconstructed here: CLS pooling plus the small separate 2_Dense projection fetched via DenseURL, matching sentence-transformers/LaBSE's own module config (1_Pooling: cls, 2_Dense: Linear(768,768)+Tanh) -- not a guess. Smoke-tested, not BEIR-benchmarked; a hand-built real-Wikipedia cross-lingual check is in README.md",
+		Dims:        768, Pooling: PoolCLS,
+		ModelURL:  "https://huggingface.co/Xenova/LaBSE/resolve/main/onnx/model_quantized.onnx",
+		VocabURL:  "https://huggingface.co/Xenova/LaBSE/resolve/main/vocab.txt",
+		DenseURL:  "https://huggingface.co/sentence-transformers/LaBSE/resolve/main/2_Dense/model.safetensors",
+		Cased:     true,
+		SizeMB:    450,
+		Languages: "109 languages (LaBSE)",
 	},
 }
 

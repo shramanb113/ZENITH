@@ -17,9 +17,13 @@ const (
 
 type tokenizer struct {
 	vocab map[string]int64
+	// cased, when true, skips lowercasing before WordPiece tokenization — set
+	// for models (e.g. labse) whose vocab distinguishes
+	// case. False for every bert-base-uncased-vocab model, unchanged behavior.
+	cased bool
 }
 
-func newTokenizerFromBytes(data []byte) (*tokenizer, error) {
+func newTokenizerFromBytes(data []byte, cased bool) (*tokenizer, error) {
 	vocab := make(map[string]int64, 32000)
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	var id int64
@@ -27,12 +31,19 @@ func newTokenizerFromBytes(data []byte) (*tokenizer, error) {
 		vocab[scanner.Text()] = id
 		id++
 	}
-	return &tokenizer{vocab: vocab}, scanner.Err()
+	return &tokenizer{vocab: vocab, cased: cased}, scanner.Err()
+}
+
+func (t *tokenizer) normalize(text string) string {
+	if t.cased {
+		return text
+	}
+	return strings.ToLower(text)
 }
 
 // tokenize returns (inputIDs, attentionMask, tokenTypeIDs) each of length maxLength.
 func (t *tokenizer) tokenize(text string, maxLength int) ([]int64, []int64, []int64) {
-	pieces := t.wordpieceTokenize(strings.ToLower(text))
+	pieces := t.wordpieceTokenize(t.normalize(text))
 
 	// Reserve 2 slots for [CLS] and [SEP]; truncate if necessary.
 	cap := maxLength - 2
@@ -70,7 +81,7 @@ func (t *tokenizer) tokenize(text string, maxLength int) ([]int64, []int64, []in
 // 3–60× wasted ONNX compute per input (attention masks make padded positions
 // correct, not free).
 func (t *tokenizer) encodeIDs(text string, maxTokens int) []int64 {
-	pieces := t.wordpieceTokenize(strings.ToLower(text))
+	pieces := t.wordpieceTokenize(t.normalize(text))
 
 	cap := maxTokens - 2
 	if len(pieces) > cap {
@@ -96,11 +107,11 @@ func (t *tokenizer) encodeIDs(text string, maxTokens int) []int64 {
 // callers batch-pad to their chosen sequence length, same as encodeIDs.
 func (t *tokenizer) encodePair(query, doc string, maxLength int) ([]int64, []int64, []int64) {
 	const maxQueryTokens = 64
-	qPieces := t.wordpieceTokenize(strings.ToLower(query))
+	qPieces := t.wordpieceTokenize(t.normalize(query))
 	if len(qPieces) > maxQueryTokens {
 		qPieces = qPieces[:maxQueryTokens]
 	}
-	dPieces := t.wordpieceTokenize(strings.ToLower(doc))
+	dPieces := t.wordpieceTokenize(t.normalize(doc))
 	budget := maxLength - 3 - len(qPieces) // [CLS] + [SEP] + [SEP]
 	if budget < 0 {
 		budget = 0

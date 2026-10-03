@@ -77,9 +77,9 @@ var modelsPullCmd = &cobra.Command{
 	Short: "Download a model from the registry into ~/.zenith/models",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		id, sizeMB, url, usage, isBundled := args[0], 0, "", "", false
+		id, sizeMB, url, vocabURL, denseURL, usage, isBundled := args[0], 0, "", "", "", "", false
 		if spec, err := localembedder.Lookup(args[0]); err == nil {
-			id, sizeMB, url = spec.ID, spec.SizeMB, spec.ModelURL
+			id, sizeMB, url, vocabURL, denseURL = spec.ID, spec.SizeMB, spec.ModelURL, spec.VocabURL, spec.DenseURL
 			isBundled = strings.EqualFold(spec.ID, localembedder.BundledID())
 			usage = "use with --model " + spec.ID + " (needs a fresh index: vectors differ per model)"
 		} else if rspec, rerr := localembedder.LookupReranker(args[0]); rerr == nil {
@@ -107,6 +107,22 @@ var modelsPullCmd = &cobra.Command{
 		_ = os.WriteFile(filepath.Join(dir, "model.sha256"), []byte(sum+"  model.onnx\n"), 0o644)
 		fmt.Printf("  %s  %s (%s)\n", green("✓"), filepath.Join(dir, "model.onnx"), formatBytes(n))
 		fmt.Printf("  %s  sha256 %s\n", muted("·"), sum)
+		if vocabURL != "" {
+			vsum, vn, verr := downloadModel(vocabURL, filepath.Join(dir, "vocab.txt"))
+			if verr != nil {
+				return fmt.Errorf("model downloaded but vocab download failed: %w", verr)
+			}
+			fmt.Printf("  %s  %s (%s)\n", green("✓"), filepath.Join(dir, "vocab.txt"), formatBytes(vn))
+			fmt.Printf("  %s  sha256 %s\n", muted("·"), vsum)
+		}
+		if denseURL != "" {
+			dsum, dn, derr := downloadModel(denseURL, filepath.Join(dir, "dense.safetensors"))
+			if derr != nil {
+				return fmt.Errorf("model downloaded but dense projection download failed: %w", derr)
+			}
+			fmt.Printf("  %s  %s (%s)\n", green("✓"), filepath.Join(dir, "dense.safetensors"), formatBytes(dn))
+			fmt.Printf("  %s  sha256 %s\n", muted("·"), dsum)
+		}
 		printDivider()
 		printFooter("installed", usage)
 		return nil

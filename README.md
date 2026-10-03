@@ -239,6 +239,16 @@ On every query and document add, ZENITH runs this cascade automatically:
 
 Cold start with the embedded model: **under 1 second.** The ONNX session is initialised once at startup and held for the process lifetime.
 
+### Multilingual search (opt-in, `labse`)
+
+```bash
+zenith models pull labse
+zenith index ~/multilingual-notes --model labse
+zenith search "capital of France" --model labse   # matches a French-language passage
+```
+
+`labse` is cross-lingual: an English query can match a passage written in French, German, Spanish, Hindi, or Japanese (smoke-tested across those five; LaBSE itself covers 109 languages). It is CLS-pooled directly from the ONNX export's `last_hidden_state`, not the full sentence-transformers LaBSE pipeline (which adds a final dense+normalize layer this export doesn't expose) — expect useful, not published-LaBSE-benchmark, cross-lingual retrieval. Needs its own index: it is 768-dim and cannot share a database with the 384-dim default models.
+
 ### Use Ollama instead
 
 ```bash
@@ -294,10 +304,16 @@ zenith search --db my-index.db "query"
 -n, --max int    Maximum results to display             (default: 10)
 --db      string Index database file                   (default: ~/.zenith/zenith.db)
 --embedder string auto | local | ollama | deterministic (default: auto)
+--model   string Embedding model id, from `zenith models list` (default: the model
+                  recorded in the index; mismatches with it are an error)
 --where   string Attribute condition, repeatable, all must hold: key=value, key!=value,
                   key>=n, key<=n. See "Metadata filtering".
 --filter  string Full JSON filter expression (and/or/not of eq/in/range/exists), combined
                   with any --where conditions. See "Metadata filtering".
+--rerank         Rerank the hybrid shortlist with a cross-encoder
+                  (needs: zenith models pull ms-marco-MiniLM-L-6-v2)
+--rerank-model   Reranker id from `zenith models list --rerankers` (default:
+                  ms-marco-MiniLM-L-6-v2)
 ```
 
 ---
@@ -653,6 +669,67 @@ absolute. The fused `Score` is relative to the result set, so never threshold on
 docker build -t zenith-sidecar .
 docker run --rm -p 127.0.0.1:7700:7700 -e ZENITH_KEY=change-me zenith-sidecar
 ```
+
+## Docker demo (CLI + gRPC, persistent)
+
+The single-container snippet above runs only the in-memory HTTP sidecar (no persistence by
+design — see `internal/sidecar`). `docker-compose.yml` instead builds an image with OCR support
+(`-tags ocr`, Tesseract) and a `zenith-client` test-suite binary, backed by a named volume so the
+index survives container restarts:
+
+```bash
+./demo/run.sh
+```
+
+walks through, against the real persistent engine: mixed-format ingestion (`.txt`/`.md`/`.csv`/
+`.json`/`.log`/images) with per-file metadata attrs, typo tolerance, out-of-domain semantic
+search, metadata-filtered search, an OCR'd image hit, cross-encoder reranking (before/after),
+the `labse` multilingual model against a separate index, and a `docker kill -9` + restart on the
+live gRPC server to show crash recovery firsthand. Demo documents live in `demo/corpus/`.
+
+**Validated end-to-end, 2026-10-03** (`docker compose build` + all 8 scripted sections, Docker
+Desktop on Windows): typo tolerance and the out-of-domain "heart attack symptoms" → cardiac-notes
+query both land correctly; the OCR'd PNG surfaces for a query whose text exists only inside the
+scanned image; `--rerank` sharply separates the one relevant document (score 0.998) from the rest
+(0.000); the `labse` index's "capital of France" query ranks `french.txt` first ahead of the other
+four languages; and the SIGKILL+restart check produced **byte-identical rankings before and after**
+(same 9/12 rank-1 hits, same scores) — confirming the crash-recovery path is real, not simulated.
+On Windows, running it from Git Bash/MSYS requires `MSYS_NO_PATHCONV=1` (already set inside
+`demo/run.sh`) so paths like `/home/zenith/corpus/...` reach the container unmangled.
+
+**Real-world Hindi accuracy check, 2026-10-03** (not part of `demo/run.sh`, run ad hoc in the
+same container): three live Hindi Wikipedia articles (Taj Mahal, Cricket, Himalaya) were fetched
+and indexed alongside the existing one-sentence `hindi.txt`, then queried with English prompts
+that share no vocabulary with the Devanagari text — so only the `labse` vector pass can match,
+not the lexical/BM25 pass that quietly helps the "capital of France" query above (it shares the
+literal word "France"). Initial result: **1 of 4 queries ranked the right document first (25%),
+3 of 4 landed it in the top 3 (75%)**; the cricket query never surfaced `cricket.txt` in the top
+3 at all.
+
+Root-caused and partially fixed the same day: `labse`'s ONNX export only exposes raw
+`last_hidden_state` with no pooling head, so this was initially CLS-pooled directly — a raw
+`[CLS]` vector without its trained projection is known to be anisotropic (near-identical cosine
+similarity regardless of topic, which matched the 0.08–0.14 scores observed here). Rather than
+guess at a pooling strategy, `sentence-transformers/LaBSE`'s own module config was checked
+directly: `1_Pooling/config.json` confirms CLS pooling is correct, and the actual missing piece
+is `2_Dense` — a small (2.4 MB) trained `Linear(768,768)+Tanh` projection saved separately from
+the base model. `Spec.DenseURL` (`internal/modelspec`) now fetches it via `zenith models pull
+labse` and `internal/localembedder` applies it after CLS pooling, reconstructing the real
+sentence-transformers pipeline instead of approximating it. This closed the anisotropy problem
+for same-language retrieval: `TestMultilingualSmoke`'s correct-passage similarity scores went
+from compressed near-threshold values to a properly spread 0.32–0.72 across all five languages.
+
+It did **not**, however, change the 4-query English→Hindi zero-shared-vocabulary benchmark
+above — mean pooling and the correct trained-projection reconstruction both reproduced the exact
+same 1/4 top-1, 3/4 top-3 result as the original raw-CLS baseline, with cricket.txt still never
+reaching the top 3. Three different, individually well-justified pooling/projection strategies
+converging on identical aggregate accuracy is itself informative: it indicates the ceiling here
+is the frozen, int8-quantized embedding model's cross-lingual alignment quality on a small
+(8-document), deliberately adversarial corpus with several unrelated-language distractors — not
+an implementation bug. See [ROADMAP.md](./ROADMAP.md) item 6 for the full breakdown. Honest
+takeaway: `labse` is solid for same-language/curated retrieval (now backed by the real trained
+projection, not a workaround) and for single-document demo queries, but arbitrary zero-shared-
+vocabulary cross-lingual retrieval at this corpus scale should not be oversold.
 
 ## Used in Kshetra IQ
 

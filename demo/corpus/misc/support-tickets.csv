@@ -1,0 +1,5 @@
+id,category,summary
+1001,billing,customer could not recieve invoice after payment update
+1002,technical,search results seem out of order after reindexing
+1003,billing,refund requested for duplicate charge on account
+1004,technical,server occasionally restarts during large batch import

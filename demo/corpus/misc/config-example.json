@@ -1,0 +1,5 @@
+{
+  "engine": "zenith",
+  "model": "gte-small",
+  "feature": "metadata filtering lets you scope search to a tenant or category before ranking runs"
+}

@@ -43,6 +43,7 @@ type Embedder struct {
 	spec  Spec
 	tok   *tokenizer
 	model *onnxModel
+	dense *denseLayer // optional trained projection applied after pooling (see spec.DenseURL)
 }
 
 // New loads the bundled ONNX model and returns a ready Embedder.
@@ -53,7 +54,7 @@ func New() (*Embedder, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newEmbedder(spec, modelBytes, vocabBytes)
+	return newEmbedder(spec, modelBytes, vocabBytes, nil)
 }
 
 // NewByID returns the embedder for a registered model. The bundled model is
@@ -76,14 +77,21 @@ func NewByID(id, modelsDir string) (*Embedder, error) {
 	if v, err := os.ReadFile(filepath.Join(dir, "vocab.txt")); err == nil {
 		vocab = v
 	}
-	return newEmbedder(spec, model, vocab)
+	var dense []byte
+	if spec.DenseURL != "" {
+		dense, err = os.ReadFile(filepath.Join(dir, "dense.safetensors"))
+		if err != nil {
+			return nil, fmt.Errorf("localembedder: model %q is missing its trained dense projection (%w) — run: zenith models pull %s", spec.ID, err, spec.ID)
+		}
+	}
+	return newEmbedder(spec, model, vocab, dense)
 }
 
-func newEmbedder(spec Spec, model, vocab []byte) (*Embedder, error) {
+func newEmbedder(spec Spec, model, vocab, dense []byte) (*Embedder, error) {
 	if err := unavailable(); err != nil {
 		return nil, err
 	}
-	tok, err := newTokenizerFromBytes(vocab)
+	tok, err := newTokenizerFromBytes(vocab, spec.Cased)
 	if err != nil {
 		return nil, fmt.Errorf("localembedder: tokenizer: %w", err)
 	}
@@ -98,7 +106,18 @@ func newEmbedder(spec Spec, model, vocab []byte) (*Embedder, error) {
 		return nil, fmt.Errorf("localembedder: ort session: %w", err)
 	}
 
-	return &Embedder{spec: spec, tok: tok, model: m}, nil
+	e := &Embedder{spec: spec, tok: tok, model: m}
+	if len(dense) > 0 {
+		d, err := parseDenseSafetensors(dense)
+		if err != nil {
+			return nil, fmt.Errorf("localembedder: dense projection: %w", err)
+		}
+		if d.in != spec.Dims || d.out != spec.Dims {
+			return nil, fmt.Errorf("localembedder: dense projection shape [%d,%d] does not match model dims %d", d.out, d.in, spec.Dims)
+		}
+		e.dense = d
+	}
+	return e, nil
 }
 
 // Spec returns the model description this embedder runs.
@@ -117,10 +136,16 @@ func seqLenFor(n int) int {
 }
 
 func (e *Embedder) pool(hidden []float32, mask []int64, seqLen int) []float32 {
+	var vec []float32
 	if e.spec.Pooling == PoolCLS {
-		return l2Normalize(append([]float32(nil), hidden[:e.spec.Dims]...))
+		vec = append([]float32(nil), hidden[:e.spec.Dims]...)
+	} else {
+		vec = meanPool(hidden, mask, seqLen, e.spec.Dims)
 	}
-	return l2Normalize(meanPool(hidden, mask, seqLen, e.spec.Dims))
+	if e.dense != nil {
+		vec = e.dense.apply(vec)
+	}
+	return l2Normalize(vec)
 }
 
 // Embed returns an L2-normalised vector for a document (or any symmetric text).

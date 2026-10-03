@@ -21,7 +21,7 @@ func TestMSMARCOLengthStats(t *testing.T) {
 	}
 	defer f.Close()
 
-	tok, err := newTokenizerFromBytes(vocabBytes)
+	tok, err := newTokenizerFromBytes(vocabBytes, false)
 	if err != nil {
 		t.Fatal(err)
 	}

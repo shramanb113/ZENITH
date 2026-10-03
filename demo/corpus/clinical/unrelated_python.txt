@@ -1,0 +1,2 @@
+Python's garbage collector uses reference counting as its primary mechanism.
+Circular references are handled by a cycle-detecting GC.

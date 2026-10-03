@@ -13,7 +13,7 @@ var testVocab []byte
 
 func mustTokenizer(t *testing.T) *tokenizer {
 	t.Helper()
-	tok, err := newTokenizerFromBytes(testVocab)
+	tok, err := newTokenizerFromBytes(testVocab, false)
 	if err != nil {
 		t.Fatalf("newTokenizerFromBytes: %v", err)
 	}
