@@ -8,9 +8,10 @@ services:
       - zenith-home:/home/zenith
       - ./demo/corpus:/home/zenith/corpus:ro
     ports:
-      - "8080:8080"   # gRPC — the persistent engine (cmd/client, CLI)
-      - "7700:7700"   # HTTP namespace sidecar — in-memory only, see CLAUDE.md
-    command: ["serve", "--db", "/home/zenith/data/zenith.db"]
+      - "127.0.0.1:8080:8080"   # gRPC — the persistent engine (cmd/client, CLI)
+      - "127.0.0.1:7700:7700"   # HTTP namespace sidecar — in-memory only, see CLAUDE.md
+    # 0.0.0.0 inside the container only; the host publishes on 127.0.0.1 (see ports: above).
+    command: ["serve", "--db", "/home/zenith/data/zenith.db", "--bind", "0.0.0.0", "--allow-unauthenticated"]
 
 volumes:
   zenith-home:

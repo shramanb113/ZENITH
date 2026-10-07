@@ -30,7 +30,19 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	lis, err := net.Listen("tcp", ":8080")
+	bind := os.Getenv("ZENITH_BIND")
+	if bind == "" {
+		bind = "127.0.0.1"
+	}
+	key := os.Getenv("ZENITH_KEY")
+	allowUnauthed := os.Getenv("ZENITH_ALLOW_UNAUTHENTICATED") == "1"
+	addr := net.JoinHostPort(bind, "8080")
+	if err := server.CheckExposure(addr, key, allowUnauthed); err != nil {
+		slog.Error(err.Error())
+		os.Exit(1)
+	}
+
+	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		slog.Error("Failed to listen on tcp socket", "error", err)
 		os.Exit(1)
@@ -126,7 +138,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(server.KeyAuthUnary(key)),
+		grpc.ChainStreamInterceptor(server.KeyAuthStream(key)),
+	)
 	zenithproto.RegisterSearchServiceServer(grpcServer, &server.ZenithServer{
 		Engine:     engine,
 		PDFIndexer: pdfIndexer,

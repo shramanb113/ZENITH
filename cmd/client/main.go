@@ -12,6 +12,7 @@ import (
 	"github.com/shramanb113/ZENITH/gen/go/zenithproto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 // ── colour helpers ────────────────────────────────────────────────────────────
@@ -167,7 +168,17 @@ func main() {
 		addr = os.Args[1]
 	}
 
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	if key := os.Getenv("ZENITH_KEY"); key != "" {
+		dialOpts = append(dialOpts, grpc.WithUnaryInterceptor(func(
+			ctx context.Context, method string, req, reply any, cc *grpc.ClientConn,
+			invoker grpc.UnaryInvoker, opts ...grpc.CallOption,
+		) error {
+			return invoker(metadata.AppendToOutgoingContext(ctx, "x-zenith-key", key), method, req, reply, cc, opts...)
+		}))
+	}
+
+	conn, err := grpc.NewClient(addr, dialOpts...)
 	if err != nil {
 		log.Fatalf("gRPC dial failed: %v", err)
 	}

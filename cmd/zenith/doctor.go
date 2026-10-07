@@ -15,11 +15,15 @@ import (
 	"github.com/shramanb113/ZENITH/internal/localembedder"
 )
 
-var doctorFlags struct{ json bool }
+var doctorFlags struct {
+	json bool
+	db   string
+}
 
 func init() {
 	doctorCmd.Flags().BoolVar(&doctorFlags.json, "json", false,
 		"Print a machine-readable report (safe to attach to a support request: paths and versions only, never index contents)")
+	doctorCmd.Flags().StringVar(&doctorFlags.db, "db", "", "Index file to check (default: ~/.zenith/zenith.db)")
 }
 
 var doctorCmd = &cobra.Command{
@@ -92,7 +96,11 @@ func runDoctor() error {
 		checks = append(checks, doctorCheck{name: "data dir", ok: true, msg: msg})
 	}
 
-	checks = append(checks, indexChecks(filepath.Join(dataDir, "zenith.db"))...)
+	dbPath := filepath.Join(dataDir, "zenith.db")
+	if doctorFlags.db != "" {
+		dbPath = doctorFlags.db
+	}
+	checks = append(checks, indexChecks(dbPath)...)
 
 	// Auto-start.
 	if on, _ := autostartFn().IsInstalled(); on {

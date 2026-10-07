@@ -27,4 +27,4 @@ USER zenith
 ENV HOME=/home/zenith
 EXPOSE 7700 8080
 ENTRYPOINT ["zenith"]
-CMD ["serve", "--db", "/home/zenith/data/zenith.db"]
+CMD ["serve", "--db", "/home/zenith/data/zenith.db", "--bind", "0.0.0.0"]

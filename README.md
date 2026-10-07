@@ -355,7 +355,7 @@ zenith log --type INDEXED -f
 ### Other commands
 
 ```bash
-zenith serve            # start gRPC server (port 8080)
+zenith serve            # start gRPC server (127.0.0.1:8080; --bind 0.0.0.0 + --key to expose)
 zenith serve --port 9090
 zenith version          # print version
 zenith update           # update to latest release
@@ -504,6 +504,17 @@ service SearchService {
 
 `Search` fuses lexical (BM25 + n-gram + phonetic + BK-tree fuzzy) and vector scoring via RRF — there's no separate `FuzzySearch`/`HybridSearch` RPC, it's all one `Search` call. `SearchRequest` takes an optional `limit`/`offset` for pagination (default limit: 10), and an optional `filter` (`FilterNode`) — see "Metadata filtering" below. See `internal/proto/document.proto` for the source of truth.
 
+### Authentication & binding
+
+`zenith serve` binds `127.0.0.1` by default. `--bind 0.0.0.0` (or any other non-loopback
+address) refuses to start unless a shared key is set (`--key` / `ZENITH_KEY`) or you pass
+`--allow-unauthenticated` — a server is never silently exposed unauthenticated on a network
+interface. When a key is set, every RPC must carry it as gRPC metadata under `x-zenith-key`
+(the same secret the HTTP sidecar checks via the `X-Zenith-Key` header); `zenith-client` sends
+it automatically when `ZENITH_KEY` is set in its own environment. **Breaking change:** `--http
+:7700` now also binds `127.0.0.1` by default — pass `--bind 0.0.0.0` to reach it from outside
+the host, same as the gRPC port.
+
 ---
 
 ## Metadata filtering
@@ -596,11 +607,13 @@ All tunable parameters live in `internal/config/config.go`.
 
 | Parameter | Default | Description |
 |---|---|---|
-| `FuzzyMaxDist` | `2` | BK-tree edit distance threshold |
-| `RRFConstant` | `60.0` | RRF k value |
+| `FuzzyMaxDist` | `2` | Max fuzzy edit distance (FST Levenshtein automaton); with `FuzzyByLength` it applies to words of 6+ letters |
+| `FuzzyByLength` | `true` | ≤3 letters exact, 4–5 letters one edit, longer words `FuzzyMaxDist` |
+| `RRFConstant` | `20.0` | RRF k value (tuned on MS MARCO dev; plateau k 10–30) |
+| `VectorWeight` | `2.0` | RRF weight of the semantic list (lexical list weight is 1.0) |
 | `PhoneticWeight` | `0.3` | Phonetic signal blend weight |
-| `VectorWeight` | `0.7` | Vector signal blend weight |
-| `NeuralWeight` | `1.0` | Neural signal blend weight |
+| `NeuralWeight` | `1.0` | Zero-result neural-expansion weight |
+| `MaxResults` | `1000` | Internal RRF candidate cap, not a page size |
 | `MemTableMaxSize` | `64 MB` | SSTable flush threshold |
 | `CommitWindow` | `4 ms` | Group-committer batch window |
 
@@ -648,8 +661,15 @@ MIT
 
 ## HTTP sidecar mode
 
-`zenith serve --http :7700` serves short-lived, in-memory namespaces over HTTP/JSON. Services that
-are not written in Go can use ZENITH's hybrid matching without gRPC code generation.
+`zenith serve --http :7700` serves ZENITH over HTTP/JSON, so services that are not written in Go
+can use its hybrid matching without gRPC code generation. The `/v1/ns/*` routes are a per-request
+namespace mode for classify-and-discard workloads: each `PUT` builds a short-lived, in-memory
+index, you run a batch of explained queries against it, and it is dropped on `DELETE`, after 10
+idle minutes, or by LRU. Nothing is written to disk.
+
+Analysis is Unicode-aware (Devanagari matras, nukta and ZWJ folding), and `--synonyms` can bridge
+romanised and native-script forms (e.g. `paani <-> water`). Retrieval quality on human-written
+Hinglish/Devanagari text has not been benchmarked yet (ROADMAP Deferred backlog item J).
 
 | Route | Purpose |
 |---|---|
@@ -684,16 +704,27 @@ index survives container restarts:
 walks through, against the real persistent engine: mixed-format ingestion (`.txt`/`.md`/`.csv`/
 `.json`/`.log`/images) with per-file metadata attrs, typo tolerance, out-of-domain semantic
 search, metadata-filtered search, an OCR'd image hit, cross-encoder reranking (before/after),
-the `labse` multilingual model against a separate index, and a `docker kill -9` + restart on the
-live gRPC server to show crash recovery firsthand. Demo documents live in `demo/corpus/`.
+the `labse` multilingual model against a separate index, and a SIGKILL of the running server
+followed by a check that the index files it had open still return byte-identical results and pass
+every segment checksum. Demo documents live in `demo/corpus/`.
+
+**What section 8 does and does not show.** It shows that segments already committed to disk
+survive a SIGKILL of a process holding them open: segments are immutable and fsynced before the
+manifest points at them. It does *not* show that writes sent to `zenith serve` over gRPC survive a
+SIGKILL — that server keeps new writes in memory and saves them only on graceful shutdown.
+Write-ahead-logged durability, where every acknowledged write survives a kill, is a property of
+the Go library (`pkg/zenith`), exercised by hard-kill loops and simulated power-loss sweeps
+(ROADMAP risk 6).
 
 **Validated end-to-end, 2026-10-03** (`docker compose build` + all 8 scripted sections, Docker
 Desktop on Windows): typo tolerance and the out-of-domain "heart attack symptoms" → cardiac-notes
 query both land correctly; the OCR'd PNG surfaces for a query whose text exists only inside the
 scanned image; `--rerank` sharply separates the one relevant document (score 0.998) from the rest
 (0.000); the `labse` index's "capital of France" query ranks `french.txt` first ahead of the other
-four languages; and the SIGKILL+restart check produced **byte-identical rankings before and after**
-(same 9/12 rank-1 hits, same scores) — confirming the crash-recovery path is real, not simulated.
+four languages; and the original section 8 (the `zenith-client` diagnostic before and after a
+SIGKILL) showed identical results — **but that was not evidence of crash recovery**: the
+diagnostic re-indexes its own five documents on every run, so the post-kill run rebuilt exactly
+what was being compared. Section 8 was rewritten to compare the saved index directly (above).
 On Windows, running it from Git Bash/MSYS requires `MSYS_NO_PATHCONV=1` (already set inside
 `demo/run.sh`) so paths like `/home/zenith/corpus/...` reach the container unmangled.
 
@@ -731,15 +762,3 @@ takeaway: `labse` is solid for same-language/curated retrieval (now backed by th
 projection, not a workaround) and for single-document demo queries, but arbitrary zero-shared-
 vocabulary cross-lingual retrieval at this corpus scale should not be oversold.
 
-## Used in Kshetra IQ
-
-[Kshetra IQ](https://github.com/shramanb113/Flat-finder) (SerpApi India Hackathon 2026) uses this sidecar to decide which
-issue a noisy review or news snippet is about. That includes misspellings, Hinglish ("paani bhar jaata hai") and
-Devanagari ("पानी भर जाता है"). SerpApi does all the fetching, ZENITH only matches, and a deterministic rule engine
-owns the verdict. These additions were built during the hackathon and are disclosed in the submission:
-- Unicode-aware analysis (Devanagari matras, nukta and ZWJ folding)
-- Explain mode
-- `WithoutWordVectors`
-- the HTTP sidecar
-- the synonyms file
-- this Dockerfile
