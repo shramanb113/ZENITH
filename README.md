@@ -239,7 +239,7 @@ On every query and document add, ZENITH runs this cascade automatically:
 
 Cold start with the embedded model: **under 1 second.** The ONNX session is initialised once at startup and held for the process lifetime.
 
-### Multilingual search (opt-in, `labse`)
+### Multilingual search (opt-in, `labse` or `distiluse-multilingual`)
 
 ```bash
 zenith models pull labse
@@ -247,7 +247,9 @@ zenith index ~/multilingual-notes --model labse
 zenith search "capital of France" --model labse   # matches a French-language passage
 ```
 
-`labse` is cross-lingual: an English query can match a passage written in French, German, Spanish, Hindi, or Japanese (smoke-tested across those five; LaBSE itself covers 109 languages). It is CLS-pooled directly from the ONNX export's `last_hidden_state`, not the full sentence-transformers LaBSE pipeline (which adds a final dense+normalize layer this export doesn't expose) — expect useful, not published-LaBSE-benchmark, cross-lingual retrieval. Needs its own index: it is 768-dim and cannot share a database with the 384-dim default models.
+`labse` is cross-lingual: an English query can match a passage written in French, German, Spanish, Hindi, Japanese, Chinese, or Arabic. It reconstructs the real sentence-transformers pipeline (CLS pool -> trained `2_Dense` projection -> normalize), not a raw-CLS approximation. `distiluse-multilingual` (`zenith models pull distiluse-multilingual`) is a smaller alternative — DistilBERT-based, knowledge-distilled for cross-lingual similarity, 50+ languages — with comparable measured quality on the benchmark below. Both are evaluated by `internal/index/multilingual_beir_test.go` (`ZENITH_MODEL_EVAL=1 go test ./internal/index -run TestMultilingualBEIR -v`): real nDCG@10/Recall@10 against a small hand-curated 7-language fixture set, not a dot-product similarity check. Honest result: fr/de/es/hi/ar score a clean nDCG@10 of 1.0 for both models; ja and zh score lower (nDCG@10 roughly 0.70–0.84) even after fixing CJK word-segmentation (below) — this is smoke-scale evidence, not BEIR/MIRACL-rigor benchmarking. Each multilingual model needs its own index — `labse` is 768-dim, `distiluse-multilingual` is 512-dim, and neither can share a database with the 384-dim default models.
+
+**CJK word segmentation.** Chinese, Japanese, and Korean text has no whitespace between words, unlike every other script ZENITH's analyzer handles. `internal/analysis/segment.go` now splits Han/Hiragana/Katakana/Hangul characters one span per character instead of treating a whole sentence as one oversized token — the same fallback general-purpose search engines without a dictionary segmenter use (no segmentation library is in `go.mod`; adding one wasn't in scope). This measurably improved the Chinese benchmark score above (Recall@10 0.83 -> 1.0). Thai (and any other script needing real dictionary segmentation) remains a known, documented gap.
 
 ### Use Ollama instead
 
