@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"hash/fnv"
+	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -59,6 +61,28 @@ func (c *countingEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]
 }
 
 func (c *countingEmbedder) Dimensions() int { return c.inner.Dimensions() }
+
+// asymmetricEmbedder distinguishes Embed (document) from EmbedQuery (query)
+// input, like BGE's query instruction prefix — the reason queryCache must be
+// a separate cache from cache, not a second lookup into the same one.
+type asymmetricEmbedder struct {
+	inner      *fakeVectorEmbedder
+	embedCalls atomic.Int64
+	queryCalls atomic.Int64
+}
+
+func (a *asymmetricEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	a.embedCalls.Add(1)
+	return a.inner.Embed(ctx, "doc:"+text)
+}
+func (a *asymmetricEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	return a.inner.EmbedBatch(ctx, texts)
+}
+func (a *asymmetricEmbedder) Dimensions() int { return a.inner.Dimensions() }
+func (a *asymmetricEmbedder) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
+	a.queryCalls.Add(1)
+	return a.inner.Embed(ctx, "query:"+text)
+}
 
 // errorEmbedder always returns an error.
 type errorEmbedder struct{}
@@ -174,6 +198,117 @@ func TestCachingEmbedder_BatchPartialCacheHit(t *testing.T) {
 	newCalls := base.calls.Load() - callsBefore
 	if newCalls != 1 {
 		t.Errorf("expected 1 new base call for partial miss, got %d", newCalls)
+	}
+}
+
+func TestCachingEmbedder_EmbedQueryIsCachedSeparatelyFromEmbed(t *testing.T) {
+	base := &asymmetricEmbedder{inner: newFakeVectorEmbedder(4)}
+	cached, err := NewCachingEmbedder(base, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	const text = "capital of France"
+
+	docVec, err := cached.Embed(ctx, text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queryVec, err := cached.EmbedQuery(ctx, text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reflect.DeepEqual(docVec, queryVec) {
+		t.Fatal("Embed and EmbedQuery returned the same vector for the same text — queryCache must not share cache's entries")
+	}
+	if base.embedCalls.Load() != 1 || base.queryCalls.Load() != 1 {
+		t.Fatalf("expected 1 Embed call and 1 EmbedQuery call, got %d and %d", base.embedCalls.Load(), base.queryCalls.Load())
+	}
+
+	// Repeat both — must hit their respective caches, not call base again.
+	if _, err := cached.Embed(ctx, text); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cached.EmbedQuery(ctx, text); err != nil {
+		t.Fatal(err)
+	}
+	if base.embedCalls.Load() != 1 || base.queryCalls.Load() != 1 {
+		t.Fatalf("repeat calls should hit cache: embed=%d query=%d", base.embedCalls.Load(), base.queryCalls.Load())
+	}
+}
+
+func TestCachingEmbedder_SymmetricEmbedQueryStillCached(t *testing.T) {
+	base := &countingEmbedder{inner: newFakeVectorEmbedder(4)}
+	cached, err := NewCachingEmbedder(base, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	const text = "plain query"
+	if _, err := cached.EmbedQuery(ctx, text); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cached.EmbedQuery(ctx, text); err != nil {
+		t.Fatal(err)
+	}
+	if got := base.calls.Load(); got != 1 {
+		t.Fatalf("symmetric EmbedQuery should fall through to Embed's cache: expected 1 base call, got %d", got)
+	}
+}
+
+func TestCachingEmbedder_ConcurrentMissesDoNotDuplicateWork(t *testing.T) {
+	ctx := context.Background()
+	const workers = 50
+	const text = "same text, many concurrent callers"
+
+	for _, tc := range []struct {
+		name string
+		call func(c *CachingEmbedder) ([]float32, error)
+	}{
+		{"Embed", func(c *CachingEmbedder) ([]float32, error) { return c.Embed(ctx, text) }},
+		{"EmbedQuery", func(c *CachingEmbedder) ([]float32, error) { return c.EmbedQuery(ctx, text) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := &asymmetricEmbedder{inner: newFakeVectorEmbedder(8)}
+			cached, err := NewCachingEmbedder(base, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wg sync.WaitGroup
+			results := make([][]float32, workers)
+			for i := 0; i < workers; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					v, err := tc.call(cached)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					results[i] = v
+				}(i)
+			}
+			wg.Wait()
+
+			if n := base.embedCalls.Load() + base.queryCalls.Load(); n != 1 {
+				t.Fatalf("%d concurrent callers on the same uncached text produced %d base calls, want 1", workers, n)
+			}
+			for i, v := range results {
+				if !reflect.DeepEqual(v, results[0]) {
+					t.Fatalf("result[%d] differs from result[0]: %v vs %v", i, v, results[0])
+				}
+			}
+			// Mutating one caller's result must never corrupt another's or
+			// the cache's own stored copy (cloneVec's invariant).
+			results[0][0] = 99999
+			v2, err := tc.call(cached)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if v2[0] == 99999 {
+				t.Fatal("mutating a returned vector corrupted a later cache hit — missing a clone")
+			}
+		})
 	}
 }
 

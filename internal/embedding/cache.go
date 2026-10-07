@@ -5,11 +5,28 @@ import (
 	"fmt"
 
 	lru "github.com/hashicorp/golang-lru/v2"
+	"golang.org/x/sync/singleflight"
 )
 
 type CachingEmbedder struct {
 	base  Embedder
 	cache *lru.Cache[string, []float32]
+
+	// queryCache is a second, separate LRU, not a second lookup into cache:
+	// an asymmetric model (e.g. BGE's query instruction prefix) feeds
+	// Embed(text) and EmbedQuery(text) different model input for the same
+	// raw text, so the two must never share a cache keyed on that text.
+	queryCache *lru.Cache[string, []float32]
+
+	// embedSF/querySF de-duplicate concurrent misses for the same text: N
+	// goroutines racing on the same uncached text would otherwise each pay
+	// the full embedder cost independently — the dominant cost in practice
+	// being the process-wide ONNX inference mutex shared by every caller
+	// (internal/localembedder/model.go), not this cache. Two separate
+	// singleflight.Group values rather than one keyed by a prefixed string,
+	// so a cache hit (the common case) never pays a string-concatenation
+	// allocation just to form a dedup key it won't use.
+	embedSF, querySF singleflight.Group
 }
 
 func NewCachingEmbedder(base Embedder, maxSize int) (*CachingEmbedder, error) {
@@ -17,9 +34,14 @@ func NewCachingEmbedder(base Embedder, maxSize int) (*CachingEmbedder, error) {
 	if err != nil {
 		return nil, err
 	}
+	qc, err := lru.New[string, []float32](maxSize)
+	if err != nil {
+		return nil, err
+	}
 	return &CachingEmbedder{
-		base:  base,
-		cache: c,
+		base:       base,
+		cache:      c,
+		queryCache: qc,
 	}, nil
 }
 
@@ -40,17 +62,37 @@ func (c *CachingEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 		return cloneVec(val), nil
 	}
 
-	vec, err := c.base.Embed(ctx, text)
-	// A nil/empty vector represents a failed embedding even when err is nil
-	// (some embedders signal per-item failure that way). Never cache that —
-	// it would poison the entry forever and the caller would keep getting a
-	// silent "success" with nothing usable.
-	if err == nil && len(vec) > 0 {
-		c.cache.Add(text, cloneVec(vec))
+	v, err, _ := c.embedSF.Do(text, func() (any, error) {
+		vec, err := c.base.Embed(ctx, text)
+		// A nil/empty vector represents a failed embedding even when err is
+		// nil (some embedders signal per-item failure that way). Never cache
+		// that — it would poison the entry forever and the caller would
+		// keep getting a silent "success" with nothing usable.
+		if err == nil && len(vec) > 0 {
+			c.cache.Add(text, cloneVec(vec))
+		}
+		return vec, err
+	})
+	if err != nil {
+		return nil, err
 	}
-	return vec, err
+	// Every caller sharing this in-flight Do (including the one that
+	// triggered it) gets the same underlying slice back from singleflight —
+	// clone before returning so one caller mutating its copy can't corrupt
+	// another's, the same invariant cloneVec already gives every cache hit.
+	return cloneVec(v.([]float32)), nil
 }
 
+// EmbedBatch has no singleflight dedup, unlike Embed/EmbedQuery above — a
+// deliberate scope decision, not an oversight. Deduping per missing text
+// here would force each one through its own single-text call, destroying
+// the N-texts-in-one-model-call amortization that is EmbedBatch's whole
+// purpose; a correct version would need to merge missing texts *across*
+// concurrent EmbedBatch calls before batching, a materially bigger feature.
+// It also targets a workload (many literally-identical texts landing in
+// concurrent document-ingestion batches) that TestConcurrentQPS's measured
+// bottleneck — concurrent identical *queries*, via EmbedQuery above — does
+// not exercise; revisit only if ingestion-side measurement shows it matters.
 func (c *CachingEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	results := make([][]float32, len(texts))
 	var missingIdx []int
@@ -102,12 +144,31 @@ func (c *CachingEmbedder) Name() string {
 	return "unknown"
 }
 
-// EmbedQuery forwards to the wrapped embedder's query mode when it has one.
-// Queries bypass the cache: they are few and rarely repeat, and a query
-// vector must not be served for the same text embedded as a document.
+// EmbedQuery forwards to the wrapped embedder's query mode when it has one,
+// through queryCache — a separate cache/dedup path from Embed's (see
+// queryCache's doc comment). Caching queries pays off specifically under
+// concurrent load: many callers searching the same popular or retried query
+// at once previously each paid the full embedder cost independently (the
+// scenario internal/sidecar's TestConcurrentQPS measures), instead of one
+// real call plus cheap cache hits. Symmetric models (no QueryEmbedder) fall
+// through to the now-deduplicated Embed above, so they gain the same benefit.
 func (c *CachingEmbedder) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
-	if q, ok := c.base.(QueryEmbedder); ok {
-		return q.EmbedQuery(ctx, text)
+	q, ok := c.base.(QueryEmbedder)
+	if !ok {
+		return c.Embed(ctx, text)
 	}
-	return c.Embed(ctx, text)
+	if val, ok := c.queryCache.Get(text); ok {
+		return cloneVec(val), nil
+	}
+	v, err, _ := c.querySF.Do(text, func() (any, error) {
+		vec, err := q.EmbedQuery(ctx, text)
+		if err == nil && len(vec) > 0 {
+			c.queryCache.Add(text, cloneVec(vec))
+		}
+		return vec, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return cloneVec(v.([]float32)), nil
 }
