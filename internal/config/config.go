@@ -66,6 +66,7 @@ func DefaultConfig() *Config {
 		// vs 0.918 for the previous k=60/equal-weight fusion (which scored
 		// below the dense list alone at 0.947). Both sit on a broad plateau:
 		// k 10–30 × wVec 1.5–3.0 all measured ≥ 0.952.
+		// Re-checked with gte-small on 2026-10-08: still on the plateau (ROADMAP P1-6).
 		RRFConstant:      20.0,
 		EmbeddingWorkers: 4,
 		CompactionInterv: 30 * time.Second,
