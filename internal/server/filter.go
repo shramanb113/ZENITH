@@ -44,8 +44,22 @@ func attrValueFromProto(v *zenithproto.AttrValue) (index.AttrValue, error) {
 			return index.AttrValue{}, errors.New("numbers must be finite")
 		}
 		return index.AttrValue{Kind: index.AttrNumber, N: x.NumberValue}, nil
+	case *zenithproto.AttrValue_ArrayValue:
+		vals := x.ArrayValue.GetValues()
+		arr := make([]index.AttrValue, len(vals))
+		for i, elem := range vals {
+			av, err := attrValueFromProto(elem)
+			if err != nil {
+				return index.AttrValue{}, err
+			}
+			if av.Kind == index.AttrArray {
+				return index.AttrValue{}, errors.New("nested arrays are not supported")
+			}
+			arr[i] = av
+		}
+		return index.AttrValue{Kind: index.AttrArray, Arr: arr}, nil
 	}
-	return index.AttrValue{}, errors.New("value must be a string, number or bool")
+	return index.AttrValue{}, errors.New("value must be a string, number, bool or array")
 }
 
 func attrsToProto(a index.Attrs) map[string]*zenithproto.AttrValue {
@@ -54,16 +68,31 @@ func attrsToProto(a index.Attrs) map[string]*zenithproto.AttrValue {
 	}
 	out := make(map[string]*zenithproto.AttrValue, len(a))
 	for k, v := range a {
-		switch v.Kind {
-		case index.AttrString:
-			out[k] = &zenithproto.AttrValue{Kind: &zenithproto.AttrValue_StringValue{StringValue: v.S}}
-		case index.AttrBool:
-			out[k] = &zenithproto.AttrValue{Kind: &zenithproto.AttrValue_BoolValue{BoolValue: v.N != 0}}
-		case index.AttrNumber:
-			out[k] = &zenithproto.AttrValue{Kind: &zenithproto.AttrValue_NumberValue{NumberValue: v.N}}
+		if pv := attrValueToProto(v); pv != nil {
+			out[k] = pv
 		}
 	}
 	return out
+}
+
+func attrValueToProto(v index.AttrValue) *zenithproto.AttrValue {
+	switch v.Kind {
+	case index.AttrString:
+		return &zenithproto.AttrValue{Kind: &zenithproto.AttrValue_StringValue{StringValue: v.S}}
+	case index.AttrBool:
+		return &zenithproto.AttrValue{Kind: &zenithproto.AttrValue_BoolValue{BoolValue: v.N != 0}}
+	case index.AttrNumber:
+		return &zenithproto.AttrValue{Kind: &zenithproto.AttrValue_NumberValue{NumberValue: v.N}}
+	case index.AttrArray:
+		elems := make([]*zenithproto.AttrValue, 0, len(v.Arr))
+		for _, e := range v.Arr {
+			if pv := attrValueToProto(e); pv != nil {
+				elems = append(elems, pv)
+			}
+		}
+		return &zenithproto.AttrValue{Kind: &zenithproto.AttrValue_ArrayValue{ArrayValue: &zenithproto.AttrValueArray{Values: elems}}}
+	}
+	return nil
 }
 
 // filterFromProto converts a request's filter tree into an engine filter. The
@@ -139,6 +168,16 @@ func specFromProto(n *zenithproto.FilterNode, depth int, nodes *int) (*index.Fil
 			}
 		case zenithproto.FilterCondition_EXISTS:
 			s.Op = "exists"
+		case zenithproto.FilterCondition_PREFIX:
+			if len(vals) != 1 {
+				return nil, fmt.Errorf("filter PREFIX on %q needs exactly one value", c.GetField())
+			}
+			s.Op, s.Value = "prefix", &vals[0]
+		case zenithproto.FilterCondition_CONTAINS:
+			if len(vals) != 1 {
+				return nil, fmt.Errorf("filter CONTAINS on %q needs exactly one value", c.GetField())
+			}
+			s.Op, s.Value = "contains", &vals[0]
 		default:
 			return nil, fmt.Errorf("filter on %q has an unknown operator", c.GetField())
 		}

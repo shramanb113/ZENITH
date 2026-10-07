@@ -218,8 +218,9 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 type docIn struct {
 	ID   string `json:"id"`
 	Text string `json:"text"`
-	// Attrs is optional metadata (string, number or bool values) that a search's
-	// "filter" can test.
+	// Attrs is optional metadata (string, number, bool, or an array of those —
+	// never nested — values) that a search's "filter" can test. eq/in/range/
+	// prefix/contains on an array-valued field mean "any element matches".
 	Attrs map[string]any `json:"attrs,omitempty"`
 }
 

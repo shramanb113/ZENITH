@@ -26,6 +26,10 @@ func boolean(b bool) *zenithproto.AttrValue {
 	return &zenithproto.AttrValue{Kind: &zenithproto.AttrValue_BoolValue{BoolValue: b}}
 }
 
+func arr(vals ...*zenithproto.AttrValue) *zenithproto.AttrValue {
+	return &zenithproto.AttrValue{Kind: &zenithproto.AttrValue_ArrayValue{ArrayValue: &zenithproto.AttrValueArray{Values: vals}}}
+}
+
 func cond(field string, op zenithproto.FilterCondition_Op, vals ...*zenithproto.AttrValue) *zenithproto.FilterNode {
 	return &zenithproto.FilterNode{Node: &zenithproto.FilterNode_Condition{Condition: &zenithproto.FilterCondition{
 		Field: field, Op: op, Values: vals}}}
@@ -118,6 +122,57 @@ func TestGRPC_SearchFilterAndAttrsRoundTrip(t *testing.T) {
 	}
 }
 
+// Array-valued attrs round-trip through the proto (AttrValue_ArrayValue) and
+// eq/in/prefix/contains conditions match "any element" of the array, exactly
+// as pkg/zenith's Filter does for the in-process path.
+func TestGRPC_ArrayAttrsAndPrefixContainsRoundTrip(t *testing.T) {
+	s := newSrv(t)
+	for _, d := range []struct {
+		id    string
+		attrs map[string]*zenithproto.AttrValue
+	}{
+		{"a", map[string]*zenithproto.AttrValue{"tags": arr(str("go"), str("infra")), "path": str("/docs/guide")}},
+		{"b", map[string]*zenithproto.AttrValue{"tags": arr(str("python"), str("infra")), "path": str("/docs/api")}},
+		{"c", map[string]*zenithproto.AttrValue{"tags": arr(str("rust")), "path": str("/blog/release-notes")}},
+	} {
+		if _, err := s.IndexDocuments(context.Background(), &zenithproto.IndexRequest{
+			Id: d.id, Data: "kubernetes cluster networking guide", Attrs: d.attrs}); err != nil {
+			t.Fatalf("IndexDocuments(%s): %v", d.id, err)
+		}
+	}
+	search := func(f *zenithproto.FilterNode) *zenithproto.SearchResponse {
+		t.Helper()
+		r, err := s.Search(context.Background(), &zenithproto.SearchRequest{Query: "kubernetes networking", Limit: 50, Filter: f})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+
+	got := idsOf(search(cond("tags", zenithproto.FilterCondition_EQ, str("infra"))))
+	if len(got) != 2 || !got["a"] || !got["b"] {
+		t.Fatalf("tags eq infra: %v", got)
+	}
+	got = idsOf(search(cond("path", zenithproto.FilterCondition_PREFIX, str("/docs/"))))
+	if len(got) != 2 || !got["a"] || !got["b"] {
+		t.Fatalf("path prefix /docs/: %v", got)
+	}
+	got = idsOf(search(cond("path", zenithproto.FilterCondition_CONTAINS, str("release"))))
+	if len(got) != 1 || !got["c"] {
+		t.Fatalf("path contains release: %v", got)
+	}
+
+	// Array attrs round-trip back out on the result too.
+	r := search(cond("tags", zenithproto.FilterCondition_EQ, str("rust")))
+	if len(r.Results) != 1 {
+		t.Fatalf("rust: %v", r.Results)
+	}
+	gotTags := r.Results[0].GetAttrs()["tags"].GetArrayValue().GetValues()
+	if len(gotTags) != 1 || gotTags[0].GetStringValue() != "rust" {
+		t.Fatalf("tags did not round-trip: %v", gotTags)
+	}
+}
+
 func TestGRPC_RejectsBadFiltersAndAttrs(t *testing.T) {
 	s := newSrv(t)
 	seed(t, s)
@@ -141,6 +196,7 @@ func TestGRPC_RejectsBadFiltersAndAttrs(t *testing.T) {
 		"empty key":     {"": str("x")},
 		"untyped value": {"k": {}},
 		"nan":           {"k": num(math.NaN())},
+		"nested array":  {"k": arr(arr(str("a")))},
 	} {
 		_, err := s.IndexDocuments(context.Background(), &zenithproto.IndexRequest{Id: "x", Data: "text", Attrs: attrs})
 		if status.Code(err) != codes.InvalidArgument {

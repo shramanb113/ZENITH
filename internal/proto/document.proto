@@ -12,13 +12,20 @@ service SearchService {
     rpc DeleteDocument(DeleteDocumentRequest) returns (DeleteDocumentResponse);
 }
 
-// AttrValue is one typed metadata value: a string, a number or a bool.
+// AttrValue is one typed metadata value: a string, a number, a bool, or an
+// array of the first three (never nested — an array element is never itself
+// an array). eq/in on an array field mean "any element matches".
 message AttrValue {
     oneof kind {
         string string_value = 1;
         double number_value = 2;
         bool   bool_value   = 3;
+        AttrValueArray array_value = 4;
     }
+}
+
+message AttrValueArray {
+    repeated AttrValue values = 1;
 }
 
 message IndexRequest {
@@ -48,10 +55,12 @@ message FilterGroup {
 
 message FilterCondition {
     enum Op {
-        EQ     = 0; // values[0] equals the field
-        IN     = 1; // the field equals any of values
-        RANGE  = 2; // numeric field within [min, max]; either bound may be omitted
-        EXISTS = 3; // the field is present
+        EQ       = 0; // values[0] equals the field
+        IN       = 1; // the field equals any of values
+        RANGE    = 2; // numeric field within [min, max]; either bound may be omitted
+        EXISTS   = 3; // the field is present
+        PREFIX   = 4; // string field starts with values[0]
+        CONTAINS = 5; // string field contains values[0] as a substring
     }
     string field = 1;
     Op op = 2;

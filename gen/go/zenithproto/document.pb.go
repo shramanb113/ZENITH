@@ -24,10 +24,12 @@ const (
 type FilterCondition_Op int32
 
 const (
-	FilterCondition_EQ     FilterCondition_Op = 0 // values[0] equals the field
-	FilterCondition_IN     FilterCondition_Op = 1 // the field equals any of values
-	FilterCondition_RANGE  FilterCondition_Op = 2 // numeric field within [min, max]; either bound may be omitted
-	FilterCondition_EXISTS FilterCondition_Op = 3 // the field is present
+	FilterCondition_EQ       FilterCondition_Op = 0 // values[0] equals the field
+	FilterCondition_IN       FilterCondition_Op = 1 // the field equals any of values
+	FilterCondition_RANGE    FilterCondition_Op = 2 // numeric field within [min, max]; either bound may be omitted
+	FilterCondition_EXISTS   FilterCondition_Op = 3 // the field is present
+	FilterCondition_PREFIX   FilterCondition_Op = 4 // string field starts with values[0]
+	FilterCondition_CONTAINS FilterCondition_Op = 5 // string field contains values[0] as a substring
 )
 
 // Enum value maps for FilterCondition_Op.
@@ -37,12 +39,16 @@ var (
 		1: "IN",
 		2: "RANGE",
 		3: "EXISTS",
+		4: "PREFIX",
+		5: "CONTAINS",
 	}
 	FilterCondition_Op_value = map[string]int32{
-		"EQ":     0,
-		"IN":     1,
-		"RANGE":  2,
-		"EXISTS": 3,
+		"EQ":       0,
+		"IN":       1,
+		"RANGE":    2,
+		"EXISTS":   3,
+		"PREFIX":   4,
+		"CONTAINS": 5,
 	}
 )
 
@@ -70,10 +76,12 @@ func (x FilterCondition_Op) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use FilterCondition_Op.Descriptor instead.
 func (FilterCondition_Op) EnumDescriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{4, 0}
+	return file_document_proto_rawDescGZIP(), []int{5, 0}
 }
 
-// AttrValue is one typed metadata value: a string, a number or a bool.
+// AttrValue is one typed metadata value: a string, a number, a bool, or an
+// array of the first three (never nested — an array element is never itself
+// an array). eq/in on an array field mean "any element matches".
 type AttrValue struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Kind:
@@ -81,6 +89,7 @@ type AttrValue struct {
 	//	*AttrValue_StringValue
 	//	*AttrValue_NumberValue
 	//	*AttrValue_BoolValue
+	//	*AttrValue_ArrayValue
 	Kind          isAttrValue_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -150,6 +159,15 @@ func (x *AttrValue) GetBoolValue() bool {
 	return false
 }
 
+func (x *AttrValue) GetArrayValue() *AttrValueArray {
+	if x != nil {
+		if x, ok := x.Kind.(*AttrValue_ArrayValue); ok {
+			return x.ArrayValue
+		}
+	}
+	return nil
+}
+
 type isAttrValue_Kind interface {
 	isAttrValue_Kind()
 }
@@ -166,11 +184,61 @@ type AttrValue_BoolValue struct {
 	BoolValue bool `protobuf:"varint,3,opt,name=bool_value,json=boolValue,proto3,oneof"`
 }
 
+type AttrValue_ArrayValue struct {
+	ArrayValue *AttrValueArray `protobuf:"bytes,4,opt,name=array_value,json=arrayValue,proto3,oneof"`
+}
+
 func (*AttrValue_StringValue) isAttrValue_Kind() {}
 
 func (*AttrValue_NumberValue) isAttrValue_Kind() {}
 
 func (*AttrValue_BoolValue) isAttrValue_Kind() {}
+
+func (*AttrValue_ArrayValue) isAttrValue_Kind() {}
+
+type AttrValueArray struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Values        []*AttrValue           `protobuf:"bytes,1,rep,name=values,proto3" json:"values,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AttrValueArray) Reset() {
+	*x = AttrValueArray{}
+	mi := &file_document_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AttrValueArray) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AttrValueArray) ProtoMessage() {}
+
+func (x *AttrValueArray) ProtoReflect() protoreflect.Message {
+	mi := &file_document_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AttrValueArray.ProtoReflect.Descriptor instead.
+func (*AttrValueArray) Descriptor() ([]byte, []int) {
+	return file_document_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *AttrValueArray) GetValues() []*AttrValue {
+	if x != nil {
+		return x.Values
+	}
+	return nil
+}
 
 type IndexRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -185,7 +253,7 @@ type IndexRequest struct {
 
 func (x *IndexRequest) Reset() {
 	*x = IndexRequest{}
-	mi := &file_document_proto_msgTypes[1]
+	mi := &file_document_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -197,7 +265,7 @@ func (x *IndexRequest) String() string {
 func (*IndexRequest) ProtoMessage() {}
 
 func (x *IndexRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[1]
+	mi := &file_document_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -210,7 +278,7 @@ func (x *IndexRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexRequest.ProtoReflect.Descriptor instead.
 func (*IndexRequest) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{1}
+	return file_document_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *IndexRequest) GetId() string {
@@ -253,7 +321,7 @@ type FilterNode struct {
 
 func (x *FilterNode) Reset() {
 	*x = FilterNode{}
-	mi := &file_document_proto_msgTypes[2]
+	mi := &file_document_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -265,7 +333,7 @@ func (x *FilterNode) String() string {
 func (*FilterNode) ProtoMessage() {}
 
 func (x *FilterNode) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[2]
+	mi := &file_document_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -278,7 +346,7 @@ func (x *FilterNode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FilterNode.ProtoReflect.Descriptor instead.
 func (*FilterNode) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{2}
+	return file_document_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *FilterNode) GetNode() isFilterNode_Node {
@@ -361,7 +429,7 @@ type FilterGroup struct {
 
 func (x *FilterGroup) Reset() {
 	*x = FilterGroup{}
-	mi := &file_document_proto_msgTypes[3]
+	mi := &file_document_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -373,7 +441,7 @@ func (x *FilterGroup) String() string {
 func (*FilterGroup) ProtoMessage() {}
 
 func (x *FilterGroup) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[3]
+	mi := &file_document_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -386,7 +454,7 @@ func (x *FilterGroup) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FilterGroup.ProtoReflect.Descriptor instead.
 func (*FilterGroup) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{3}
+	return file_document_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *FilterGroup) GetNodes() []*FilterNode {
@@ -409,7 +477,7 @@ type FilterCondition struct {
 
 func (x *FilterCondition) Reset() {
 	*x = FilterCondition{}
-	mi := &file_document_proto_msgTypes[4]
+	mi := &file_document_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -421,7 +489,7 @@ func (x *FilterCondition) String() string {
 func (*FilterCondition) ProtoMessage() {}
 
 func (x *FilterCondition) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[4]
+	mi := &file_document_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -434,7 +502,7 @@ func (x *FilterCondition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FilterCondition.ProtoReflect.Descriptor instead.
 func (*FilterCondition) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{4}
+	return file_document_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *FilterCondition) GetField() string {
@@ -482,7 +550,7 @@ type IndexResponse struct {
 
 func (x *IndexResponse) Reset() {
 	*x = IndexResponse{}
-	mi := &file_document_proto_msgTypes[5]
+	mi := &file_document_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -494,7 +562,7 @@ func (x *IndexResponse) String() string {
 func (*IndexResponse) ProtoMessage() {}
 
 func (x *IndexResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[5]
+	mi := &file_document_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -507,7 +575,7 @@ func (x *IndexResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexResponse.ProtoReflect.Descriptor instead.
 func (*IndexResponse) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{5}
+	return file_document_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *IndexResponse) GetStatus() bool {
@@ -539,7 +607,7 @@ type SearchRequest struct {
 
 func (x *SearchRequest) Reset() {
 	*x = SearchRequest{}
-	mi := &file_document_proto_msgTypes[6]
+	mi := &file_document_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -551,7 +619,7 @@ func (x *SearchRequest) String() string {
 func (*SearchRequest) ProtoMessage() {}
 
 func (x *SearchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[6]
+	mi := &file_document_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -564,7 +632,7 @@ func (x *SearchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchRequest.ProtoReflect.Descriptor instead.
 func (*SearchRequest) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{6}
+	return file_document_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *SearchRequest) GetQuery() string {
@@ -609,7 +677,7 @@ type SearchResult struct {
 
 func (x *SearchResult) Reset() {
 	*x = SearchResult{}
-	mi := &file_document_proto_msgTypes[7]
+	mi := &file_document_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -621,7 +689,7 @@ func (x *SearchResult) String() string {
 func (*SearchResult) ProtoMessage() {}
 
 func (x *SearchResult) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[7]
+	mi := &file_document_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -634,7 +702,7 @@ func (x *SearchResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResult.ProtoReflect.Descriptor instead.
 func (*SearchResult) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{7}
+	return file_document_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *SearchResult) GetId() string {
@@ -681,7 +749,7 @@ type SearchResponse struct {
 
 func (x *SearchResponse) Reset() {
 	*x = SearchResponse{}
-	mi := &file_document_proto_msgTypes[8]
+	mi := &file_document_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -693,7 +761,7 @@ func (x *SearchResponse) String() string {
 func (*SearchResponse) ProtoMessage() {}
 
 func (x *SearchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[8]
+	mi := &file_document_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -706,7 +774,7 @@ func (x *SearchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResponse.ProtoReflect.Descriptor instead.
 func (*SearchResponse) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{8}
+	return file_document_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *SearchResponse) GetResults() []*SearchResult {
@@ -730,7 +798,7 @@ type DocumentProto struct {
 
 func (x *DocumentProto) Reset() {
 	*x = DocumentProto{}
-	mi := &file_document_proto_msgTypes[9]
+	mi := &file_document_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -742,7 +810,7 @@ func (x *DocumentProto) String() string {
 func (*DocumentProto) ProtoMessage() {}
 
 func (x *DocumentProto) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[9]
+	mi := &file_document_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -755,7 +823,7 @@ func (x *DocumentProto) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocumentProto.ProtoReflect.Descriptor instead.
 func (*DocumentProto) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{9}
+	return file_document_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *DocumentProto) GetId() string {
@@ -809,7 +877,7 @@ type Vector struct {
 
 func (x *Vector) Reset() {
 	*x = Vector{}
-	mi := &file_document_proto_msgTypes[10]
+	mi := &file_document_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -821,7 +889,7 @@ func (x *Vector) String() string {
 func (*Vector) ProtoMessage() {}
 
 func (x *Vector) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[10]
+	mi := &file_document_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -834,7 +902,7 @@ func (x *Vector) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Vector.ProtoReflect.Descriptor instead.
 func (*Vector) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{10}
+	return file_document_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Vector) GetElements() []float32 {
@@ -854,7 +922,7 @@ type IndexPDFRequest struct {
 
 func (x *IndexPDFRequest) Reset() {
 	*x = IndexPDFRequest{}
-	mi := &file_document_proto_msgTypes[11]
+	mi := &file_document_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -866,7 +934,7 @@ func (x *IndexPDFRequest) String() string {
 func (*IndexPDFRequest) ProtoMessage() {}
 
 func (x *IndexPDFRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[11]
+	mi := &file_document_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -879,7 +947,7 @@ func (x *IndexPDFRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexPDFRequest.ProtoReflect.Descriptor instead.
 func (*IndexPDFRequest) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{11}
+	return file_document_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *IndexPDFRequest) GetDocumentId() string {
@@ -907,7 +975,7 @@ type IndexPDFResponse struct {
 
 func (x *IndexPDFResponse) Reset() {
 	*x = IndexPDFResponse{}
-	mi := &file_document_proto_msgTypes[12]
+	mi := &file_document_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -919,7 +987,7 @@ func (x *IndexPDFResponse) String() string {
 func (*IndexPDFResponse) ProtoMessage() {}
 
 func (x *IndexPDFResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[12]
+	mi := &file_document_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -932,7 +1000,7 @@ func (x *IndexPDFResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexPDFResponse.ProtoReflect.Descriptor instead.
 func (*IndexPDFResponse) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{12}
+	return file_document_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *IndexPDFResponse) GetStatus() bool {
@@ -965,7 +1033,7 @@ type GetDocumentRequest struct {
 
 func (x *GetDocumentRequest) Reset() {
 	*x = GetDocumentRequest{}
-	mi := &file_document_proto_msgTypes[13]
+	mi := &file_document_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -977,7 +1045,7 @@ func (x *GetDocumentRequest) String() string {
 func (*GetDocumentRequest) ProtoMessage() {}
 
 func (x *GetDocumentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[13]
+	mi := &file_document_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -990,7 +1058,7 @@ func (x *GetDocumentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDocumentRequest.ProtoReflect.Descriptor instead.
 func (*GetDocumentRequest) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{13}
+	return file_document_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *GetDocumentRequest) GetId() string {
@@ -1011,7 +1079,7 @@ type GetDocumentResponse struct {
 
 func (x *GetDocumentResponse) Reset() {
 	*x = GetDocumentResponse{}
-	mi := &file_document_proto_msgTypes[14]
+	mi := &file_document_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1023,7 +1091,7 @@ func (x *GetDocumentResponse) String() string {
 func (*GetDocumentResponse) ProtoMessage() {}
 
 func (x *GetDocumentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[14]
+	mi := &file_document_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1036,7 +1104,7 @@ func (x *GetDocumentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDocumentResponse.ProtoReflect.Descriptor instead.
 func (*GetDocumentResponse) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{14}
+	return file_document_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *GetDocumentResponse) GetFound() bool {
@@ -1069,7 +1137,7 @@ type DeleteDocumentRequest struct {
 
 func (x *DeleteDocumentRequest) Reset() {
 	*x = DeleteDocumentRequest{}
-	mi := &file_document_proto_msgTypes[15]
+	mi := &file_document_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1081,7 +1149,7 @@ func (x *DeleteDocumentRequest) String() string {
 func (*DeleteDocumentRequest) ProtoMessage() {}
 
 func (x *DeleteDocumentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[15]
+	mi := &file_document_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1094,7 +1162,7 @@ func (x *DeleteDocumentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteDocumentRequest.ProtoReflect.Descriptor instead.
 func (*DeleteDocumentRequest) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{15}
+	return file_document_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *DeleteDocumentRequest) GetId() string {
@@ -1114,7 +1182,7 @@ type DeleteDocumentResponse struct {
 
 func (x *DeleteDocumentResponse) Reset() {
 	*x = DeleteDocumentResponse{}
-	mi := &file_document_proto_msgTypes[16]
+	mi := &file_document_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1126,7 +1194,7 @@ func (x *DeleteDocumentResponse) String() string {
 func (*DeleteDocumentResponse) ProtoMessage() {}
 
 func (x *DeleteDocumentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_document_proto_msgTypes[16]
+	mi := &file_document_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1139,7 +1207,7 @@ func (x *DeleteDocumentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteDocumentResponse.ProtoReflect.Descriptor instead.
 func (*DeleteDocumentResponse) Descriptor() ([]byte, []int) {
-	return file_document_proto_rawDescGZIP(), []int{16}
+	return file_document_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *DeleteDocumentResponse) GetStatus() bool {
@@ -1160,13 +1228,17 @@ var File_document_proto protoreflect.FileDescriptor
 
 const file_document_proto_rawDesc = "" +
 	"\n" +
-	"\x0edocument.proto\x12\x06zenith\"~\n" +
+	"\x0edocument.proto\x12\x06zenith\"\xb9\x01\n" +
 	"\tAttrValue\x12#\n" +
 	"\fstring_value\x18\x01 \x01(\tH\x00R\vstringValue\x12#\n" +
 	"\fnumber_value\x18\x02 \x01(\x01H\x00R\vnumberValue\x12\x1f\n" +
 	"\n" +
-	"bool_value\x18\x03 \x01(\bH\x00R\tboolValueB\x06\n" +
-	"\x04kind\"\xb6\x01\n" +
+	"bool_value\x18\x03 \x01(\bH\x00R\tboolValue\x129\n" +
+	"\varray_value\x18\x04 \x01(\v2\x16.zenith.AttrValueArrayH\x00R\n" +
+	"arrayValueB\x06\n" +
+	"\x04kind\";\n" +
+	"\x0eAttrValueArray\x12)\n" +
+	"\x06values\x18\x01 \x03(\v2\x11.zenith.AttrValueR\x06values\"\xb6\x01\n" +
 	"\fIndexRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\tR\x04data\x125\n" +
@@ -1183,19 +1255,22 @@ const file_document_proto_rawDesc = "" +
 	"\x03not\x18\x04 \x01(\v2\x12.zenith.FilterNodeH\x00R\x03notB\x06\n" +
 	"\x04node\"7\n" +
 	"\vFilterGroup\x12(\n" +
-	"\x05nodes\x18\x01 \x03(\v2\x12.zenith.FilterNodeR\x05nodes\"\xe9\x01\n" +
+	"\x05nodes\x18\x01 \x03(\v2\x12.zenith.FilterNodeR\x05nodes\"\x83\x02\n" +
 	"\x0fFilterCondition\x12\x14\n" +
 	"\x05field\x18\x01 \x01(\tR\x05field\x12*\n" +
 	"\x02op\x18\x02 \x01(\x0e2\x1a.zenith.FilterCondition.OpR\x02op\x12)\n" +
 	"\x06values\x18\x03 \x03(\v2\x11.zenith.AttrValueR\x06values\x12\x15\n" +
 	"\x03min\x18\x04 \x01(\x01H\x00R\x03min\x88\x01\x01\x12\x15\n" +
-	"\x03max\x18\x05 \x01(\x01H\x01R\x03max\x88\x01\x01\"+\n" +
+	"\x03max\x18\x05 \x01(\x01H\x01R\x03max\x88\x01\x01\"E\n" +
 	"\x02Op\x12\x06\n" +
 	"\x02EQ\x10\x00\x12\x06\n" +
 	"\x02IN\x10\x01\x12\t\n" +
 	"\x05RANGE\x10\x02\x12\n" +
 	"\n" +
-	"\x06EXISTS\x10\x03B\x06\n" +
+	"\x06EXISTS\x10\x03\x12\n" +
+	"\n" +
+	"\x06PREFIX\x10\x04\x12\f\n" +
+	"\bCONTAINS\x10\x05B\x06\n" +
 	"\x04_minB\x06\n" +
 	"\x04_max\"A\n" +
 	"\rIndexResponse\x12\x16\n" +
@@ -1275,65 +1350,68 @@ func file_document_proto_rawDescGZIP() []byte {
 }
 
 var file_document_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_document_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_document_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_document_proto_goTypes = []any{
 	(FilterCondition_Op)(0),        // 0: zenith.FilterCondition.Op
 	(*AttrValue)(nil),              // 1: zenith.AttrValue
-	(*IndexRequest)(nil),           // 2: zenith.IndexRequest
-	(*FilterNode)(nil),             // 3: zenith.FilterNode
-	(*FilterGroup)(nil),            // 4: zenith.FilterGroup
-	(*FilterCondition)(nil),        // 5: zenith.FilterCondition
-	(*IndexResponse)(nil),          // 6: zenith.IndexResponse
-	(*SearchRequest)(nil),          // 7: zenith.SearchRequest
-	(*SearchResult)(nil),           // 8: zenith.SearchResult
-	(*SearchResponse)(nil),         // 9: zenith.SearchResponse
-	(*DocumentProto)(nil),          // 10: zenith.DocumentProto
-	(*Vector)(nil),                 // 11: zenith.Vector
-	(*IndexPDFRequest)(nil),        // 12: zenith.IndexPDFRequest
-	(*IndexPDFResponse)(nil),       // 13: zenith.IndexPDFResponse
-	(*GetDocumentRequest)(nil),     // 14: zenith.GetDocumentRequest
-	(*GetDocumentResponse)(nil),    // 15: zenith.GetDocumentResponse
-	(*DeleteDocumentRequest)(nil),  // 16: zenith.DeleteDocumentRequest
-	(*DeleteDocumentResponse)(nil), // 17: zenith.DeleteDocumentResponse
-	nil,                            // 18: zenith.IndexRequest.AttrsEntry
-	nil,                            // 19: zenith.SearchResult.FieldsEntry
-	nil,                            // 20: zenith.SearchResult.AttrsEntry
-	nil,                            // 21: zenith.DocumentProto.FieldsEntry
-	nil,                            // 22: zenith.DocumentProto.VectorsEntry
+	(*AttrValueArray)(nil),         // 2: zenith.AttrValueArray
+	(*IndexRequest)(nil),           // 3: zenith.IndexRequest
+	(*FilterNode)(nil),             // 4: zenith.FilterNode
+	(*FilterGroup)(nil),            // 5: zenith.FilterGroup
+	(*FilterCondition)(nil),        // 6: zenith.FilterCondition
+	(*IndexResponse)(nil),          // 7: zenith.IndexResponse
+	(*SearchRequest)(nil),          // 8: zenith.SearchRequest
+	(*SearchResult)(nil),           // 9: zenith.SearchResult
+	(*SearchResponse)(nil),         // 10: zenith.SearchResponse
+	(*DocumentProto)(nil),          // 11: zenith.DocumentProto
+	(*Vector)(nil),                 // 12: zenith.Vector
+	(*IndexPDFRequest)(nil),        // 13: zenith.IndexPDFRequest
+	(*IndexPDFResponse)(nil),       // 14: zenith.IndexPDFResponse
+	(*GetDocumentRequest)(nil),     // 15: zenith.GetDocumentRequest
+	(*GetDocumentResponse)(nil),    // 16: zenith.GetDocumentResponse
+	(*DeleteDocumentRequest)(nil),  // 17: zenith.DeleteDocumentRequest
+	(*DeleteDocumentResponse)(nil), // 18: zenith.DeleteDocumentResponse
+	nil,                            // 19: zenith.IndexRequest.AttrsEntry
+	nil,                            // 20: zenith.SearchResult.FieldsEntry
+	nil,                            // 21: zenith.SearchResult.AttrsEntry
+	nil,                            // 22: zenith.DocumentProto.FieldsEntry
+	nil,                            // 23: zenith.DocumentProto.VectorsEntry
 }
 var file_document_proto_depIdxs = []int32{
-	18, // 0: zenith.IndexRequest.attrs:type_name -> zenith.IndexRequest.AttrsEntry
-	5,  // 1: zenith.FilterNode.condition:type_name -> zenith.FilterCondition
-	4,  // 2: zenith.FilterNode.and:type_name -> zenith.FilterGroup
-	4,  // 3: zenith.FilterNode.or:type_name -> zenith.FilterGroup
-	3,  // 4: zenith.FilterNode.not:type_name -> zenith.FilterNode
-	3,  // 5: zenith.FilterGroup.nodes:type_name -> zenith.FilterNode
-	0,  // 6: zenith.FilterCondition.op:type_name -> zenith.FilterCondition.Op
-	1,  // 7: zenith.FilterCondition.values:type_name -> zenith.AttrValue
-	3,  // 8: zenith.SearchRequest.filter:type_name -> zenith.FilterNode
-	19, // 9: zenith.SearchResult.fields:type_name -> zenith.SearchResult.FieldsEntry
-	20, // 10: zenith.SearchResult.attrs:type_name -> zenith.SearchResult.AttrsEntry
-	8,  // 11: zenith.SearchResponse.results:type_name -> zenith.SearchResult
-	21, // 12: zenith.DocumentProto.fields:type_name -> zenith.DocumentProto.FieldsEntry
-	22, // 13: zenith.DocumentProto.vectors:type_name -> zenith.DocumentProto.VectorsEntry
-	1,  // 14: zenith.IndexRequest.AttrsEntry.value:type_name -> zenith.AttrValue
-	1,  // 15: zenith.SearchResult.AttrsEntry.value:type_name -> zenith.AttrValue
-	11, // 16: zenith.DocumentProto.VectorsEntry.value:type_name -> zenith.Vector
-	2,  // 17: zenith.SearchService.IndexDocuments:input_type -> zenith.IndexRequest
-	7,  // 18: zenith.SearchService.Search:input_type -> zenith.SearchRequest
-	12, // 19: zenith.SearchService.IndexPDF:input_type -> zenith.IndexPDFRequest
-	14, // 20: zenith.SearchService.GetDocument:input_type -> zenith.GetDocumentRequest
-	16, // 21: zenith.SearchService.DeleteDocument:input_type -> zenith.DeleteDocumentRequest
-	6,  // 22: zenith.SearchService.IndexDocuments:output_type -> zenith.IndexResponse
-	9,  // 23: zenith.SearchService.Search:output_type -> zenith.SearchResponse
-	13, // 24: zenith.SearchService.IndexPDF:output_type -> zenith.IndexPDFResponse
-	15, // 25: zenith.SearchService.GetDocument:output_type -> zenith.GetDocumentResponse
-	17, // 26: zenith.SearchService.DeleteDocument:output_type -> zenith.DeleteDocumentResponse
-	22, // [22:27] is the sub-list for method output_type
-	17, // [17:22] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	2,  // 0: zenith.AttrValue.array_value:type_name -> zenith.AttrValueArray
+	1,  // 1: zenith.AttrValueArray.values:type_name -> zenith.AttrValue
+	19, // 2: zenith.IndexRequest.attrs:type_name -> zenith.IndexRequest.AttrsEntry
+	6,  // 3: zenith.FilterNode.condition:type_name -> zenith.FilterCondition
+	5,  // 4: zenith.FilterNode.and:type_name -> zenith.FilterGroup
+	5,  // 5: zenith.FilterNode.or:type_name -> zenith.FilterGroup
+	4,  // 6: zenith.FilterNode.not:type_name -> zenith.FilterNode
+	4,  // 7: zenith.FilterGroup.nodes:type_name -> zenith.FilterNode
+	0,  // 8: zenith.FilterCondition.op:type_name -> zenith.FilterCondition.Op
+	1,  // 9: zenith.FilterCondition.values:type_name -> zenith.AttrValue
+	4,  // 10: zenith.SearchRequest.filter:type_name -> zenith.FilterNode
+	20, // 11: zenith.SearchResult.fields:type_name -> zenith.SearchResult.FieldsEntry
+	21, // 12: zenith.SearchResult.attrs:type_name -> zenith.SearchResult.AttrsEntry
+	9,  // 13: zenith.SearchResponse.results:type_name -> zenith.SearchResult
+	22, // 14: zenith.DocumentProto.fields:type_name -> zenith.DocumentProto.FieldsEntry
+	23, // 15: zenith.DocumentProto.vectors:type_name -> zenith.DocumentProto.VectorsEntry
+	1,  // 16: zenith.IndexRequest.AttrsEntry.value:type_name -> zenith.AttrValue
+	1,  // 17: zenith.SearchResult.AttrsEntry.value:type_name -> zenith.AttrValue
+	12, // 18: zenith.DocumentProto.VectorsEntry.value:type_name -> zenith.Vector
+	3,  // 19: zenith.SearchService.IndexDocuments:input_type -> zenith.IndexRequest
+	8,  // 20: zenith.SearchService.Search:input_type -> zenith.SearchRequest
+	13, // 21: zenith.SearchService.IndexPDF:input_type -> zenith.IndexPDFRequest
+	15, // 22: zenith.SearchService.GetDocument:input_type -> zenith.GetDocumentRequest
+	17, // 23: zenith.SearchService.DeleteDocument:input_type -> zenith.DeleteDocumentRequest
+	7,  // 24: zenith.SearchService.IndexDocuments:output_type -> zenith.IndexResponse
+	10, // 25: zenith.SearchService.Search:output_type -> zenith.SearchResponse
+	14, // 26: zenith.SearchService.IndexPDF:output_type -> zenith.IndexPDFResponse
+	16, // 27: zenith.SearchService.GetDocument:output_type -> zenith.GetDocumentResponse
+	18, // 28: zenith.SearchService.DeleteDocument:output_type -> zenith.DeleteDocumentResponse
+	24, // [24:29] is the sub-list for method output_type
+	19, // [19:24] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_document_proto_init() }
@@ -1345,21 +1423,22 @@ func file_document_proto_init() {
 		(*AttrValue_StringValue)(nil),
 		(*AttrValue_NumberValue)(nil),
 		(*AttrValue_BoolValue)(nil),
+		(*AttrValue_ArrayValue)(nil),
 	}
-	file_document_proto_msgTypes[2].OneofWrappers = []any{
+	file_document_proto_msgTypes[3].OneofWrappers = []any{
 		(*FilterNode_Condition)(nil),
 		(*FilterNode_And)(nil),
 		(*FilterNode_Or)(nil),
 		(*FilterNode_Not)(nil),
 	}
-	file_document_proto_msgTypes[4].OneofWrappers = []any{}
+	file_document_proto_msgTypes[5].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_document_proto_rawDesc), len(file_document_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   22,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

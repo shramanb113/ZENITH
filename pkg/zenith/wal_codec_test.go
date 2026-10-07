@@ -3,6 +3,7 @@ package zenith
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"sync/atomic"
 	"testing"
 
@@ -168,7 +169,7 @@ func TestWALValueCodec_AttrsRoundTrip(t *testing.T) {
 		t.Fatalf("attrs len = %d, want %d", len(got), len(attrs))
 	}
 	for k, v := range attrs {
-		if got[k] != v {
+		if !reflect.DeepEqual(got[k], v) {
 			t.Errorf("attrs[%q] = %+v, want %+v", k, got[k], v)
 		}
 	}

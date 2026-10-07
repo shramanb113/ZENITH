@@ -10,9 +10,11 @@ import (
 )
 
 var (
-	idxFields  = []string{"tenant", "lang", "year", "tier", "public"}
+	idxFields  = []string{"tenant", "lang", "year", "tier", "public", "tags", "path"}
 	idxTenants = []string{"acme", "globex", "initech", "umbrella"}
 	idxLangs   = []string{"en", "hi", "fr"}
+	idxTags    = []string{"go", "infra", "python", "rust", "ml"}
+	idxPaths   = []string{"/docs/guide", "/docs/api", "/blog/notes", "/blog/release"}
 )
 
 func randAttrs(r *rand.Rand) Attrs {
@@ -36,12 +38,23 @@ func randAttrs(r *rand.Rand) Attrs {
 		}
 		a["public"] = AttrValue{Kind: AttrBool, N: b}
 	}
+	if r.Intn(2) == 0 {
+		n := 1 + r.Intn(3)
+		elems := make([]AttrValue, n)
+		for i := 0; i < n; i++ {
+			elems[i] = AttrValue{Kind: AttrString, S: idxTags[r.Intn(len(idxTags))]}
+		}
+		a["tags"] = AttrValue{Kind: AttrArray, Arr: elems}
+	}
+	if r.Intn(3) > 0 {
+		a["path"] = AttrValue{Kind: AttrString, S: idxPaths[r.Intn(len(idxPaths))]}
+	}
 	return a
 }
 
 func randSpec(r *rand.Rand, depth int) FilterSpec {
 	leaf := func() FilterSpec {
-		switch r.Intn(5) {
+		switch r.Intn(7) {
 		case 0:
 			return FilterSpec{Op: "eq", Field: "tenant", Value: &SpecValue{AttrValue{Kind: AttrString, S: idxTenants[r.Intn(len(idxTenants))]}}}
 		case 1:
@@ -60,6 +73,15 @@ func randSpec(r *rand.Rand, depth int) FilterSpec {
 			return s
 		case 3:
 			return FilterSpec{Op: "exists", Field: idxFields[r.Intn(len(idxFields))]}
+		case 4:
+			// eq/in against an array-valued field: "any element matches" in
+			// both the index path (attrindex.set indexes each element) and
+			// the predicate scan path (filterspec's anyMatch).
+			return FilterSpec{Op: "eq", Field: "tags", Value: &SpecValue{AttrValue{Kind: AttrString, S: idxTags[r.Intn(len(idxTags))]}}}
+		case 5:
+			return FilterSpec{Op: "prefix", Field: "path", Value: &SpecValue{AttrValue{Kind: AttrString, S: idxPaths[r.Intn(len(idxPaths))][:5]}}}
+		case 6:
+			return FilterSpec{Op: "contains", Field: "path", Value: &SpecValue{AttrValue{Kind: AttrString, S: "/"}}}
 		default:
 			return FilterSpec{Op: "eq", Field: "public", Value: &SpecValue{AttrValue{Kind: AttrBool, N: float64(r.Intn(2))}}}
 		}

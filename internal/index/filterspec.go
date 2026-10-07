@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 )
 
 // A Filter is a predicate over a document's attributes, optionally with the
@@ -150,6 +151,13 @@ func (s *FilterSpec) validate(depth int, nodes *int) error {
 		if err := needField(); err != nil {
 			return err
 		}
+	case "prefix", "contains":
+		if err := needField(); err != nil {
+			return err
+		}
+		if s.Value == nil || s.Value.Kind != AttrString {
+			return fmt.Errorf("%w: %s on %q needs a string value", ErrInvalidFilter, s.Op, s.Field)
+		}
 	case "none":
 		// matches nothing (what a condition with an unusable value degrades to)
 	case "and", "or":
@@ -177,24 +185,40 @@ func (s *FilterSpec) Compile() (*Filter, error) {
 	return &Filter{Pred: s.predicate(), Spec: s}, nil
 }
 
+// anyMatch reports whether v satisfies cmp directly for a scalar value, or
+// whether any of its elements satisfies cmp for an array value (never
+// nested — see AttrValue.Arr). Every condition predicate below goes through
+// this instead of testing v directly, so "eq"/"in"/"range"/"prefix"/
+// "contains" all mean "any element matches" on an array-valued field for
+// free, without a separate array-aware branch per operator.
+func anyMatch(v AttrValue, cmp func(AttrValue) bool) bool {
+	if v.Kind == AttrArray {
+		for _, e := range v.Arr {
+			if cmp(e) {
+				return true
+			}
+		}
+		return false
+	}
+	return cmp(v)
+}
+
 func (s *FilterSpec) predicate() Predicate {
 	switch s.Op {
 	case "eq":
-		field, want := s.Field, s.Value.AttrValue
-		return func(a Attrs) bool { got, ok := a[field]; return ok && got == want }
+		field, want := s.Field, keyOf(s.Value.AttrValue)
+		cmp := func(e AttrValue) bool { return keyOf(e) == want }
+		return func(a Attrs) bool { got, ok := a[field]; return ok && anyMatch(got, cmp) }
 	case "in":
 		field := s.Field
-		set := make(map[AttrValue]struct{}, len(s.Values))
+		set := make(map[attrKey]struct{}, len(s.Values))
 		for _, v := range s.Values {
-			set[v.AttrValue] = struct{}{}
+			set[keyOf(v.AttrValue)] = struct{}{}
 		}
+		cmp := func(e AttrValue) bool { _, in := set[keyOf(e)]; return in }
 		return func(a Attrs) bool {
 			got, ok := a[field]
-			if !ok {
-				return false
-			}
-			_, in := set[got]
-			return in
+			return ok && anyMatch(got, cmp)
 		}
 	case "range":
 		field := s.Field
@@ -205,9 +229,24 @@ func (s *FilterSpec) predicate() Predicate {
 		if s.Max != nil {
 			hi = *s.Max
 		}
+		cmp := func(e AttrValue) bool { return e.Kind == AttrNumber && e.N >= lo && e.N <= hi }
 		return func(a Attrs) bool {
 			got, ok := a[field]
-			return ok && got.Kind == AttrNumber && got.N >= lo && got.N <= hi
+			return ok && anyMatch(got, cmp)
+		}
+	case "prefix":
+		field, want := s.Field, s.Value.S
+		cmp := func(e AttrValue) bool { return e.Kind == AttrString && strings.HasPrefix(e.S, want) }
+		return func(a Attrs) bool {
+			got, ok := a[field]
+			return ok && anyMatch(got, cmp)
+		}
+	case "contains":
+		field, want := s.Field, s.Value.S
+		cmp := func(e AttrValue) bool { return e.Kind == AttrString && strings.Contains(e.S, want) }
+		return func(a Attrs) bool {
+			got, ok := a[field]
+			return ok && anyMatch(got, cmp)
 		}
 	case "exists":
 		field := s.Field

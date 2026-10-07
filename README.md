@@ -522,16 +522,19 @@ the host, same as the gRPC port.
 
 ## Metadata filtering
 
-Every document can carry string/number/bool attributes, attached at index time and matched
-at search time — before rank fusion, on both the lexical and vector candidate sets, not as a
-post-filter on the final page of results.
+Every document can carry string/number/bool attributes, or an array of them, attached at
+index time and matched at search time — before rank fusion, on both the lexical and vector
+candidate sets, not as a post-filter on the final page of results.
 
 **Attach attrs when indexing:**
 ```bash
 zenith index --attr tenant=acme --attr year=2024 --attr public=true ~/Documents
 ```
 A value that reads as `true`/`false` is a bool, one that parses as a number is a number,
-anything else is a string; quote a value (`"2024"`) to force a string.
+anything else is a string; quote a value (`"2024"`) to force a string. The Go library also
+accepts a flat slice (`zenith.Attrs{"tags": []string{"go", "infra"}}`) as an array attribute —
+`eq`/`in`/`range`/`prefix`/`contains` against it match if *any* element matches; a slice of
+slices is rejected (nested arrays aren't supported).
 
 **Filter when searching**, three equivalent surfaces:
 
@@ -550,23 +553,27 @@ anything else is a string; quote a value (`"2024"`) to force a string.
    ]}
    ```
    Operators: `eq` (equals), `in` (equals any of `values`), `range` (numeric, `min`/`max`
-   either optional), `exists` (field present), `and`/`or`/`not` (nest other conditions).
+   either optional), `prefix` (string starts with), `contains` (string contains substring),
+   `exists` (field present), `and`/`or`/`not` (nest other conditions).
    A document missing the field never matches a condition on it (`not` is the one operator
-   that matches documents *without* the field). Expressions are capped at depth 16 / 512
+   that matches documents *without* the field). Against an array-valued attribute, every
+   operator above matches if *any* element matches. Expressions are capped at depth 16 / 512
    nodes so a filter arriving over the network can't be used as a denial-of-service vector.
    The same grammar is accepted by:
    - CLI: `zenith search --filter '{"op":"or","args":[...]}'` (combined with any `--where`
      conditions — everything must hold)
    - gRPC: `SearchRequest.filter` (`FilterNode` in `document.proto` — a typed oneof of the
-     same operators, not JSON on the wire)
+     same operators, not JSON on the wire; `AttrValue` has an `array_value` variant)
    - HTTP sidecar: `"filter"` in the `POST /v1/ns/{ns}/search` body (raw JSON, same shape)
    - Go library: `zenith.FilterFromJSON([]byte)`, or build one directly with `zenith.Eq`,
-     `zenith.In`, `zenith.Range`, `zenith.Exists`, `zenith.And`, `zenith.Or`, `zenith.Not`,
-     passed via `zenith.WithFilter(f)`
+     `zenith.In`, `zenith.Range`, `zenith.Prefix`, `zenith.Contains`, `zenith.Exists`,
+     `zenith.And`, `zenith.Or`, `zenith.Not`, passed via `zenith.WithFilter(f)`
 
 A filter that only touches a handful of documents (estimated ≤ `max(2000, docs/50)`) is
-resolved through a per-field attribute index instead of scanning every document; `not`
-always falls back to a scan. Either path returns identical results — this is a property
+resolved through a per-field attribute index instead of scanning every document; `prefix` is
+answered the same way (bounded by the same distinct-value cap as `range`), but `contains` and
+`not` always fall back to a scan — a substring can start anywhere, so there's nothing in the
+sorted postings to narrow by. Either path returns identical results — this is a property
 test, not just documentation.
 
 **Not in scope (deferred):** the attribute index currently stores sorted ordinal postings per

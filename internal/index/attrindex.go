@@ -3,6 +3,7 @@ package index
 import (
 	"math"
 	"sort"
+	"strings"
 )
 
 // attrIndex is an inverted index over document attributes: for every
@@ -68,8 +69,19 @@ func (x *attrIndex) set(id uint64, a Attrs) {
 			m = make(map[attrKey][]uint32)
 			x.eq[f] = m
 		}
-		k := keyOf(v)
-		m[k] = append(m[k], o)
+		if v.Kind == AttrArray {
+			// Index every element under the same field, so an eq/in/range
+			// postings lookup for one element value finds this document —
+			// "any element matches" falls out of indexing it this way,
+			// with no array-aware branch needed in estimate/candidates.
+			for _, elem := range v.Arr {
+				k := keyOf(elem)
+				m[k] = append(m[k], o)
+			}
+		} else {
+			k := keyOf(v)
+			m[k] = append(m[k], o)
+		}
 		x.all[f] = append(x.all[f], o)
 	}
 }
@@ -129,6 +141,25 @@ func (x *attrIndex) estimate(s *FilterSpec) (n int, ok bool) {
 		lo, hi := bounds(s)
 		for k, list := range m {
 			if k.kind == AttrNumber && k.n >= lo && k.n <= hi {
+				n += len(list)
+			}
+		}
+		return n, true
+	case "prefix":
+		// Bounded the same way range is: a field with more distinct values
+		// than rangeScanMax (a free-text-like field) declines, since
+		// scanning every distinct value stops being cheaper than a plain
+		// predicate scan over documents. contains has no equivalent here —
+		// a substring can start anywhere, so there's nothing to narrow by;
+		// it always falls through to the predicate scan (the default
+		// "not ok" return below), same as "not".
+		m := x.eq[s.Field]
+		if len(m) > rangeScanMax {
+			return 0, false
+		}
+		want := s.Value.S
+		for k, list := range m {
+			if k.kind == AttrString && strings.HasPrefix(k.s, want) {
 				n += len(list)
 			}
 		}
@@ -204,6 +235,19 @@ func (x *attrIndex) candidates(s *FilterSpec) (ords []uint32, exact, ok bool) {
 		var acc []uint32
 		for k, list := range m {
 			if k.kind == AttrNumber && k.n >= lo && k.n <= hi {
+				acc = union(acc, liveOnly(list))
+			}
+		}
+		return acc, true, true
+	case "prefix":
+		m := x.eq[s.Field]
+		if len(m) > rangeScanMax {
+			return nil, false, false
+		}
+		want := s.Value.S
+		var acc []uint32
+		for k, list := range m {
+			if k.kind == AttrString && strings.HasPrefix(k.s, want) {
 				acc = union(acc, liveOnly(list))
 			}
 		}

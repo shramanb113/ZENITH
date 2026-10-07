@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strings"
 
 	"github.com/shramanb113/ZENITH/internal/index"
 )
@@ -41,6 +42,24 @@ func toAttrValue(v any) (index.AttrValue, error) {
 			return index.AttrValue{}, fmt.Errorf("%w: non-finite number", ErrInvalidAttrs)
 		}
 		return index.AttrValue{Kind: index.AttrNumber, N: f}, nil
+	case reflect.Slice, reflect.Array:
+		// Never nested: an element that is itself a slice/array fails here,
+		// since toAttrValue on it would recurse into this same case and
+		// produce an AttrArray no AttrKind variant below accepts as Arr's
+		// element type — rejected explicitly instead of a confusing one.
+		n := rv.Len()
+		arr := make([]index.AttrValue, n)
+		for i := 0; i < n; i++ {
+			elem, err := toAttrValue(rv.Index(i).Interface())
+			if err != nil {
+				return index.AttrValue{}, err
+			}
+			if elem.Kind == index.AttrArray {
+				return index.AttrValue{}, fmt.Errorf("%w: nested arrays are not supported", ErrInvalidAttrs)
+			}
+			arr[i] = elem
+		}
+		return index.AttrValue{Kind: index.AttrArray, Arr: arr}, nil
 	}
 	return index.AttrValue{}, fmt.Errorf("%w: unsupported type %T", ErrInvalidAttrs, v)
 }
@@ -115,6 +134,25 @@ func (f Filter) JSON() ([]byte, error) {
 
 func noneSpec() *index.FilterSpec { return &index.FilterSpec{Op: "none"} }
 
+// anyMatchZ mirrors internal/index/filterspec.go's anyMatch: this package
+// builds its own predicates directly (not by calling index.FilterSpec.
+// predicate()), so it needs its own copy of the same "any element matches"
+// rule for an array-valued attribute. attrEqual replaces a direct == on
+// index.AttrValue, which became incomparable once it gained an Arr field.
+func anyMatchZ(v index.AttrValue, cmp func(index.AttrValue) bool) bool {
+	if v.Kind == index.AttrArray {
+		for _, e := range v.Arr {
+			if cmp(e) {
+				return true
+			}
+		}
+		return false
+	}
+	return cmp(v)
+}
+
+func attrEqual(a, b index.AttrValue) bool { return a.Kind == b.Kind && a.S == b.S && a.N == b.N }
+
 func specValue(v any) (index.SpecValue, bool) {
 	av, err := toAttrValue(v)
 	if err != nil {
@@ -135,7 +173,7 @@ func Eq(key string, value any) Filter {
 	return Filter{
 		pred: func(a index.Attrs) bool {
 			got, ok := a[key]
-			return ok && got == want
+			return ok && anyMatchZ(got, func(e index.AttrValue) bool { return attrEqual(e, want) })
 		},
 		spec: &index.FilterSpec{Op: "eq", Field: key, Value: &sv},
 	}
@@ -160,9 +198,10 @@ func In(key string, values ...any) Filter {
 // (inclusive). Use math.Inf(-1) / math.Inf(1) for an open end. Non-numeric
 // attributes never match.
 func Range(key string, min, max float64) Filter {
+	cmp := func(e index.AttrValue) bool { return e.Kind == index.AttrNumber && e.N >= min && e.N <= max }
 	pred := func(a index.Attrs) bool {
 		got, ok := a[key]
-		return ok && got.Kind == index.AttrNumber && got.N >= min && got.N <= max
+		return ok && anyMatchZ(got, cmp)
 	}
 	if math.IsNaN(min) || math.IsNaN(max) {
 		return Filter{pred: pred, spec: noneSpec()}
@@ -175,6 +214,27 @@ func Range(key string, min, max float64) Filter {
 		spec.Max = &max
 	}
 	return Filter{pred: pred, spec: spec}
+}
+
+// Prefix matches documents whose string attribute key starts with prefix.
+// Non-string attributes never match.
+func Prefix(key, prefix string) Filter {
+	cmp := func(e index.AttrValue) bool { return e.Kind == index.AttrString && strings.HasPrefix(e.S, prefix) }
+	return Filter{
+		pred: func(a index.Attrs) bool { got, ok := a[key]; return ok && anyMatchZ(got, cmp) },
+		spec: &index.FilterSpec{Op: "prefix", Field: key, Value: &index.SpecValue{AttrValue: index.AttrValue{Kind: index.AttrString, S: prefix}}},
+	}
+}
+
+// Contains matches documents whose string attribute key contains substr.
+// Non-string attributes never match. Unlike Prefix, this can't be answered
+// from the attribute index and always falls back to a predicate scan.
+func Contains(key, substr string) Filter {
+	cmp := func(e index.AttrValue) bool { return e.Kind == index.AttrString && strings.Contains(e.S, substr) }
+	return Filter{
+		pred: func(a index.Attrs) bool { got, ok := a[key]; return ok && anyMatchZ(got, cmp) },
+		spec: &index.FilterSpec{Op: "contains", Field: key, Value: &index.SpecValue{AttrValue: index.AttrValue{Kind: index.AttrString, S: substr}}},
+	}
 }
 
 // Exists matches documents that have any value for key.

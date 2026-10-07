@@ -182,14 +182,96 @@ func TestFilter_AddBatchWithAttrs(t *testing.T) {
 func TestFilter_InvalidAttrs(t *testing.T) {
 	db := openMem(t)
 	for name, a := range map[string]zenith.Attrs{
-		"empty key":   {"": "x"},
-		"slice value": {"k": []string{"a"}},
-		"nil value":   {"k": nil},
-		"nan":         {"k": math.NaN()},
+		"empty key":    {"": "x"},
+		"nested slice": {"k": [][]string{{"a"}}},
+		"nil value":    {"k": nil},
+		"nan":          {"k": math.NaN()},
 	} {
 		if err := db.AddWithAttrs(bgCtx(), "d", "text", a); !errors.Is(err, zenith.ErrInvalidAttrs) {
 			t.Errorf("%s: err = %v, want ErrInvalidAttrs", name, err)
 		}
+	}
+}
+
+// A flat slice is a valid array attribute (not rejected like the nested case
+// above) — Eq/In/Range match it under "any element matches" semantics.
+func TestFilter_ArrayAttrs(t *testing.T) {
+	db := openMem(t)
+	seed := []struct {
+		id, text string
+		attrs    zenith.Attrs
+	}{
+		{"a", "kubernetes cluster networking guide", zenith.Attrs{"tags": []string{"go", "infra"}}},
+		{"b", "kubernetes cluster networking guide", zenith.Attrs{"tags": []string{"python", "infra"}}},
+		{"c", "kubernetes cluster networking guide", zenith.Attrs{"tags": []string{"rust"}}},
+		{"d", "kubernetes cluster networking guide", zenith.Attrs{"scores": []int{10, 20, 30}}},
+	}
+	for _, s := range seed {
+		if err := db.AddWithAttrs(bgCtx(), s.id, s.text, s.attrs); err != nil {
+			t.Fatalf("AddWithAttrs(%s): %v", s.id, err)
+		}
+	}
+
+	cases := []struct {
+		name string
+		f    zenith.Filter
+		want []string
+	}{
+		{"eq matches any element", zenith.Eq("tags", "infra"), []string{"a", "b"}},
+		{"eq matches sole element", zenith.Eq("tags", "rust"), []string{"c"}},
+		{"eq no match", zenith.Eq("tags", "java"), nil},
+		{"in across array elements", zenith.In("tags", "go", "rust"), []string{"a", "c"}},
+		{"range over numeric array", zenith.Range("scores", 15, 25), []string{"d"}},
+		{"range out of array bounds", zenith.Range("scores", 100, 200), nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rs, err := db.Search(bgCtx(), "kubernetes networking", zenith.WithFilter(tc.f), zenith.Limit(100))
+			if err != nil {
+				t.Fatalf("Search: %v", err)
+			}
+			sameIDs(t, rs, tc.want...)
+		})
+	}
+}
+
+func TestFilter_PrefixAndContains(t *testing.T) {
+	db := openMem(t)
+	seed := []struct {
+		id, text string
+		attrs    zenith.Attrs
+	}{
+		{"a", "kubernetes cluster networking guide", zenith.Attrs{"path": "/docs/guide/intro"}},
+		{"b", "kubernetes cluster networking guide", zenith.Attrs{"path": "/docs/api/reference"}},
+		{"c", "kubernetes cluster networking guide", zenith.Attrs{"path": "/blog/release-notes"}},
+		{"d", "kubernetes cluster networking guide", zenith.Attrs{"path": 42}},
+	}
+	for _, s := range seed {
+		if err := db.AddWithAttrs(bgCtx(), s.id, s.text, s.attrs); err != nil {
+			t.Fatalf("AddWithAttrs(%s): %v", s.id, err)
+		}
+	}
+
+	cases := []struct {
+		name string
+		f    zenith.Filter
+		want []string
+	}{
+		{"prefix matches", zenith.Prefix("path", "/docs/"), []string{"a", "b"}},
+		{"prefix no match", zenith.Prefix("path", "/nope/"), nil},
+		{"prefix on non-string never matches", zenith.Prefix("path", "4"), nil},
+		{"contains matches", zenith.Contains("path", "release"), []string{"c"}},
+		{"contains no match", zenith.Contains("path", "nope"), nil},
+		{"contains on non-string never matches", zenith.Contains("path", "42"), nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rs, err := db.Search(bgCtx(), "kubernetes networking", zenith.WithFilter(tc.f), zenith.Limit(100))
+			if err != nil {
+				t.Fatalf("Search: %v", err)
+			}
+			sameIDs(t, rs, tc.want...)
+		})
 	}
 }
 
