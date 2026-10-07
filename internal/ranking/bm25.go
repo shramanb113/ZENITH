@@ -365,13 +365,26 @@ func (s *BM25Scorer) Query(queryTerms []string) []BM25Result {
 	// Collapse duplicate terms but preserve their multiplicity so repeated
 	// terms score exactly as the original per-occurrence loop did.
 	termCount := make(map[string]int, len(queryTerms))
+	terms := make([]string, 0, len(queryTerms))
 	for _, term := range queryTerms {
+		if termCount[term] == 0 {
+			terms = append(terms, term)
+		}
 		termCount[term]++
 	}
+	// Accumulate per-term contributions in one canonical order (sorted terms),
+	// never map-iteration order. Float addition is not associative — and on
+	// arm64 the compiler fuses `scores[docID] += idf * tfNorm` into an FMA,
+	// which makes even a two-term sum order-dependent — so a random order gave
+	// the same document a different last bit on every call. The fused ranking
+	// compares keyword scores exactly (cmpFloat in rrf.go), so that noise could
+	// swap two near-tied documents and shift both by a whole RRF rank step.
+	sort.Strings(terms)
 
 	avgdl := s.avgdl()
 	scores := make(map[uint64]float64)
-	for term, count := range termCount {
+	for _, term := range terms {
+		count := termCount[term]
 		idf := s.idf(term) * float64(count)
 		for _, docID := range s.postings[term] {
 			freq := float64(s.termFreqs[docID][term])
