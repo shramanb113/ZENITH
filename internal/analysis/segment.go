@@ -102,6 +102,27 @@ func isASCII(s string) bool {
 	return true
 }
 
+func isASCIIRunes(rs []rune) bool {
+	for _, r := range rs {
+		if r >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// isCJK reports whether r belongs to a script written with no whitespace
+// between words (Han, Hiragana, Katakana, Hangul). Segment splits these into
+// one span per character, since there is no dictionary segmenter in this
+// module (deliberately not added — see CLAUDE.md) and a maximal run would
+// otherwise become a single oversized token covering a whole sentence.
+// Other non-ASCII scripts (Devanagari, Arabic, Cyrillic, ...) are
+// whitespace-delimited already, so a run stays one span there.
+func isCJK(r rune) bool {
+	return unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) ||
+		unicode.Is(unicode.Katakana, r) || unicode.Is(unicode.Hangul, r)
+}
+
 // FoldIndic normalises Devanagari spelling variants: NFD, drop nukta and zero-width joiners, NFC.
 // NFD first so precomposed nukta letters (U+0929, U+0958–U+095F) fold as well.
 func FoldIndic(s string) string {
@@ -117,7 +138,8 @@ func FoldIndic(s string) string {
 
 // Segment splits text into raw word runs (not lowercased, not stemmed) with rune offsets.
 // A run is a maximal sequence of letters, numbers, combining marks and joiners, so Devanagari
-// matras stay inside their word. ASCII runs are further split with the legacy pattern.
+// matras stay inside their word. ASCII runs are further split with the legacy pattern; CJK
+// characters inside a non-ASCII run are split one-per-span (see isCJK).
 func Segment(text string) []Span {
 	runes := []rune(text)
 	var out []Span
@@ -130,13 +152,31 @@ func Segment(text string) []Span {
 		for j < len(runes) && isWordRune(runes[j]) {
 			j++
 		}
-		run := string(runes[i:j])
-		if isASCII(run) {
-			for _, loc := range splitASCIIWord(run) {
-				out = append(out, Span{Term: run[loc[0]:loc[1]], Start: i + loc[0], End: i + loc[1]})
+		run := runes[i:j]
+		switch {
+		case isASCIIRunes(run):
+			// Materialise the string only now: slicing a string shares its
+			// backing array, so this is the one allocation this branch
+			// needs, not one per candidate run.
+			s := string(run)
+			for _, loc := range splitASCIIWord(s) {
+				out = append(out, Span{Term: s[loc[0]:loc[1]], Start: i + loc[0], End: i + loc[1]})
 			}
-		} else {
-			out = append(out, Span{Term: run, Start: i, End: j})
+		default:
+			segStart := i
+			for k := i; k < j; k++ {
+				if !isCJK(runes[k]) {
+					continue
+				}
+				if k > segStart {
+					out = append(out, Span{Term: string(runes[segStart:k]), Start: segStart, End: k})
+				}
+				out = append(out, Span{Term: string(runes[k : k+1]), Start: k, End: k + 1})
+				segStart = k + 1
+			}
+			if segStart < j {
+				out = append(out, Span{Term: string(runes[segStart:j]), Start: segStart, End: j})
+			}
 		}
 		i = j
 	}

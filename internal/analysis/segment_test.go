@@ -200,6 +200,58 @@ func TestTokenize2BHKSplitsDigitFromAcronym(t *testing.T) {
 	}
 }
 
+func TestSegmentCJKPerCharacter(t *testing.T) {
+	cases := []struct {
+		name, text string
+		want       []string
+	}{
+		{"chinese", "巴黎是法国的首都", []string{"巴", "黎", "是", "法", "国", "的", "首", "都"}},
+		{
+			// Mixed kanji (Han) and hiragana: both are CJK-split per
+			// character under isCJK, since neither carries whitespace
+			// between words in real Japanese text.
+			"japanese_mixed_kanji_hiragana", "東京は日本の首都です",
+			[]string{"東", "京", "は", "日", "本", "の", "首", "都", "で", "す"},
+		},
+		{
+			// Korean has spaces between words, but a word itself is a run
+			// of Hangul syllable blocks with no internal separator — each
+			// block is already one rune, so per-character splitting here
+			// is per-syllable-block, matching the plan's stated intent.
+			"korean_hangul_syllable_blocks", "서울은 한국의 수도이다",
+			[]string{"서", "울", "은", "한", "국", "의", "수", "도", "이", "다"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := terms(Segment(c.text))
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("Segment(%q) terms = %v, want %v", c.text, got, c.want)
+			}
+		})
+	}
+}
+
+func TestSegmentCJKOffsetsReconstructSurface(t *testing.T) {
+	text := "Paris東京is巴黎the capital"
+	runes := []rune(text)
+	for _, s := range Segment(text) {
+		if surface := string(runes[s.Start:s.End]); surface != s.Term {
+			t.Fatalf("span %+v points at %q, want %q", s, surface, s.Term)
+		}
+	}
+}
+
+func TestSegmentDevanagariStillOneSpanPerWord(t *testing.T) {
+	// Regression guard: isCJK must not touch Devanagari (or other
+	// whitespace-delimited scripts) — only Han/Hiragana/Katakana/Hangul.
+	got := terms(Segment("पानी भर जाता है"))
+	want := []string{"पानी", "भर", "जाता", "है"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Segment(Devanagari) terms = %v, want %v (CJK split must not affect Devanagari)", got, want)
+	}
+}
+
 func TestSoundexNonASCIIIsEmpty(t *testing.T) {
 	if got := Soundex("पानी"); got != "" {
 		t.Fatalf("Soundex(पानी) = %q, want empty", got)
