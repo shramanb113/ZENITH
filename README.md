@@ -725,6 +725,25 @@ per upsert batch, 100 results per search. Each is overridable per collection at 
 (`max_docs`, `max_body_bytes`) or server-wide (`--max-collections`, `--collection-max-docs`,
 `--collection-max-open`, `--collection-idle-close`).
 
+**Capacity planning, measured (2026-10-08), not guessed:** a freshly started server with the
+bundled model loaded and zero collections open costs about **130-160 MB** (working set / private)
+— essentially the fixed cost of the one ONNX embedder shared by every collection and namespace in
+the process. Opening and seeding 200 small collections (20 tiny documents each) raised that by
+roughly **75-80 MB total, about 0.4 MB per open collection** — small relative to the fixed
+embedder cost. That means `--collection-max-open`'s default (64) is cheap on its own; the number
+of *distinct tenants open at once* matters far less than the fixed embedder footprint, for small
+collections. A tenant with thousands of documents costs proportionally more (segments, WAL, and
+the ANN graph once a collection is large enough to use it) — this number does not extend to that
+case; see [ROADMAP.md](./ROADMAP.md) deferred-backlog item L for the full measurement and its
+caveats, and item D for the still-unmeasured 1M-document scale question.
+
+Concurrent query throughput was also measured for the first time (ROADMAP item K/L):
+with the real ONNX embedder, many clients repeatedly searching the same popular query scale to
+roughly **900-1400 QPS** depending on client/tenant count (query-result caching turns repeats
+into cache hits); every query being genuinely unique instead caps out around **100 QPS**
+regardless of concurrency — a single shared inference lock, not per-tenant contention. Plan
+capacity around the shared embedder, not around collection count.
+
 **Crash semantics:** a SIGKILL skips the graceful-shutdown checkpoint, but every write that
 returned 200 was already fsynced to that collection's WAL and replays on the next lazy open — no
 acknowledged write is lost. The collection's own `doc_count` may be a conservative overcount after
