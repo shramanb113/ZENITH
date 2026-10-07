@@ -49,6 +49,19 @@ type Spec struct {
 	// Cased, when true, skips lowercasing before WordPiece tokenization. False
 	// (the default) matches every existing model's bert-base-uncased vocabulary.
 	Cased bool
+	// NoTokenTypeIDs is true for models whose ONNX graph has no
+	// token_type_ids input — DistilBERT-family models, unlike BERT, were
+	// never trained with segment embeddings and don't expose that input at
+	// all; passing one makes onnxruntime refuse the run ("Invalid input
+	// name"). False (the default) matches every BERT-family model.
+	NoTokenTypeIDs bool
+	// HiddenDims is the transformer's native hidden size, when it differs from
+	// Dims (the final, post-Dense output size recorded in the index header).
+	// Zero means "same as Dims" — true for every model without a DenseURL, and
+	// for one (LaBSE) whose Dense projection happens to be square. Set this
+	// when DenseURL points at a non-square projection (e.g. 768 hidden -> 512
+	// output), so pooling reads the raw hidden width instead of the final one.
+	HiddenDims int
 	// SizeMB is the approximate download size, for user-facing messages.
 	SizeMB int
 	// Languages is a short human-readable coverage note.
@@ -62,9 +75,9 @@ func (s Spec) IndexName() string { return "onnx:" + s.ID }
 // entries), which is why one bundled vocab.txt serves all of them. Models with
 // a different tokenizer family (e.g. multilingual-e5-small, which needs
 // SentencePiece) are deliberately not listed until a tokenizer for them
-// exists. labse (LaBSE) is the exception that fits: it is still WordPiece,
-// just with its own (much larger, cased) vocab fetched via VocabURL — see
-// Spec.VocabURL / Spec.Cased.
+// exists. labse and distiluse-multilingual are the exceptions that fit: both
+// are still WordPiece, just with their own (much larger, cased) vocab fetched
+// via VocabURL — see Spec.VocabURL / Spec.Cased / Spec.HiddenDims.
 var registry = []Spec{
 	{
 		ID:          "all-MiniLM-L6-v2",
@@ -101,6 +114,17 @@ var registry = []Spec{
 		Cased:     true,
 		SizeMB:    450,
 		Languages: "109 languages (LaBSE)",
+	},
+	{
+		ID:          "distiluse-multilingual",
+		Description: "distiluse-base-multilingual-cased-v2: DistilBERT-based multilingual sentence embeddings, knowledge-distilled from a strong English teacher for cross-lingual similarity (not naive mean-pooled BERT) across 50+ languages; opt-in, never the bundled default. Verified via sentence-transformers/distiluse-base-multilingual-cased-v2's own module config (1_Pooling: mean, word_embedding_dimension 768; 2_Dense: Linear(768,512)+Tanh) and the Xenova ONNX export's config.json (architectures: [\"DistilBertModel\"], a base encoder with no masked-LM head, so last_hidden_state is actually exposed) -- not a guess. The plain bert-base-multilingual-cased export on Xenova's hub was checked and rejected for the same reason noted elsewhere in this file: it carries a BertForMaskedLM head and exposes only logits, not hidden states.",
+		Dims:        512, Pooling: PoolMean, HiddenDims: 768, NoTokenTypeIDs: true,
+		ModelURL:  "https://huggingface.co/Xenova/distiluse-base-multilingual-cased-v2/resolve/main/onnx/model_quantized.onnx",
+		VocabURL:  "https://huggingface.co/Xenova/distiluse-base-multilingual-cased-v2/resolve/main/vocab.txt",
+		DenseURL:  "https://huggingface.co/sentence-transformers/distiluse-base-multilingual-cased-v2/resolve/main/2_Dense/model.safetensors",
+		Cased:     true,
+		SizeMB:    130,
+		Languages: "50+ languages (distiluse-base-multilingual-cased-v2)",
 	},
 }
 

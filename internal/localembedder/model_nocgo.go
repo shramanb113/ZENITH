@@ -10,7 +10,7 @@ var errNoCGo = errors.New("localembedder: CGo required — rebuild with CGO_ENAB
 
 type onnxModel struct{}
 
-func newOnnxModel(_ []byte, _ string) (*onnxModel, error) {
+func newOnnxModel(_ []byte, _ string, _ bool) (*onnxModel, error) {
 	return nil, errNoCGo
 }
 

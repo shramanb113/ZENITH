@@ -101,7 +101,7 @@ func newEmbedder(spec Spec, model, vocab, dense []byte) (*Embedder, error) {
 		return nil, fmt.Errorf("localembedder: extract ort lib: %w", err)
 	}
 
-	m, err := newOnnxModel(model, libPath)
+	m, err := newOnnxModel(model, libPath, !spec.NoTokenTypeIDs)
 	if err != nil {
 		return nil, fmt.Errorf("localembedder: ort session: %w", err)
 	}
@@ -112,12 +112,22 @@ func newEmbedder(spec Spec, model, vocab, dense []byte) (*Embedder, error) {
 		if err != nil {
 			return nil, fmt.Errorf("localembedder: dense projection: %w", err)
 		}
-		if d.in != spec.Dims || d.out != spec.Dims {
-			return nil, fmt.Errorf("localembedder: dense projection shape [%d,%d] does not match model dims %d", d.out, d.in, spec.Dims)
+		if d.in != e.hiddenDims() || d.out != spec.Dims {
+			return nil, fmt.Errorf("localembedder: dense projection shape [%d,%d] does not match model dims (hidden %d, output %d)", d.out, d.in, e.hiddenDims(), spec.Dims)
 		}
 		e.dense = d
 	}
 	return e, nil
+}
+
+// hiddenDims is the transformer's native hidden size — what pooling reads
+// from the raw ONNX output — which equals spec.Dims unless HiddenDims
+// overrides it (a non-square Dense projection; see Spec.HiddenDims).
+func (e *Embedder) hiddenDims() int {
+	if e.spec.HiddenDims > 0 {
+		return e.spec.HiddenDims
+	}
+	return e.spec.Dims
 }
 
 // Spec returns the model description this embedder runs.
@@ -138,9 +148,9 @@ func seqLenFor(n int) int {
 func (e *Embedder) pool(hidden []float32, mask []int64, seqLen int) []float32 {
 	var vec []float32
 	if e.spec.Pooling == PoolCLS {
-		vec = append([]float32(nil), hidden[:e.spec.Dims]...)
+		vec = append([]float32(nil), hidden[:e.hiddenDims()]...)
 	} else {
-		vec = meanPool(hidden, mask, seqLen, e.spec.Dims)
+		vec = meanPool(hidden, mask, seqLen, e.hiddenDims())
 	}
 	if e.dense != nil {
 		vec = e.dense.apply(vec)
@@ -173,7 +183,7 @@ func (e *Embedder) embedOne(text string) ([]float32, error) {
 		flatMask[i] = 1
 	}
 
-	hidden, err := e.model.infer(flatIDs, flatMask, flatTypeIDs, 1, seqLen, e.spec.Dims)
+	hidden, err := e.model.infer(flatIDs, flatMask, flatTypeIDs, 1, seqLen, e.hiddenDims())
 	if err != nil {
 		return nil, err
 	}
@@ -208,12 +218,12 @@ func (e *Embedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, e
 		}
 	}
 
-	hidden, err := e.model.infer(flatIDs, flatMask, flatTypeIDs, n, seqLen, e.spec.Dims)
+	hidden, err := e.model.infer(flatIDs, flatMask, flatTypeIDs, n, seqLen, e.hiddenDims())
 	if err != nil {
 		return nil, err
 	}
 
-	chunkSize := seqLen * e.spec.Dims
+	chunkSize := seqLen * e.hiddenDims()
 	result := make([][]float32, n)
 	for i := range texts {
 		chunk := hidden[i*chunkSize : (i+1)*chunkSize]
