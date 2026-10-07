@@ -17,6 +17,7 @@ import (
 
 	"github.com/shramanb113/ZENITH/gen/go/zenithproto"
 	"github.com/shramanb113/ZENITH/internal/analysis"
+	"github.com/shramanb113/ZENITH/internal/collections"
 	"github.com/shramanb113/ZENITH/internal/embedding"
 	"github.com/shramanb113/ZENITH/internal/localembedder"
 	"github.com/shramanb113/ZENITH/internal/server"
@@ -33,6 +34,13 @@ var serveFlags struct {
 	synonyms      string
 	bind          string
 	allowUnauthed bool
+
+	collectionsDir      string
+	noCollections       bool
+	maxCollections      int
+	collectionMaxDocs   int
+	collectionMaxOpen   int
+	collectionIdleClose time.Duration
 }
 
 var serveCmd = &cobra.Command{
@@ -113,10 +121,18 @@ func init() {
 	serveCmd.Flags().StringVar(&serveFlags.synonyms, "synonyms", "", "Synonyms file merged into query expansion (HTTP mode)")
 	serveCmd.Flags().StringVar(&serveFlags.bind, "bind", "127.0.0.1", "Interface for the gRPC port and for --http values without a host (use 0.0.0.0 inside containers)")
 	serveCmd.Flags().BoolVar(&serveFlags.allowUnauthed, "allow-unauthenticated", false, "Allow listening on a non-loopback address with no --key")
+	serveCmd.Flags().StringVar(&serveFlags.collectionsDir, "collections-dir", zenithDataPath("collections"), "Root directory for persistent HTTP collections (HTTP mode)")
+	serveCmd.Flags().BoolVar(&serveFlags.noCollections, "no-collections", false, "Serve only ephemeral namespaces; disable /v1/collections/*")
+	serveCmd.Flags().IntVar(&serveFlags.maxCollections, "max-collections", 1000, "Maximum number of persistent collections")
+	serveCmd.Flags().IntVar(&serveFlags.collectionMaxDocs, "collection-max-docs", 1_000_000, "Default per-collection document quota")
+	serveCmd.Flags().IntVar(&serveFlags.collectionMaxOpen, "collection-max-open", 64, "Maximum number of collections open (mapped into memory) at once")
+	serveCmd.Flags().DurationVar(&serveFlags.collectionIdleClose, "collection-idle-close", 10*time.Minute, "Idle time before an open collection is closed")
 }
 
 // runHTTP serves the HTTP/JSON API: ephemeral per-request namespaces (/v1/ns/*, in-memory, for
-// classify-and-discard workloads). It never opens the --db index.
+// classify-and-discard workloads) and, unless --no-collections, persistent named collections
+// (/v1/collections/*) under --collections-dir, each a durable pkg/zenith DB. It never opens the
+// --db index.
 func runHTTP(addr string) error {
 	emb, model, err := sidecarEmbedder(cliFlags.embedder, cliFlags.model)
 	if err != nil {
@@ -138,16 +154,43 @@ func runHTTP(addr string) error {
 		slog.Info("synonyms loaded", "mappings", n, "hash", synHash)
 	}
 
-	srv := sidecar.New(sidecar.Config{Key: serveFlags.key, Version: version, Model: model, Embedder: emb, Synonyms: synHash})
+	var mgr *collections.Manager
+	if !serveFlags.noCollections {
+		mgr, err = collections.New(collections.Config{
+			Root:           serveFlags.collectionsDir,
+			Embedder:       emb,
+			MaxCollections: serveFlags.maxCollections,
+			DefaultMaxDocs: serveFlags.collectionMaxDocs,
+			MaxOpen:        serveFlags.collectionMaxOpen,
+			IdleClose:      serveFlags.collectionIdleClose,
+		})
+		if err != nil {
+			return fmt.Errorf("collections: %w", err)
+		}
+		total, _ := mgr.Counts()
+		slog.Info("collections ready", "root", serveFlags.collectionsDir, "found", total)
+		if serveFlags.key == "" {
+			slog.Warn("collections management API is unauthenticated (no --key)")
+		}
+	}
+
+	srv := sidecar.New(sidecar.Config{Key: serveFlags.key, Version: version, Model: model, Embedder: emb, Synonyms: synHash, Collections: mgr})
+	// A collection upsert embeds on the request path, so both timeouts are far
+	// more generous than the ephemeral-only defaults were.
 	hs := &http.Server{Addr: addr, Handler: srv.Handler(), ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second}
+		ReadTimeout: 60 * time.Second, WriteTimeout: 120 * time.Second}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go srv.Run(ctx, time.Minute)
+	if mgr != nil {
+		go mgr.Run(ctx, time.Minute)
+	}
 	go func() {
 		<-ctx.Done()
-		shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// 30s: long enough for hs.Shutdown to drain an in-flight collection
+		// upsert before CloseAll below checkpoints every open collection.
+		shut, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		_ = hs.Shutdown(shut)
 	}()
@@ -157,6 +200,11 @@ func runHTTP(addr string) error {
 		return err
 	}
 	srv.Close()
+	if mgr != nil {
+		if err := mgr.CloseAll(); err != nil {
+			return fmt.Errorf("closing collections: %w", err)
+		}
+	}
 	return nil
 }
 

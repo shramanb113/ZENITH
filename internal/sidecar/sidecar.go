@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/shramanb113/ZENITH/internal/analysis"
+	"github.com/shramanb113/ZENITH/internal/collections"
 	"github.com/shramanb113/ZENITH/pkg/zenith"
 )
 
@@ -34,6 +35,13 @@ type Config struct {
 	Embedder   zenith.Embedder // shared across namespaces; nil means BM25-only
 	Now        func() time.Time
 	Log        *slog.Logger
+
+	// Collections serves persistent, multi-tenant collections at
+	// /v1/collections/*. nil (the default) leaves those routes unregistered;
+	// the ephemeral /v1/ns/* routes above are unaffected either way.
+	Collections *collections.Manager
+	MaxBatch    int // docs per PUT .../docs; default 1000
+	MaxLimit    int // max search limit; default 100
 }
 
 type span struct{ start, end, pos int }
@@ -74,6 +82,12 @@ func New(cfg Config) *Server {
 	if cfg.MaxQueries <= 0 {
 		cfg.MaxQueries = 300
 	}
+	if cfg.MaxBatch <= 0 {
+		cfg.MaxBatch = 1000
+	}
+	if cfg.MaxLimit <= 0 {
+		cfg.MaxLimit = 100
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -86,11 +100,21 @@ func New(cfg Config) *Server {
 // Handler returns the HTTP routes.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.Register(mux)
+	return mux
+}
+
+// Register attaches every route this Server serves to mux: the ephemeral
+// /v1/ns/* namespace routes, and, when Config.Collections is set, the
+// persistent /v1/collections/* routes (collections_http.go).
+func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.Handle("PUT /v1/ns/{ns}/docs", s.guard(s.putDocs))
 	mux.Handle("POST /v1/ns/{ns}/search", s.guard(s.search))
 	mux.Handle("DELETE /v1/ns/{ns}", s.guard(s.deleteNS))
-	return mux
+	if s.cfg.Collections != nil {
+		s.registerCollections(mux)
+	}
 }
 
 // Run sweeps expired namespaces every interval until ctx is done.
@@ -181,8 +205,14 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Lock()
 	n := len(s.ns)
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": s.cfg.Version, "model": s.cfg.Model,
-		"synonyms": s.cfg.Synonyms, "namespaces": n})
+	out := map[string]any{"status": "ok", "version": s.cfg.Version, "model": s.cfg.Model,
+		"synonyms": s.cfg.Synonyms, "namespaces": n}
+	if s.cfg.Collections != nil {
+		total, open := s.cfg.Collections.Counts()
+		out["collections"] = total
+		out["collections_open"] = open
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 type docIn struct {
@@ -245,13 +275,7 @@ func (s *Server) putDocs(w http.ResponseWriter, r *http.Request) {
 	}
 	spans := make(map[string]map[string]span, len(docs))
 	for id, text := range docs {
-		m := map[string]span{}
-		for _, sp := range s.ana.AnalyzeSpans(text) {
-			if _, seen := m[sp.Term]; !seen {
-				m[sp.Term] = span{sp.Start, sp.End, sp.Pos}
-			}
-		}
-		spans[id] = m
+		spans[id] = firstSpans(s.ana, text)
 	}
 
 	s.mu.Lock()
@@ -353,6 +377,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 	out := make(map[string]queryOut, len(req.Queries))
+	spansFor := func(docID string) map[string]span { return n.spans[docID] }
 	for _, q := range req.Queries {
 		res, err := n.db.Search(r.Context(), q.Text, append([]zenith.SearchOption{zenith.Explain(), zenith.Limit(limit)}, searchOpts...)...)
 		if err != nil {
@@ -363,32 +388,42 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "search failed")
 			return
 		}
-		qo := queryOut{QueryTerms: []string{}, Hits: []hitOut{}}
-		for _, res1 := range res {
-			sig := res1.Signals
-			if sig == nil {
-				continue
-			}
-			if len(qo.QueryTerms) == 0 && len(sig.QueryTerms) > 0 {
-				qo.QueryTerms = sig.QueryTerms
-			}
-			terms := make([]termOut, 0, len(sig.Terms))
-			for _, tm := range sig.Terms {
-				sp, ok := n.spans[res1.ID][tm.Matched]
-				if !ok {
-					continue
-				}
-				terms = append(terms, termOut{tm.Term, tm.Matched, tm.Dist, tm.Synonym, sp.start, sp.end, sp.pos})
-			}
-			if len(terms) == 0 && sig.Semantic < req.MinSemantic {
-				continue
-			}
-			qo.Hits = append(qo.Hits, hitOut{res1.ID, res1.Score, sig.Lexical, sig.Semantic, terms})
-		}
-		out[q.ID] = qo
+		out[q.ID] = buildQueryOut(res, spansFor, req.MinSemantic)
 	}
 	s.cfg.Log.Info("namespace searched", "ns", name, "queries", len(req.Queries), "ms", time.Since(start).Milliseconds())
 	writeJSON(w, http.StatusOK, map[string]any{"results": out})
+}
+
+// buildQueryOut converts raw Explain results into the wire shape, resolving
+// each matched term's character span via spansFor (called at most once per
+// document ID actually referenced by res, since callers that memoise it do
+// the expensive lookup — GetDoc + AnalyzeSpans for collections — only once
+// per document instead of once per matched term).
+func buildQueryOut(res []zenith.Result, spansFor func(docID string) map[string]span, minSemantic float64) queryOut {
+	qo := queryOut{QueryTerms: []string{}, Hits: []hitOut{}}
+	for _, res1 := range res {
+		sig := res1.Signals
+		if sig == nil {
+			continue
+		}
+		if len(qo.QueryTerms) == 0 && len(sig.QueryTerms) > 0 {
+			qo.QueryTerms = sig.QueryTerms
+		}
+		spans := spansFor(res1.ID)
+		terms := make([]termOut, 0, len(sig.Terms))
+		for _, tm := range sig.Terms {
+			sp, ok := spans[tm.Matched]
+			if !ok {
+				continue
+			}
+			terms = append(terms, termOut{tm.Term, tm.Matched, tm.Dist, tm.Synonym, sp.start, sp.end, sp.pos})
+		}
+		if len(terms) == 0 && sig.Semantic < minSemantic {
+			continue
+		}
+		qo.Hits = append(qo.Hits, hitOut{res1.ID, res1.Score, sig.Lexical, sig.Semantic, terms})
+	}
+	return qo
 }
 
 func (s *Server) deleteNS(w http.ResponseWriter, r *http.Request) {

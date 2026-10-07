@@ -9,9 +9,21 @@ services:
       - ./demo/corpus:/home/zenith/corpus:ro
     ports:
       - "127.0.0.1:8080:8080"   # gRPC — the persistent engine (cmd/client, CLI)
-      - "127.0.0.1:7700:7700"   # HTTP namespace sidecar — in-memory only, see CLAUDE.md
     # 0.0.0.0 inside the container only; the host publishes on 127.0.0.1 (see ports: above).
     command: ["serve", "--db", "/home/zenith/data/zenith.db", "--bind", "0.0.0.0", "--allow-unauthenticated"]
+
+  http:
+    image: zenith-demo:latest
+    depends_on: [zenith]          # ensures the image is built by the zenith service's build
+    profiles: ["http"]
+    volumes:
+      - zenith-home:/home/zenith
+    ports:
+      - "127.0.0.1:7700:7700"     # HTTP API: ephemeral namespaces + persistent collections
+    environment:
+      - ZENITH_KEY=${ZENITH_KEY:-}
+    command: ["serve", "--http", ":7700", "--bind", "0.0.0.0", "--allow-unauthenticated"]
+    stop_grace_period: 60s        # lets CloseAll checkpoint every open collection
 
 volumes:
   zenith-home:

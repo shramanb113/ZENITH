@@ -442,6 +442,7 @@ zenith search <query>          ▼
 | PDF extraction | Active | Pure Go via `ledongthuc/pdf` |
 | Image indexing (filename + OCR) | Active | OCR opt-in: build with `-tags ocr` + `CGO_ENABLED=1` against libtesseract; falls back to filename-only otherwise |
 | In-memory mode (`:memory:`) | Active | Library — zero-cleanup testing |
+| Persistent multi-tenant collections (HTTP) | Active | per-collection keys + quotas; see "HTTP server" |
 | OpenAI embedder | Planned | |
 | Prometheus metrics | Planned | |
 | OpenTelemetry traces | Planned | |
@@ -659,13 +660,16 @@ Every component has a clear boundary and a reason to exist. See [DECISIONS.md](.
 
 MIT
 
-## HTTP sidecar mode
+## HTTP server (zenith serve --http)
 
 `zenith serve --http :7700` serves ZENITH over HTTP/JSON, so services that are not written in Go
-can use its hybrid matching without gRPC code generation. The `/v1/ns/*` routes are a per-request
-namespace mode for classify-and-discard workloads: each `PUT` builds a short-lived, in-memory
-index, you run a batch of explained queries against it, and it is dropped on `DELETE`, after 10
-idle minutes, or by LRU. Nothing is written to disk.
+can use its hybrid matching without gRPC code generation.
+
+### Ephemeral namespaces (/v1/ns/*)
+
+The `/v1/ns/*` routes are a per-request namespace mode for classify-and-discard workloads: each
+`PUT` builds a short-lived, in-memory index, you run a batch of explained queries against it, and
+it is dropped on `DELETE`, after 10 idle minutes, or by LRU. Nothing is written to disk.
 
 Analysis is Unicode-aware (Devanagari matras, nukta and ZWJ folding), and `--synonyms` can bridge
 romanised and native-script forms (e.g. `paani <-> water`). Retrieval quality on human-written
@@ -685,15 +689,56 @@ Flags:
 Request bodies are capped at 1 MB, and the sidecar never logs document or query text. Explain signals are
 absolute. The fused `Score` is relative to the result set, so never threshold on it.
 
+### Persistent collections (/v1/collections/*)
+
+Unlike ephemeral namespaces, a collection is a durable, named, multi-tenant index: each one is its
+own `pkg/zenith` DB under `--collections-dir` (default `~/.zenith/collections`), written through
+the library's WAL, so an acknowledged write survives a kill. A collection is lazily opened on first
+use, idle-closed after `--collection-idle-close` (default 10m) or LRU-evicted past
+`--collection-max-open` (default 64) to bound memory and file descriptors, and reopens
+transparently on the next request — it is **never deleted automatically**; only
+`DELETE /v1/collections/{id}` removes one.
+
+Auth is two-layered: `--key` (`ZENITH_KEY`) is the **admin key**, used to create, list, delete and
+rotate collections. Each collection also gets its own **collection key**, generated at `POST
+/v1/collections` and shown only then (and again on rotate) — it is stored only as a SHA-256 hash.
+Either the admin key or a collection's own key authorizes that collection's document and search
+routes (`X-Zenith-Key`, same header as the ephemeral routes); a wrong or missing key gets 401 even
+for a collection that doesn't exist, so a non-admin caller can never probe which ids are taken.
+
+| Route | Auth | Purpose |
+|---|---|---|
+| `POST /v1/collections` | admin | create `{"id","max_docs","max_body_bytes"}` (only `id` required) → `{"id","key","embedder",...}`, the key shown once |
+| `GET /v1/collections` | admin | list every collection's `Info`, sorted by id |
+| `DELETE /v1/collections/{id}` | admin | delete permanently |
+| `POST /v1/collections/{id}/rotate-key` | admin | replace the collection's key; the old one stops working immediately |
+| `PUT /v1/collections/{id}/docs` | admin or collection | upsert `{"docs":[{"id","text","attrs"}]}` (1..1000 by default); never replaces the collection, unlike ephemeral `PUT` |
+| `GET /v1/collections/{id}/docs/{doc}` | admin or collection | fetch one document's original text |
+| `DELETE /v1/collections/{id}/docs/{doc}` | admin or collection | delete one document |
+| `POST /v1/collections/{id}/search` | admin or collection | same request/response shape as ephemeral search, with `"filter"` support |
+| `GET /v1/collections/{id}/stats` | admin or collection | `Info` plus a live `disk_bytes`/`wal_bytes` walk |
+
+Defaults: 1000 collections, 1,000,000 documents and 8 MiB request body per collection, 1000 docs
+per upsert batch, 100 results per search. Each is overridable per collection at creation
+(`max_docs`, `max_body_bytes`) or server-wide (`--max-collections`, `--collection-max-docs`,
+`--collection-max-open`, `--collection-idle-close`).
+
+**Crash semantics:** a SIGKILL skips the graceful-shutdown checkpoint, but every write that
+returned 200 was already fsynced to that collection's WAL and replays on the next lazy open — no
+acknowledged write is lost. The collection's own `doc_count` may be a conservative overcount after
+a crash (reported as `"doc_count_exact": false` until the next successful write), never an
+undercount.
+
 ```bash
-docker build -t zenith-sidecar .
-docker run --rm -p 127.0.0.1:7700:7700 -e ZENITH_KEY=change-me zenith-sidecar
+docker build -t zenith .
+docker run --rm -p 127.0.0.1:7700:7700 -e ZENITH_KEY=change-me -v zenith-data:/home/zenith zenith serve --http :7700 --bind 0.0.0.0
 ```
 
 ## Docker demo (CLI + gRPC, persistent)
 
-The single-container snippet above runs only the in-memory HTTP sidecar (no persistence by
-design — see `internal/sidecar`). `docker-compose.yml` instead builds an image with OCR support
+The single-container snippet above runs the HTTP server (ephemeral namespaces are in-memory by
+design; persistent collections live under `~/.zenith/collections` in the volume).
+`docker-compose.yml` instead builds an image with OCR support
 (`-tags ocr`, Tesseract) and a `zenith-client` test-suite binary, backed by a named volume so the
 index survives container restarts:
 
