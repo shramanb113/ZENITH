@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // fakeVectorEmbedder returns a stable, text-dependent vector. Unlike the
@@ -69,10 +70,24 @@ type asymmetricEmbedder struct {
 	inner      *fakeVectorEmbedder
 	embedCalls atomic.Int64
 	queryCalls atomic.Int64
+
+	// delay, when set, is slept before computing the vector. Singleflight
+	// only de-dups callers that are still in flight when a later caller
+	// arrives; with an effectively instant base call and 50 unsynchronized
+	// goroutines, a fast CI runner's scheduler can let the first caller's
+	// Do finish (and its singleflight entry get cleaned up) before some of
+	// the other 49 are even scheduled, splitting them into extra base
+	// calls — observed as a flake on the macOS/cgo=0 CI lane. A small delay
+	// here widens that window so every concurrent caller reliably arrives
+	// while the one real call is still in flight.
+	delay time.Duration
 }
 
 func (a *asymmetricEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	a.embedCalls.Add(1)
+	if a.delay > 0 {
+		time.Sleep(a.delay)
+	}
 	return a.inner.Embed(ctx, "doc:"+text)
 }
 func (a *asymmetricEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
@@ -81,6 +96,9 @@ func (a *asymmetricEmbedder) EmbedBatch(ctx context.Context, texts []string) ([]
 func (a *asymmetricEmbedder) Dimensions() int { return a.inner.Dimensions() }
 func (a *asymmetricEmbedder) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
 	a.queryCalls.Add(1)
+	if a.delay > 0 {
+		time.Sleep(a.delay)
+	}
 	return a.inner.Embed(ctx, "query:"+text)
 }
 
@@ -269,17 +287,19 @@ func TestCachingEmbedder_ConcurrentMissesDoNotDuplicateWork(t *testing.T) {
 		{"EmbedQuery", func(c *CachingEmbedder) ([]float32, error) { return c.EmbedQuery(ctx, text) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			base := &asymmetricEmbedder{inner: newFakeVectorEmbedder(8)}
+			base := &asymmetricEmbedder{inner: newFakeVectorEmbedder(8), delay: 20 * time.Millisecond}
 			cached, err := NewCachingEmbedder(base, 100)
 			if err != nil {
 				t.Fatal(err)
 			}
 			var wg sync.WaitGroup
+			ready := make(chan struct{})
 			results := make([][]float32, workers)
 			for i := 0; i < workers; i++ {
 				wg.Add(1)
 				go func(i int) {
 					defer wg.Done()
+					<-ready // all workers race into the first call together
 					v, err := tc.call(cached)
 					if err != nil {
 						t.Error(err)
@@ -288,6 +308,7 @@ func TestCachingEmbedder_ConcurrentMissesDoNotDuplicateWork(t *testing.T) {
 					results[i] = v
 				}(i)
 			}
+			close(ready)
 			wg.Wait()
 
 			if n := base.embedCalls.Load() + base.queryCalls.Load(); n != 1 {
