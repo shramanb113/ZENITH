@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # ZENITH CLI + HTTP sidecar: CGo + embedded onnxruntime (gte-small bundled
 # default) + Tesseract OCR for image indexing.
-FROM golang:1.24-bookworm AS build
+FROM golang:1.25-bookworm AS build
 WORKDIR /src
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libtesseract-dev libleptonica-dev pkg-config \
