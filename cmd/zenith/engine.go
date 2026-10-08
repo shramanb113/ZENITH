@@ -33,6 +33,12 @@ var cliFlags struct {
 	model       string // registered local model id; "" = the bundled one
 	ollamaURL   string
 	ollamaModel string
+
+	queryCacheSize              int
+	queryCacheTTL               time.Duration
+	queryCacheRedisAddr         string
+	queryCacheSemanticThreshold float64
+	annThresholdBandPct         float64
 }
 
 // defaultStorageConfig returns a storage config rooted at ~/.zenith/.
@@ -56,6 +62,16 @@ func defaultStorageConfig() storage.EngineConfig {
 // buildEngine constructs and optionally loads a ready-to-use index.Engine.
 func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) {
 	appConfig := config.DefaultConfig()
+
+	if cliFlags.queryCacheSize >= 0 {
+		appConfig.QueryCacheSize = cliFlags.queryCacheSize
+	}
+	if cliFlags.queryCacheTTL > 0 {
+		appConfig.QueryCacheTTL = cliFlags.queryCacheTTL
+	}
+	appConfig.QueryCacheRedisAddr = cliFlags.queryCacheRedisAddr
+	appConfig.QueryCacheSemanticThreshold = cliFlags.queryCacheSemanticThreshold
+	appConfig.ANNThresholdBandPct = cliFlags.annThresholdBandPct
 
 	// The index decides which embedding model to use: an existing index records the
 	// model that built its vectors, and opening it with any other would mix vector

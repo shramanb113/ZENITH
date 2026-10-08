@@ -44,6 +44,8 @@ var serveFlags struct {
 	collectionIdleClose time.Duration
 
 	metricsAddr string
+
+	queryCacheRedisAddr string
 }
 
 var serveCmd = &cobra.Command{
@@ -142,6 +144,7 @@ func init() {
 	serveCmd.Flags().IntVar(&serveFlags.collectionMaxOpen, "collection-max-open", 64, "Maximum number of collections open (mapped into memory) at once")
 	serveCmd.Flags().DurationVar(&serveFlags.collectionIdleClose, "collection-idle-close", 10*time.Minute, "Idle time before an open collection is closed")
 	serveCmd.Flags().StringVar(&serveFlags.metricsAddr, "metrics-addr", "", "Prometheus /metrics listen address (e.g. 127.0.0.1:9464); empty disables it")
+	serveCmd.Flags().StringVar(&serveFlags.queryCacheRedisAddr, "collection-query-cache-redis-addr", "", "Optional shared L2 Redis address for the query-result cache across every persistent collection (HTTP mode); empty keeps each collection's cache in-process only")
 }
 
 // startMetrics starts the Prometheus /metrics listener when addr is
@@ -196,12 +199,13 @@ func runHTTP(addr string) error {
 	var mgr *collections.Manager
 	if !serveFlags.noCollections {
 		mgr, err = collections.New(collections.Config{
-			Root:           serveFlags.collectionsDir,
-			Embedder:       emb,
-			MaxCollections: serveFlags.maxCollections,
-			DefaultMaxDocs: serveFlags.collectionMaxDocs,
-			MaxOpen:        serveFlags.collectionMaxOpen,
-			IdleClose:      serveFlags.collectionIdleClose,
+			Root:                serveFlags.collectionsDir,
+			Embedder:            emb,
+			MaxCollections:      serveFlags.maxCollections,
+			DefaultMaxDocs:      serveFlags.collectionMaxDocs,
+			MaxOpen:             serveFlags.collectionMaxOpen,
+			IdleClose:           serveFlags.collectionIdleClose,
+			QueryCacheRedisAddr: serveFlags.queryCacheRedisAddr,
 		})
 		if err != nil {
 			return fmt.Errorf("collections: %w", err)

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -22,6 +23,11 @@ func addEngineFlags(cmd *cobra.Command) {
 		"Embedding model id from `zenith models list` (default: the one bundled in this binary; others need `zenith models pull <id>`)")
 	cmd.Flags().StringVar(&cliFlags.ollamaURL, "ollama-url", "http://localhost:11434", "Ollama server URL")
 	cmd.Flags().StringVar(&cliFlags.ollamaModel, "ollama-model", "nomic-embed-text", "Ollama embedding model")
+	cmd.Flags().IntVar(&cliFlags.queryCacheSize, "query-cache-size", 1000, "Query-result cache entry count (L1, in-process); 0 disables the query-result cache")
+	cmd.Flags().DurationVar(&cliFlags.queryCacheTTL, "query-cache-ttl", 5*time.Minute, "L2 (Redis) query-result cache entry TTL; has no effect without --query-cache-redis-addr")
+	cmd.Flags().StringVar(&cliFlags.queryCacheRedisAddr, "query-cache-redis-addr", "", "Optional L2 Redis address for the query-result cache (e.g. localhost:6379); empty keeps the cache in-process only")
+	cmd.Flags().Float64Var(&cliFlags.queryCacheSemanticThreshold, "query-cache-semantic-threshold", 0, "Enable near-duplicate query-cache matching above this cosine similarity (0 disables it; 0.97 is a conservative starting point)")
+	cmd.Flags().Float64Var(&cliFlags.annThresholdBandPct, "ann-threshold-band-pct", 0, "Make the ANN-vs-exact vector search choice near the ANN threshold follow measured latency within this fraction of the threshold (0 disables it, static threshold only)")
 }
 
 // zenithDataPath returns an absolute path inside the user's ~/.zenith/ directory.
