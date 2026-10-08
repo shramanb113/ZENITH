@@ -625,12 +625,19 @@ Every `Search` is cached by default: the engine keys a result list on the query 
 the structured filter, the ranking weights, and an internal write-generation counter — so
 a write to the index makes every previously-cached result for that engine unreachable on
 the very next query, with no active invalidation step. An in-process LRU (`QueryCacheSize`,
-default 1,000 entries) is the only tier unless you opt into more. Concurrent identical
+default 1,000 entries) is the only tier unless you opt into more. Each entry can hold up to
+`MaxResults` (1,000 by default) candidate results plus the query's embedding vector, not a
+handful of bytes — size the default down with `WithQueryCacheSize`/`--query-cache-size` for
+a process holding many engines at once (e.g. a collection server with dozens of tenants
+open) rather than assuming "1,000 entries" is small on its own. Concurrent identical
 queries that miss the cache share one computation (`golang.org/x/sync/singleflight`), so a
 burst of requests for the same uncached query never pays for it N times.
 
 ```bash
-zenith search --query-cache-size 5000 "kubernetes oom"   # bigger L1, still in-process only
+# --db persists across runs, so a repeated zenith search --db against it can
+# actually hit the cache within one process's lifetime; a one-shot CLI
+# invocation with no --db never will, since the cache dies with the process.
+zenith index --db my.db ~/docs && zenith search --db my.db --query-cache-size 5000 "kubernetes oom"
 zenith search --query-cache-size 0 "kubernetes oom"      # disable the cache for this process
 ```
 

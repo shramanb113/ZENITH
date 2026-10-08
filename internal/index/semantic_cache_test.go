@@ -45,10 +45,18 @@ func semanticTestEngine(threshold float64) (*Engine, *semanticEmbedder) {
 	return e, emb
 }
 
+// Review Finding (code review, 2026-10-08): the original version of this
+// test only compared len(first) == len(second), which would pass even with
+// semantic matching entirely removed (every call here hits the same single
+// document regardless). Asserting on the cache observer's "semantic" hit
+// count is the only way to actually prove the near-duplicate match fired,
+// rather than merely that both searches returned a result.
 func TestSemanticCache_NearDuplicateAboveThresholdHits(t *testing.T) {
 	ctx := context.Background()
 	e, _ := semanticTestEngine(0.97)
 	defer e.Close()
+	obs := &fakeCacheObserver{}
+	e.SetCacheObserver(obs)
 	if err := e.AddWithVectorAttrs(ctx, "doc1", "hello world", []float32{1, 0, 0}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +71,9 @@ func TestSemanticCache_NearDuplicateAboveThresholdHits(t *testing.T) {
 	}
 	if len(first) != len(second) {
 		t.Fatalf("semantic hit returned a different result shape: first=%v second=%v", first, second)
+	}
+	if obs.hits["semantic"] != 1 {
+		t.Fatalf("hits[semantic] = %d, want 1 — the near-duplicate must be served from the semantic scan, not recomputed", obs.hits["semantic"])
 	}
 }
 
@@ -92,6 +103,8 @@ func TestSemanticCache_DifferentWeightsNeverMatchSemantically(t *testing.T) {
 	ctx := context.Background()
 	e, _ := semanticTestEngine(0.5) // generous threshold
 	defer e.Close()
+	obs := &fakeCacheObserver{}
+	e.SetCacheObserver(obs)
 	if err := e.AddWithVectorAttrs(ctx, "doc1", "hello world", []float32{1, 0, 0}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -103,11 +116,53 @@ func TestSemanticCache_DifferentWeightsNeverMatchSemantically(t *testing.T) {
 	// AND a semantic miss (the only cached entry is in a different bucket),
 	// so this must still succeed by recomputing, not by panicking or
 	// returning the other bucket's entry.
-	res, err := e.SearchFilteredWeighted(ctx, "weather in SF", nil, Weights{Vector: 5})
+	if _, err := e.SearchFilteredWeighted(ctx, "weather in SF", nil, Weights{Vector: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if obs.hits["semantic"] != 0 {
+		t.Fatalf("hits[semantic] = %d, want 0 — a different weights bucket must never be served by the semantic scan despite a generous (0.5) threshold", obs.hits["semantic"])
+	}
+	if obs.misses != 2 {
+		t.Fatalf("misses = %d, want 2 — both calls must be genuine recomputations, each in its own bucket", obs.misses)
+	}
+}
+
+// Same text, different structured filters: the spec's own gap list calls
+// this out explicitly alongside the weights case above, and it was missing
+// from this file entirely before this fix.
+func TestSemanticCache_DifferentFiltersNeverMatchSemantically(t *testing.T) {
+	ctx := context.Background()
+	e, _ := semanticTestEngine(0.5) // generous threshold
+	defer e.Close()
+	obs := &fakeCacheObserver{}
+	e.SetCacheObserver(obs)
+	if err := e.AddWithVectorAttrs(ctx, "doc1", "hello world", []float32{1, 0, 0}, Attrs{"lang": {Kind: AttrString, S: "en"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	specA := &FilterSpec{Op: "eq", Field: "lang", Value: &SpecValue{AttrValue{Kind: AttrString, S: "en"}}}
+	specB := &FilterSpec{Op: "eq", Field: "lang", Value: &SpecValue{AttrValue{Kind: AttrString, S: "fr"}}}
+	fA, err := specA.Compile()
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = res
+	fB, err := specB.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := e.SearchFilteredWeighted(ctx, "weather in SF", fA, Weights{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.SearchFilteredWeighted(ctx, "weather in SF", fB, Weights{}); err != nil {
+		t.Fatal(err)
+	}
+	if obs.hits["semantic"] != 0 {
+		t.Fatalf("hits[semantic] = %d, want 0 — a different filter bucket must never be served by the semantic scan despite a generous (0.5) threshold", obs.hits["semantic"])
+	}
+	if obs.misses != 2 {
+		t.Fatalf("misses = %d, want 2 — both calls must be genuine recomputations, each in its own filter bucket", obs.misses)
+	}
 }
 
 // Default off (threshold == 0): zero scan calls, not just zero hits.
