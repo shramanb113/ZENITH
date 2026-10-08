@@ -2,6 +2,7 @@ package index
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sort"
 	"strings"
@@ -126,11 +127,57 @@ func (e *Engine) SearchFiltered(ctx context.Context, query string, f *Filter) ([
 // ranking weights (see Weights) used only for this call — the engine's
 // configured defaults, and every other concurrent search, are unaffected.
 //
+// This is the query-result cache's entry point (QUERYCACHE.md): a filter
+// with no structured Spec (a raw Predicate closure — see Filter.spec) can't
+// be hashed into a key, so it bypasses the cache entirely, computing fresh
+// exactly as before caching existed. Every other call is keyed on
+// (QueryCacheNamespace, writeGen, query, filter spec JSON, weights); a write
+// bumps writeGen, making every previously-cached key for this engine
+// unreachable without any active invalidation. Concurrent identical calls
+// share one real computation via searchSF.
+func (e *Engine) SearchFilteredWeighted(ctx context.Context, query string, f *Filter, w Weights) ([]SearchResponse, error) {
+	bypass := f != nil && f.pred() != nil && f.spec() == nil
+	if bypass || e.cache == nil {
+		entry, err := e.searchUncached(ctx, query, f, w)
+		if err != nil {
+			return nil, err
+		}
+		return entry.Results, nil
+	}
+
+	specJSON, _ := json.Marshal(f.spec()) // nil *FilterSpec marshals to "null"
+	e.mu.RLock()
+	gen := e.writeGen
+	e.mu.RUnlock()
+	bucket := bucketKey(e.config.QueryCacheNamespace, gen, specJSON, w)
+	key := fullCacheKey(bucket, query)
+
+	if entry, ok := e.cache.Get(ctx, key); ok {
+		return cloneResponses(entry.Results), nil
+	}
+
+	v, err, _ := e.searchSF.Do(key, func() (any, error) {
+		return e.searchUncached(ctx, query, f, w)
+	})
+	if err != nil {
+		return nil, err
+	}
+	entry := v.(cacheResult)
+	entry.BucketKey = bucket
+	e.cache.Set(ctx, key, entry)
+	return cloneResponses(entry.Results), nil
+}
+
+// searchUncached is SearchFilteredWeighted's actual computation — the
+// lexical pass, vector pass, rank fusion, and neural-expansion fallback,
+// unchanged from before the query-result cache existed. Every caller goes
+// through SearchFilteredWeighted above, never this directly.
+//
 // The query embedding runs concurrently with the lexical phase (the two are
 // independent), so a hybrid search costs the longer of them instead of their
 // sum. The embedding starts before the engine lock is taken and is waited for
 // with the lock held only briefly (see embedHoldMax).
-func (e *Engine) SearchFilteredWeighted(ctx context.Context, query string, f *Filter, w Weights) ([]SearchResponse, error) {
+func (e *Engine) searchUncached(ctx context.Context, query string, f *Filter, w Weights) (cacheResult, error) {
 	embedded := make(chan queryEmbedding, 1)
 	go func() {
 		v, err := embedding.EmbedQuery(ctx, e.embedder, query)
@@ -153,7 +200,7 @@ func (e *Engine) SearchFilteredWeighted(ctx context.Context, query string, f *Fi
 	phoneticWeight := e.phoneticWeightFor(w)
 	rawTokens, keywordScores, bm25Results := e.lexicalPhase(query, f, phoneticWeight)
 	if len(rawTokens) == 0 {
-		return nil, nil
+		return cacheResult{}, nil
 	}
 
 	var qe queryEmbedding
@@ -177,7 +224,7 @@ func (e *Engine) SearchFilteredWeighted(ctx context.Context, query string, f *Fi
 				locked = true
 				rawTokens, keywordScores, bm25Results = e.lexicalPhase(query, f, phoneticWeight)
 				if len(rawTokens) == 0 {
-					return nil, nil
+					return cacheResult{}, nil
 				}
 			}
 		}
@@ -223,7 +270,7 @@ func (e *Engine) SearchFilteredWeighted(ctx context.Context, query string, f *Fi
 		ranks = e.rankAndFuse(expandedKeywords, bm25Results, vectorScores, scorer)
 	}
 
-	return ranks, nil
+	return cacheResult{Results: ranks, QueryVec: queryVec}, nil
 }
 
 func (e *Engine) expandTokens(rawTokens []string) []string {

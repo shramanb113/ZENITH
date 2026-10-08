@@ -11,12 +11,15 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/shramanb113/ZENITH/internal/analysis"
 	"github.com/shramanb113/ZENITH/internal/ann"
 	"github.com/shramanb113/ZENITH/internal/config"
 	"github.com/shramanb113/ZENITH/internal/embedding"
+	"github.com/shramanb113/ZENITH/internal/querycache"
 	"github.com/shramanb113/ZENITH/internal/ranking"
+	"golang.org/x/sync/singleflight"
 )
 
 // SearchResponse holds a single search result.
@@ -91,7 +94,17 @@ type Engine struct {
 	// permanently unreachable, with no enumeration or active invalidation
 	// logic required. Guarded by e.mu — every mutator already holds
 	// e.mu.Lock() when it bumps this, so no new lock or atomic is needed.
-	writeGen    uint64
+	writeGen uint64
+	// cache is the query-result cache (nil when Config.QueryCacheSize <= 0,
+	// which is a complete no-op, not a degraded mode). See search.go for how
+	// SearchFilteredWeighted uses it.
+	cache *querycache.Tiered[cacheResult]
+	// searchSF de-duplicates concurrent cache misses for the same key: N
+	// goroutines racing on the same uncached query+filter+weights would
+	// otherwise each pay the full lexical+vector+fusion pipeline
+	// independently. Mirrors embedding.CachingEmbedder's embedSF/querySF.
+	searchSF singleflight.Group
+
 	pendingDels map[uint64]struct{} // segment docs deleted since the last flush
 	// frozen is the delta a flush is writing (nil when none): read-only, still
 	// searched, and replaced by a segment when the flush commits. See frozen.go.
@@ -164,6 +177,25 @@ func NewEngine(cfg *config.Config, emb embedding.Embedder, scr ranking.Scorer, a
 		fst:         analysis.NewFSTDictionary(),
 	}
 	e.bm25.SetBacking(segBacking{e})
+
+	if cfg.QueryCacheSize > 0 {
+		l1, err := querycache.NewMemCache[cacheResult](cfg.QueryCacheSize)
+		if err != nil {
+			// Unreachable: cfg.QueryCacheSize > 0 is guaranteed by the guard
+			// above, and that is NewMemCache's only error condition.
+			panic(err)
+		}
+		var l2 *querycache.BytesCache
+		if cfg.QueryCacheRedisAddr != "" {
+			ttl := cfg.QueryCacheTTL
+			if ttl <= 0 {
+				ttl = 5 * time.Minute
+			}
+			l2 = querycache.NewBytesCache(cfg.QueryCacheRedisAddr, ttl)
+		}
+		e.cache = querycache.NewTiered(l1, l2, encodeCacheResult, decodeCacheResult)
+	}
+
 	return e
 }
 
