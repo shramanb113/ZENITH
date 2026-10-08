@@ -184,3 +184,51 @@ func (e *Engine) Replay(fn func(key, value []byte, isDelete bool) error) error {
 	}
 	return iter.Error()
 }
+
+// Snapshot is a point-in-time view of the journal, used to coordinate a safe
+// Prune: capture it right before calling the index's segment Save(), then
+// Prune exactly these keys after Save() succeeds. Pruning based on wall-clock
+// time instead would race against writes arriving while Save() runs.
+type Snapshot struct {
+	snap *pebble.Snapshot
+}
+
+// Snapshot returns a new point-in-time view of the journal.
+func (e *Engine) Snapshot() *Snapshot {
+	return &Snapshot{snap: e.db.NewSnapshot()}
+}
+
+// Close releases the snapshot's resources. Safe to call after Prune.
+func (s *Snapshot) Close() error {
+	return s.snap.Close()
+}
+
+// Prune permanently deletes every key s saw, in one atomic batch. Call only
+// after the segment save s was taken for has succeeded — those keys are now
+// redundant with that segment. Unlike Put/Delete's logical envelope deletes,
+// this uses a real Pebble Delete: these entries are gone for good.
+func (e *Engine) Prune(s *Snapshot) error {
+	iter, err := s.snap.NewIter(nil)
+	if err != nil {
+		return fmt.Errorf("storage: snapshot iterator: %w", err)
+	}
+	defer iter.Close()
+
+	batch := e.db.NewBatch()
+	defer batch.Close()
+	for valid := iter.First(); valid; valid = iter.Next() {
+		if err := batch.Delete(iter.Key(), nil); err != nil {
+			return fmt.Errorf("storage: stage prune delete: %w", err)
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return err
+	}
+	if batch.Empty() {
+		return nil
+	}
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return fmt.Errorf("storage: commit prune batch: %w", err)
+	}
+	return nil
+}

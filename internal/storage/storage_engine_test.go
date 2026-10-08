@@ -167,6 +167,53 @@ func TestEngine_ReplayPropagatesCallbackError(t *testing.T) {
 	}
 }
 
+func TestEngine_PruneRemovesOnlySnapshottedKeys(t *testing.T) {
+	e := openTestEngine(t)
+	ctx := context.Background()
+	if err := e.Put(ctx, []byte("a"), []byte("va")); err != nil {
+		t.Fatalf("Put a: %v", err)
+	}
+	if err := e.Put(ctx, []byte("b"), []byte("vb")); err != nil {
+		t.Fatalf("Put b: %v", err)
+	}
+
+	snap := e.Snapshot()
+
+	// A write arriving after the snapshot was taken must survive Prune —
+	// this is the race Prune exists to avoid (pruning "everything now"
+	// would wrongly delete this too).
+	if err := e.Put(ctx, []byte("c"), []byte("vc")); err != nil {
+		t.Fatalf("Put c: %v", err)
+	}
+
+	if err := e.Prune(snap); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if err := snap.Close(); err != nil {
+		t.Fatalf("Snapshot.Close: %v", err)
+	}
+
+	if _, ok := e.Get([]byte("a")); ok {
+		t.Fatal("Prune left snapshotted key 'a' behind")
+	}
+	if _, ok := e.Get([]byte("b")); ok {
+		t.Fatal("Prune left snapshotted key 'b' behind")
+	}
+	val, ok := e.Get([]byte("c"))
+	if !ok || string(val) != "vc" {
+		t.Fatalf("Prune incorrectly removed key 'c' written after the snapshot: Get = (%q, %v)", val, ok)
+	}
+}
+
+func TestEngine_PruneOfEmptySnapshotIsNoop(t *testing.T) {
+	e := openTestEngine(t)
+	snap := e.Snapshot()
+	defer snap.Close()
+	if err := e.Prune(snap); err != nil {
+		t.Fatalf("Prune of empty snapshot: %v", err)
+	}
+}
+
 func TestEngine_DurableAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
 	e1, err := Open(EngineConfig{Dir: dir})
