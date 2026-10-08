@@ -41,7 +41,13 @@ var cliFlags struct {
 }
 
 // buildEngine constructs and optionally loads a ready-to-use index.Engine.
-func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) {
+// The returned *storage.Engine is the same instance buildEngine opened and
+// wired as the document journal — callers that need NewTxn() (zenith txn,
+// zenith storage) use it directly rather than opening a second
+// storage.Engine on the same --storage-dir, which Pebble's exclusive
+// directory lock would refuse. teardown closes it; callers must not close
+// it themselves.
+func buildEngine(load bool) (*index.Engine, *storage.Engine, *activitylog.Logger, func(), error) {
 	appConfig := config.DefaultConfig()
 
 	if cliFlags.queryCacheSize >= 0 {
@@ -67,7 +73,7 @@ func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) 
 	storageEng, err := storage.Open(storage.EngineConfig{Dir: cliFlags.storageDir})
 	if err != nil {
 		alog.Close()
-		return nil, nil, nil, fmt.Errorf("cannot open storage engine at %s: %w", cliFlags.storageDir, err)
+		return nil, nil, nil, nil, fmt.Errorf("cannot open storage engine at %s: %w", cliFlags.storageDir, err)
 	}
 
 	emb, embedderName := resolveEmbedder(appConfig, alog)
@@ -96,7 +102,7 @@ func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) 
 			// damage) would be overwritten by an empty one.
 			alog.Close()
 			_ = storageEng.Close()
-			return nil, nil, nil, fmt.Errorf("cannot open index %s: %w%s", cliFlags.dbPath, err, mismatchHint(err))
+			return nil, nil, nil, nil, fmt.Errorf("cannot open index %s: %w%s", cliFlags.dbPath, err, mismatchHint(err))
 		}
 	}
 
@@ -158,7 +164,7 @@ func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) 
 		alog.Close()
 	}
 
-	return engine, alog, teardown, nil
+	return engine, storageEng, alog, teardown, nil
 }
 
 // resolveEmbedder selects the embedder based on cliFlags.embedder.

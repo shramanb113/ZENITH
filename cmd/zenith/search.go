@@ -42,7 +42,7 @@ The query goes through the full pipeline:
 
 		printHeader("search", fmt.Sprintf("%q", query))
 
-		engine, alog, teardown, err := buildEngine(true)
+		engine, _, alog, teardown, err := buildEngine(true)
 		if err != nil {
 			return fmt.Errorf("engine init: %w", err)
 		}

@@ -85,7 +85,7 @@ where every acknowledged write survives a kill, use the Go library
 
 		printHeader("serve", addr)
 
-		engine, alog, teardown, err := buildEngine(true)
+		engine, _, alog, teardown, err := buildEngine(true)
 		if err != nil {
 			return fmt.Errorf("engine init: %w", err)
 		}

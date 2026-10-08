@@ -15,7 +15,7 @@ func TestBuildEngine_PersistentCacheSurvivesAcrossCycles(t *testing.T) {
 	cliFlags.model = ""
 	cliFlags.queryCacheSize = -1 // keep config default
 
-	eng1, _, teardown1, err := buildEngine(false)
+	eng1, _, _, teardown1, err := buildEngine(false)
 	if err != nil {
 		t.Fatalf("buildEngine (first): %v", err)
 	}
@@ -24,7 +24,7 @@ func TestBuildEngine_PersistentCacheSurvivesAcrossCycles(t *testing.T) {
 	}
 	teardown1()
 
-	eng2, _, teardown2, err := buildEngine(true)
+	eng2, _, _, teardown2, err := buildEngine(true)
 	if err != nil {
 		t.Fatalf("buildEngine (second, load): %v", err)
 	}
