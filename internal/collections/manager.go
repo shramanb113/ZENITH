@@ -39,6 +39,13 @@ type Config struct {
 	IdleClose      time.Duration   // default 10 * time.Minute
 	Now            func() time.Time
 	Log            *slog.Logger
+	// QueryCacheRedisAddr, when set, enables a shared Redis L2 query-result
+	// cache tier across every collection this Manager opens. Each
+	// collection automatically gets its own ID as the cache namespace (see
+	// openOpts), so collections never see each other's cached results on
+	// the shared Redis. "" (default) keeps every collection's cache
+	// in-process (L1) only.
+	QueryCacheRedisAddr string
 }
 
 // CreateOptions customizes a single collection's quotas at Create time.
@@ -222,9 +229,15 @@ func (m *Manager) refreshCollectionsGauge() {
 }
 
 // openOpts returns the zenith.Open options shared by every collection.
-func (m *Manager) openOpts() []zenith.Option {
-	opts := make([]zenith.Option, 0, 3)
-	opts = append(opts, zenith.WithoutWordVectors(), zenith.WithLimit(100))
+// openOpts returns the zenith.Open options shared by every collection,
+// specialized per collection id so a shared Redis (if configured) never lets
+// one collection's cached results collide with another's.
+func (m *Manager) openOpts(id string) []zenith.Option {
+	opts := make([]zenith.Option, 0, 5)
+	opts = append(opts, zenith.WithoutWordVectors(), zenith.WithLimit(100), zenith.WithQueryCacheNamespace(id))
+	if m.cfg.QueryCacheRedisAddr != "" {
+		opts = append(opts, zenith.WithQueryCacheRedisAddr(m.cfg.QueryCacheRedisAddr))
+	}
 	if m.cfg.Embedder != nil {
 		opts = append(opts, zenith.WithEmbedder(m.cfg.Embedder))
 	} else {
@@ -266,7 +279,7 @@ func (m *Manager) acquire(id string) (*entry, error) {
 
 		e.life.Lock()
 		if !e.deleted && e.db == nil {
-			db, err := zenith.Open(filepath.Join(e.dir, "index.db"), m.openOpts()...)
+			db, err := zenith.Open(filepath.Join(e.dir, "index.db"), m.openOpts(id)...)
 			if err != nil {
 				e.life.Unlock()
 				return nil, err
@@ -383,7 +396,7 @@ func (m *Manager) Create(id string, o CreateOptions) (Info, string, error) {
 		return Info{}, "", err
 	}
 
-	db, err := zenith.Open(filepath.Join(dir, "index.db"), m.openOpts()...)
+	db, err := zenith.Open(filepath.Join(dir, "index.db"), m.openOpts(id)...)
 	if err != nil {
 		os.RemoveAll(dir)
 		return Info{}, "", err

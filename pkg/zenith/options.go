@@ -365,3 +365,24 @@ func WithANNThresholdBand(pct float64) Option {
 		return nil
 	}
 }
+
+// optionsSnapshot exposes an options value's fields for cross-package tests
+// (internal/collections) that need to verify a []Option slice's effect
+// without a real Open call. Test-only; not part of the supported API.
+type optionsSnapshot struct {
+	QueryCacheNamespace string
+	QueryCacheRedisAddr string
+}
+
+// SnapshotOptions applies opts to a fresh default options value and returns
+// the fields relevant to query-cache namespacing. Exported for
+// internal/collections' tests only.
+func SnapshotOptions(opts ...Option) (optionsSnapshot, error) {
+	o := defaultOptions()
+	for _, fn := range opts {
+		if err := fn(o); err != nil {
+			return optionsSnapshot{}, err
+		}
+	}
+	return optionsSnapshot{QueryCacheNamespace: o.queryCacheNamespace, QueryCacheRedisAddr: o.queryCacheRedisAddr}, nil
+}
