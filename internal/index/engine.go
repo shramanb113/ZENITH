@@ -36,17 +36,23 @@ type BatchDoc struct {
 	Attrs  Attrs
 }
 
-// TermStore is implemented by storage backends that maintain a term vocabulary.
-type TermStore interface {
-	AddTerms([]string)
-}
-
 // DocumentJournal durably records document mutations before they touch the
 // in-memory index. Satisfied by *storage.Engine — its Put/Delete signatures
 // match exactly. Set via SetDocumentJournal; nil means no journaling.
 type DocumentJournal interface {
 	Put(ctx context.Context, key, value []byte) error
 	Delete(ctx context.Context, key []byte) error
+}
+
+// Txn stages a batch of document mutations for one atomic commit. Satisfied
+// by *storage.Txn (internal/storage) — every method here uses only []byte,
+// context.Context, and error, so no import of internal/storage is needed in
+// either direction (the same pattern DocumentJournal already uses).
+type Txn interface {
+	Put(key, value []byte) error
+	Delete(key []byte) error
+	Commit(ctx context.Context) error
+	Discard() error
 }
 
 // Engine is the central orchestrator — it owns all sub-indexes and the
@@ -174,8 +180,7 @@ type Engine struct {
 	fstDirty bool // true when the vocabulary has changed since the last FST build
 	fstPath  string
 
-	termStore TermStore
-	journal   DocumentJournal
+	journal DocumentJournal
 }
 
 // NewEngine constructs a fully initialised Engine.
@@ -223,7 +228,6 @@ func NewEngine(cfg *config.Config, emb embedding.Embedder, scr ranking.Scorer, a
 	return e
 }
 
-func (e *Engine) SetTermStore(s TermStore)             { e.termStore = s }
 func (e *Engine) SetFSTPath(path string)               { e.fstPath = path }
 func (e *Engine) SetDocumentJournal(j DocumentJournal) { e.journal = j }
 
@@ -255,9 +259,6 @@ func (e *Engine) rebuildFSTLocked() error {
 
 	if w, ok := e.analyzer.(analysis.FSTWirer); ok {
 		w.SetFST(e.fst)
-	}
-	if e.termStore != nil {
-		e.termStore.AddTerms(terms)
 	}
 
 	e.fstDirty = false
@@ -436,6 +437,69 @@ func (e *Engine) AddBatch(ctx context.Context, docs []BatchDoc) error {
 	return e.rebuildFSTLocked()
 }
 
+// AddTransaction indexes docs atomically: every document's mutation is
+// staged into txn, which is committed once at the end. If embedding or
+// staging any document fails, txn is discarded and the whole call returns an
+// error with nothing applied to the in-memory index — unlike AddBatch, which
+// still applies documents before a later failure.
+func (e *Engine) AddTransaction(ctx context.Context, docs []BatchDoc, txn Txn) error {
+	vecs := e.embedDocs(ctx, docs)
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for i, d := range docs {
+		docVec := vecs[i]
+		if docVec == nil {
+			if v, err := e.embedder.Embed(ctx, d.Text); err == nil {
+				docVec = v
+			} else {
+				slog.With("doc_id", d.ID).Warn("Embedding failed, indexing purely lexically", "error", err)
+			}
+		}
+		if err := txn.Put([]byte(d.ID), encodeJournalValue(d.Text, d.Attrs)); err != nil {
+			_ = txn.Discard()
+			return fmt.Errorf("index: txn stage put %q: %w", d.ID, err)
+		}
+		docs[i].Vector = docVec // carried through to the apply loop below without re-embedding
+	}
+
+	if err := txn.Commit(ctx); err != nil {
+		return fmt.Errorf("index: txn commit: %w", err)
+	}
+
+	for _, d := range docs {
+		if err := e.applyInternal(ctx, d.ID, d.Text, d.Vector, d.Attrs); err != nil {
+			return fmt.Errorf("index: apply after committed txn: %w", err)
+		}
+	}
+	return e.rebuildFSTLocked()
+}
+
+// RemoveBatch deletes all index entries for every id in ids atomically:
+// every deletion is staged into txn, committed once, then applied to the
+// in-memory delta. If Commit fails, nothing is removed.
+func (e *Engine) RemoveBatch(ctx context.Context, ids []string, txn Txn) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for _, id := range ids {
+		if err := txn.Delete([]byte(id)); err != nil {
+			_ = txn.Discard()
+			return fmt.Errorf("index: txn stage delete %q: %w", id, err)
+		}
+	}
+	if err := txn.Commit(ctx); err != nil {
+		return fmt.Errorf("index: txn commit: %w", err)
+	}
+	for _, id := range ids {
+		if err := e.removeInternal(ctx, id); err != nil {
+			return fmt.Errorf("index: apply remove after committed txn: %w", err)
+		}
+	}
+	return nil
+}
+
 // warmWordVectors embeds every vocabulary token in docs that has no stored
 // word vector yet and writes the result directly into the vector store.
 // The previous implementation only warmed the LRU embed cache: with a
@@ -536,7 +600,14 @@ func (e *Engine) Remove(ctx context.Context, originalID string) error {
 			return fmt.Errorf("index: journal delete: %w", err)
 		}
 	}
+	return e.removeInternal(ctx, originalID)
+}
 
+// removeInternal applies one document's removal to the in-memory delta
+// without touching the journal — used directly by RemoveBatch, whose caller
+// has already durably committed the deletion via its own Txn. Caller must
+// hold Engine.mu.
+func (e *Engine) removeInternal(ctx context.Context, originalID string) error {
 	h := fnv.New64a()
 	h.Write([]byte(originalID))
 	internalID := h.Sum64()
@@ -667,13 +738,21 @@ func (e *Engine) CacheEnabled() bool {
 	return e.cache != nil
 }
 
+// addInternal journals then applies one document. Used by Add,
+// AddWithVectorAttrs, AddBatch.
 func (e *Engine) addInternal(ctx context.Context, originalID string, fullText string, preVec []float32, attrs Attrs) error {
 	if e.journal != nil {
 		if err := e.journal.Put(ctx, []byte(originalID), encodeJournalValue(fullText, attrs)); err != nil {
 			return fmt.Errorf("index: journal write: %w", err)
 		}
 	}
+	return e.applyInternal(ctx, originalID, fullText, preVec, attrs)
+}
 
+// applyInternal applies one document to the in-memory delta without
+// touching the journal — used directly by AddTransaction, whose caller has
+// already durably committed the document via its own Txn.
+func (e *Engine) applyInternal(ctx context.Context, originalID string, fullText string, preVec []float32, attrs Attrs) error {
 	logger := slog.With("doc_id", originalID)
 
 	tokens := e.analyzer.Analyze(fullText)
