@@ -28,14 +28,13 @@ ZENITH is split into two independent engine layers that are wired together in `c
 
 ### 1. Storage Engine (`internal/storage/storage_engine.go`)
 
-The LSM-tree pipeline:
+A thin wrapper around [`github.com/cockroachdb/pebble`](https://github.com/cockroachdb/pebble) (CockroachDB's embedded LSM key-value store) providing two things for `cmd/server`/`cmd/zenith`'s raw-engine path:
 
-- **WAL** (`internal/storage/wal/`) — append-only crash log; replayed into MemTable on Open
-- **MemTable** (`internal/storage/memtable/`) — concurrent skip-list; frozen and flushed when it exceeds `MemTableMaxSize` (64MB default)
-- **SSTable** (`internal/storage/sstable/`) — immutable sorted files written by the GroupCommitter; Bloom filter + sparse index per file
-- **FST** (`internal/analysis/fst.go`) — rebuilt from the global term vocabulary after every SSTable flush; used by the Analyzer for prefix-search query resolution
+- **`DocumentJournal`** — `Put`/`Delete` durably record every document mutation (one Pebble `Set`/tombstone-envelope write with `pebble.Sync`, forcing an fsync) before the caller applies it to the in-memory index. A one-byte envelope (`journalOpPut`/`journalOpDelete`) is prefixed onto every value because Pebble's public iterators silently skip real tombstones — relying on "absent from iteration means deleted" would lose delete-since-last-save information across a restart.
+- **`Txn`** (`NewTxn`, wrapping a `pebble.Batch`) — atomic multi-document commits: one fsync, every key visible together or none are. `index.Engine.AddTransaction`/`RemoveBatch` use this for real multi-document ACID transactions, the one capability nothing in ZENITH had before this.
+- **`Replay`** — an ordered full-keyspace iteration used for startup recovery (replaces the old WAL-record-buffer `Records()`). **`Snapshot`/`Prune`** bound journal growth: snapshot the journal right before a segment `Save()`, prune exactly those keys once `Save()` succeeds (never "everything now," which would race concurrent writes).
 
-The storage engine owns the FST and vocabulary; the index engine calls `AddTerms()` after each document.
+Earlier versions of this file described a hand-built WAL→MemTable→SSTable→Bloom-filter→leveled-compaction pipeline with its own FST. That code was never load-bearing — nothing read SSTables back, and its FST duplicated `index.Engine`'s own already-working one — and was replaced with Pebble (2026-10-08). `index.Engine` owns its own FST entirely (`internal/analysis/fst.go`, fed by its live vocabulary, persisted via `SetFSTPath`) — the storage engine does not maintain a vocabulary or FST at all. `internal/storage/wal` (the standalone package, distinct from the now-deleted `storage_engine.go` WAL usage) is unrelated and untouched: `pkg/zenith` uses it directly and independently for its own checkpointing.
 
 ### 2. Index Engine (`internal/index/engine.go`)
 
@@ -85,7 +84,7 @@ RRFRanker
 index.NewEngine(config, embedder, scorer, analyzer) → gRPC server
 ```
 
-Index persistence is **not** the LSM storage engine (that is wired in `storage_engine.go` for the term store/WAL). `engine.Save(path)` / `engine.Load(path)` use the segment format documented in `FORMAT.md`: `zenith.db` is a small manifest, segments live beside it as `zenith.db.seg-NNNNNN`. `Save` to the bound path is an _incremental flush_ (the delta becomes one new segment; cost ∝ the delta, not the index), `Save` to another path exports a merged copy, `Compact()` merges segments without holding the engine lock, and `Load` memory-maps the files. Commit = fsync the segment, then atomically rename the manifest; orphans are deleted on open. Old gob files (v4/v5) are refused with `*LegacyFormatError` (matches `ErrIncompatibleVersion`) until `zenith migrate` converts them; `Save` will not overwrite one.
+Index persistence is **not** the Pebble-backed storage engine (that is wired in `storage_engine.go` purely as the document journal + transaction log for `cmd/server`'s raw-engine path — see "Storage Engine" above). `engine.Save(path)` / `engine.Load(path)` use the segment format documented in `FORMAT.md`: `zenith.db` is a small manifest, segments live beside it as `zenith.db.seg-NNNNNN`. `Save` to the bound path is an _incremental flush_ (the delta becomes one new segment; cost ∝ the delta, not the index), `Save` to another path exports a merged copy, `Compact()` merges segments without holding the engine lock, and `Load` memory-maps the files. Commit = fsync the segment, then atomically rename the manifest; orphans are deleted on open. Old gob files (v4/v5) are refused with `*LegacyFormatError` (matches `ErrIncompatibleVersion`) until `zenith migrate` converts them; `Save` will not overwrite one.
 
 ## Configuration
 
@@ -130,22 +129,14 @@ The RRF ranker's internal candidate cap (`Config.MaxResults`) and the user-facin
 
 Before this was wired up, the ranker was always constructed with a fixed internal cap of 10 (`topN=0` defaulting via `ranking.defaultTopN`), so no caller-side limit above 10 could ever have an effect — `Limit(30)` silently still returned 10 results on all three surfaces.
 
-Storage engine config (`internal/storage/storage_engine.go`, `DefaultEngineConfig()`):
-
-- `MemTableMaxSize` — freeze threshold (64MB)
-- `CommitWindow` — group-committer batch window (4ms)
-- `CompactorConfig.L0Threshold` — L0 file count that triggers L0→L1 compaction (default 4)
-- `CompactorConfig.LevelSizeBase` — L1 byte budget (10MB); each Ln = L(n-1) × LevelSizeMult (10×)
-- `CompactorConfig.CompactionInterval` — background compaction tick (30s)
+Storage engine config (`internal/storage/storage_engine.go`, `DefaultEngineConfig()`): just `Dir` (the Pebble data directory, default `./data/pebble`) — Pebble manages its own internal tuning (memtable size, compaction, WAL) with production-ready defaults; none of that is configured by ZENITH.
 
 ## Storage implementation status
 
-| Component          | Status | Notes                                                                                         |
-| ------------------ | ------ | --------------------------------------------------------------------------------------------- |
-| WAL                | Done   | CRC-framed, SyncAlways mode; SyncPeriodic/GroupCommit stub-blocked                            |
-| MemTable           | Done   | Skip-list backed (`internal/storage/memtable/skiplist.go`); O(log n) ops, pre-sorted iterator |
-| SSTable            | Done   | Block-structured, CRC per block, Bloom filter + sparse index per file                         |
-| Group Committer    | Done   | Batches concurrent flushes into one fsync                                                     |
-| Leveled Compaction | Done   | Background goroutine; L0 threshold + Ln size triggers; tombstone pruning at last level        |
-| FST dictionary     | Done   | Rebuilt after every flush; wired into StandardAnalyzer for prefix-search query resolution     |
+| Component                     | Status | Notes                                                                                                                                  |
+| ------------------------------ | ------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Pebble-backed journal          | Done   | `internal/storage.Engine` wraps `github.com/cockroachdb/pebble`; provides `DocumentJournal` + `Replay`/`Snapshot`/`Prune` for `cmd/server`'s raw-engine path (2026-10-08, replaces the earlier hand-built WAL→MemTable→SSTable→compaction pipeline, which was never load-bearing) |
+| Multi-document transactions    | Done   | `storage.Txn` (atomic Pebble batch commit, one fsync) + `index.Engine.AddTransaction`/`RemoveBatch`; not yet exposed over gRPC/HTTP      |
+| FST dictionary                 | Done   | Owned entirely by `index.Engine` (`internal/analysis/fst.go`), fed by its live vocabulary, persisted via `SetFSTPath` — the storage engine does not maintain a second copy |
+| `internal/storage/wal`         | Done   | Unrelated to the above — used directly and independently by `pkg/zenith` for its own checkpointing; CRC-framed, SyncAlways mode        |
 | WAL benchmarks     | Done   | `internal/storage/wal/wal_bench_test.go` — append, parallel, mixed, recovery at 1K/10K/100K   |
