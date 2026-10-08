@@ -124,11 +124,16 @@ func main() {
 			}
 			return nil
 		}
-		text, attrs := index.DecodeJournalValue(value)
+		text, vector, attrs := index.DecodeJournalValue(value)
 		var err error
-		if len(attrs) > 0 {
+		switch {
+		case vector != nil:
+			// The journal already carries the vector (format v2) — no
+			// re-embed needed, the whole point of carrying it.
+			err = engine.AddWithVectorAttrs(replayCtx, id, text, vector, attrs)
+		case len(attrs) > 0:
 			err = engine.AddWithVectorAttrs(replayCtx, id, text, engine.EmbedText(replayCtx, text), attrs)
-		} else {
+		default:
 			err = engine.Add(replayCtx, id, text)
 		}
 		if err != nil {

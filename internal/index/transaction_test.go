@@ -135,6 +135,26 @@ func TestRemoveBatch_AllRemovedAfterCommit(t *testing.T) {
 	}
 }
 
+func TestAddTransaction_JournalsVector(t *testing.T) {
+	e := newTestEngineForTxn()
+	defer e.Close()
+	ctx := context.Background()
+	txn := newFakeTxn()
+
+	docs := []BatchDoc{{ID: "doc1", Text: "hello world"}}
+	if err := e.AddTransaction(ctx, docs, txn); err != nil {
+		t.Fatalf("AddTransaction: %v", err)
+	}
+	raw, ok := txn.puts["doc1"]
+	if !ok {
+		t.Fatal("expected doc1 to be journalled")
+	}
+	_, vec, _ := DecodeJournalValue(raw)
+	if len(vec) == 0 {
+		t.Error("expected AddTransaction to journal a non-empty vector, got none")
+	}
+}
+
 // Review finding (final review, 2026-10-08): AddTransaction must not mutate
 // the caller's input slice — AddBatch's own contract is non-mutating (it
 // copies before sorting), and a future caller (e.g. a gRPC handler) that

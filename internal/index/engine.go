@@ -461,7 +461,7 @@ func (e *Engine) AddTransaction(ctx context.Context, docs []BatchDoc, txn Txn) e
 				slog.With("doc_id", d.ID).Warn("Embedding failed, indexing purely lexically", "error", err)
 			}
 		}
-		if err := txn.Put([]byte(d.ID), encodeJournalValue(d.Text, d.Attrs)); err != nil {
+		if err := txn.Put([]byte(d.ID), encodeJournalValue(d.Text, vecs[i], d.Attrs)); err != nil {
 			_ = txn.Discard()
 			return fmt.Errorf("index: txn stage put %q: %w", d.ID, err)
 		}
@@ -745,7 +745,7 @@ func (e *Engine) CacheEnabled() bool {
 // AddWithVectorAttrs, AddBatch.
 func (e *Engine) addInternal(ctx context.Context, originalID string, fullText string, preVec []float32, attrs Attrs) error {
 	if e.journal != nil {
-		if err := e.journal.Put(ctx, []byte(originalID), encodeJournalValue(fullText, attrs)); err != nil {
+		if err := e.journal.Put(ctx, []byte(originalID), encodeJournalValue(fullText, preVec, attrs)); err != nil {
 			return fmt.Errorf("index: journal write: %w", err)
 		}
 	}
