@@ -5,7 +5,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/shramanb113/ZENITH/internal/analysis"
 	"github.com/shramanb113/ZENITH/internal/config"
@@ -272,4 +271,67 @@ func TestCache_DisabledWhenSizeIsZero(t *testing.T) {
 	}
 }
 
-var _ = time.Second // keep time imported if later steps in this task need it
+// unmarshalableSpec is a *FilterSpec whose json.Marshal fails: a Value with
+// Kind == AttrArray, which SpecValue.MarshalJSON (filterspec.go) rejects
+// with "value has no type" — eq/in's Value field is documented to be a
+// scalar, so this can only be reached by hand-building a Filter directly
+// (bypassing FilterSpec.Compile's Validate), the same way a caller handing
+// Search a raw Predicate bypasses the normal construction path.
+func unmarshalableSpec(field string) *FilterSpec {
+	return &FilterSpec{Op: "eq", Field: field, Value: &SpecValue{AttrValue{Kind: AttrArray}}}
+}
+
+// Review Focus (code review, 2026-10-08): a Filter whose Spec fails to
+// marshal must bypass the cache entirely — not silently share a cache key
+// with every other unmarshalable filter via a nil/zero-value specJSON.
+func TestCache_UnmarshalableFilterSpecBypassesCache(t *testing.T) {
+	ctx := context.Background()
+	emb := &countingSearchEmbedder{vec: []float32{1, 0}}
+	e := cacheTestEngine(emb)
+	defer e.Close()
+	if err := e.AddWithVectorAttrs(ctx, "doc1", "hello world", []float32{1, 0}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	f := &Filter{Pred: func(Attrs) bool { return true }, Spec: unmarshalableSpec("x")}
+	if _, err := e.SearchFilteredWeighted(ctx, "hello", f, Weights{}); err != nil {
+		t.Fatal(err)
+	}
+	callsAfterFirst := emb.calls.Load()
+	if _, err := e.SearchFilteredWeighted(ctx, "hello", f, Weights{}); err != nil {
+		t.Fatal(err)
+	}
+	if emb.calls.Load() <= callsAfterFirst {
+		t.Fatal("search with an unmarshalable filter spec hit the cache (embedder not called a second time); it must bypass the cache entirely")
+	}
+}
+
+// The failure mode a shared zero-value key would cause: two different
+// unmarshalable filters (different tenants, in practice) must never share
+// a cached result just because json.Marshal failed for both the same way.
+func TestCache_DifferentUnmarshalableFilterSpecsNeverShareResult(t *testing.T) {
+	ctx := context.Background()
+	emb := &countingSearchEmbedder{vec: []float32{1, 0}}
+	e := cacheTestEngine(emb)
+	defer e.Close()
+	if err := e.AddWithVectorAttrs(ctx, "tenant-a-doc", "hello world", []float32{1, 0}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.AddWithVectorAttrs(ctx, "tenant-b-doc", "hello world", []float32{1, 0}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	fA := &Filter{Pred: func(a Attrs) bool { return true }, Spec: unmarshalableSpec("tenant-a")}
+	fB := &Filter{Pred: func(a Attrs) bool { return true }, Spec: unmarshalableSpec("tenant-b")}
+
+	before := emb.calls.Load()
+	if _, err := e.SearchFilteredWeighted(ctx, "hello", fA, Weights{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.SearchFilteredWeighted(ctx, "hello", fB, Weights{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := emb.calls.Load() - before; got != 2 {
+		t.Fatalf("two different unmarshalable filters produced %d embedder calls, want 2 (each must recompute independently, never share a key)", got)
+	}
+}

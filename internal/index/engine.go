@@ -95,6 +95,16 @@ type Engine struct {
 	// logic required. Guarded by e.mu — every mutator already holds
 	// e.mu.Lock() when it bumps this, so no new lock or atomic is needed.
 	writeGen uint64
+	// processEpoch is a random value generated once per Engine instance and
+	// mixed into every query-cache key (see cache_key.go's bucketKey). It
+	// exists only to protect the optional L2 (Redis) tier's cross-process
+	// correctness: writeGen alone is meaningless across a restart (it
+	// starts at 0 again) or between replicas, so without this, a different
+	// process could read back another process's stale L2 entries at the
+	// same (namespace, writeGen) pair. L1 never needs this (it never
+	// outlives the process that wrote it); it's harmless there too, since
+	// bucketKey includes it unconditionally rather than branching per tier.
+	processEpoch string
 	// cache is the query-result cache (nil when Config.QueryCacheSize <= 0,
 	// which is a complete no-op, not a degraded mode). See search.go for how
 	// SearchFilteredWeighted uses it.
@@ -188,6 +198,7 @@ func NewEngine(cfg *config.Config, emb embedding.Embedder, scr ranking.Scorer, a
 		bm25:          ranking.NewBM25Scorer(ranking.BM25Params{}),
 		fst:           analysis.NewFSTDictionary(),
 		cacheObserver: noopCacheObserver{},
+		processEpoch:  newProcessEpoch(),
 	}
 	e.bm25.SetBacking(segBacking{e})
 

@@ -1,11 +1,17 @@
 package index
 
+import "sync"
+
 // ewma is a small exponentially-weighted rolling average, used to track
 // recent per-path search latency (exact scan vs. ANN graph) without storing
 // a history. alpha weights the newest observation; 1-alpha decays the rest.
 // Zero value is "no observations yet" (value() returns 0 until the first
 // observe call, which seeds it directly rather than blending against 0).
+// Guarded by mu: concurrent searches call observe() on the same Engine's
+// annLatency/exactLatency fields, and shouldUseANN reads them concurrently
+// with that — both the write and the read must be synchronized.
 type ewma struct {
+	mu  sync.Mutex
 	v   float64
 	set bool
 }
@@ -15,6 +21,8 @@ type ewma struct {
 const ewmaAlpha = 0.3
 
 func (e *ewma) observe(v float64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if !e.set {
 		e.v = v
 		e.set = true
@@ -24,7 +32,18 @@ func (e *ewma) observe(v float64) {
 }
 
 func (e *ewma) value() float64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	return e.v
+}
+
+// isSet reports whether observe has been called at least once. Synchronized
+// the same way value() is, since shouldUseANN reads it concurrently with
+// observe() writing it.
+func (e *ewma) isSet() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.set
 }
 
 // shouldUseANN decides whether vectorPass should use the ANN graph for a
@@ -45,7 +64,7 @@ func (e *Engine) shouldUseANN(corpusSize int) bool {
 	if float64(corpusSize) < lo || float64(corpusSize) > hi {
 		return static
 	}
-	if !e.annLatency.set || !e.exactLatency.set {
+	if !e.annLatency.isSet() || !e.exactLatency.isSet() {
 		return static
 	}
 	return e.annLatency.value() < e.exactLatency.value()

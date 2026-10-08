@@ -148,11 +148,24 @@ func (e *Engine) SearchFilteredWeighted(ctx context.Context, query string, f *Fi
 		return entry.Results, nil
 	}
 
-	specJSON, _ := json.Marshal(f.spec()) // nil *FilterSpec marshals to "null"
+	specJSON, err := json.Marshal(f.spec()) // nil *FilterSpec marshals to "null"
+	if err != nil {
+		// An unmarshalable spec (e.g. a non-finite range bound, or an array
+		// value JSON can't represent) must never fall back to a shared
+		// zero-value key: two different unmarshalable filters would then
+		// collide on the same cache/singleflight key and one caller could
+		// get another caller's results. Bypass the cache entirely instead,
+		// the same way a raw-Predicate filter does.
+		entry, err := e.searchUncached(ctx, query, f, w)
+		if err != nil {
+			return nil, err
+		}
+		return entry.Results, nil
+	}
 	e.mu.RLock()
 	gen := e.writeGen
 	e.mu.RUnlock()
-	bucket := bucketKey(e.config.QueryCacheNamespace, gen, specJSON, w)
+	bucket := bucketKey(e.config.QueryCacheNamespace, gen, specJSON, w, e.processEpoch)
 	key := fullCacheKey(bucket, query)
 
 	if entry, ok := e.cache.Get(ctx, key); ok {
@@ -459,10 +472,17 @@ func (e *Engine) vectorPass(ctx context.Context, queryVec []float32, f *Filter) 
 		}
 	}
 
+	banded := e.config.ANNThresholdBandPct > 0
 	if e.ann != nil && e.ann.Len() > 0 && e.shouldUseANN(e.docCountLocked()) {
 		start := time.Now()
 		hits, ok := e.annSearch(queryVec, pred)
-		e.annLatency.observe(float64(time.Since(start).Milliseconds()))
+		// Only a successful ANN search is a real latency sample for this
+		// path — a failed search (ok == false) falls through to the exact
+		// scan below and recording it here would misrepresent the ANN
+		// path's speed with a result it never actually produced.
+		if banded && ok {
+			e.annLatency.observe(elapsedMs(time.Since(start)))
+		}
 		if ok {
 			for _, h := range hits {
 				if h.Score > 0 {
@@ -492,11 +512,21 @@ func (e *Engine) vectorPass(ctx context.Context, queryVec []float32, f *Filter) 
 		}
 		return true
 	})
-	e.exactLatency.observe(float64(time.Since(start).Milliseconds()))
+	if banded {
+		e.exactLatency.observe(elapsedMs(time.Since(start)))
+	}
 	if canceled != nil {
 		return nil, canceled
 	}
 	return scores, nil
+}
+
+// elapsedMs is d in fractional milliseconds. Sub-millisecond searches are
+// common (small corpora, warm caches); time.Duration.Milliseconds truncates
+// those to 0, which would make every fast search look equally fast to the
+// adaptive-threshold comparison in shouldUseANN.
+func elapsedMs(d time.Duration) float64 {
+	return float64(d.Nanoseconds()) / 1e6
 }
 
 func (e *Engine) neuralExpand(expandedTokens []string) map[uint64]float64 {

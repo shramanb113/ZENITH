@@ -1,7 +1,10 @@
 package index
 
 import (
+	"context"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/shramanb113/ZENITH/internal/analysis"
 	"github.com/shramanb113/ZENITH/internal/config"
@@ -103,5 +106,48 @@ func TestShouldUseANN_OutsideBandIgnoresMeasuredLatency(t *testing.T) {
 	}
 	if e.shouldUseANN(500) {
 		t.Fatal("shouldUseANN(500) = true outside the band despite corpus being well below the static threshold")
+	}
+}
+
+func TestEWMA_ConcurrentObserveAndValueIsSafe(t *testing.T) {
+	var e ewma
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(v float64) {
+			defer wg.Done()
+			e.observe(v)
+			_ = e.value()
+			_ = e.isSet()
+		}(float64(i))
+	}
+	wg.Wait()
+	if !e.isSet() {
+		t.Fatal("isSet() = false after concurrent observations")
+	}
+}
+
+func TestElapsedMs_SubMillisecondPrecisionNotTruncated(t *testing.T) {
+	got := elapsedMs(500 * time.Microsecond)
+	if got != 0.5 {
+		t.Fatalf("elapsedMs(500us) = %v, want 0.5 (not truncated to 0)", got)
+	}
+}
+
+func TestVectorPass_DoesNotObserveLatencyWhenBandDisabled(t *testing.T) {
+	cfg := testConfigWithANN(0) // band disabled, the default
+	e := NewEngine(cfg, bagEmbedder{}, testScorer(cfg), testAnalyzer())
+	e.SetAutoCompact(false)
+	defer e.Close()
+
+	ctx := context.Background()
+	if err := e.AddBatch(ctx, bagDocs(50, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Search(ctx, bagDocs(1, 1)[0].Text); err != nil {
+		t.Fatal(err)
+	}
+	if e.exactLatency.isSet() {
+		t.Fatal("exactLatency.isSet() = true with ANNThresholdBandPct disabled — latency should never be recorded when the feature is off")
 	}
 }
