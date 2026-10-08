@@ -177,7 +177,7 @@ func TestLexicalLatencyGate(t *testing.T) {
 			raw = append(raw, tk.Term)
 		}
 		eng.mu.RLock()
-		cand += len(eng.lexicalPass(raw))
+		cand += len(eng.lexicalPass(raw, eng.config.PhoneticWeight))
 		eng.mu.RUnlock()
 	}
 	avgCand := float64(cand) / float64(len(qs))

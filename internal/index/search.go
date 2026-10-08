@@ -36,7 +36,7 @@ type queryEmbedding struct {
 // lexicalPhase is everything a search does before it needs the query vector:
 // analysis, the lexical candidate pass, attribute filtering and BM25.
 // Engine.mu held for reading.
-func (e *Engine) lexicalPhase(query string, f *Filter) (rawTokens []string, keywordScores map[uint64]float64, bm25Results []ranking.BM25Result) {
+func (e *Engine) lexicalPhase(query string, f *Filter, phoneticWeight float64) (rawTokens []string, keywordScores map[uint64]float64, bm25Results []ranking.BM25Result) {
 	var tokens []analysis.Token
 	if qa, ok := e.analyzer.(analysis.QueryAnalyzer); ok {
 		tokens = qa.AnalyzeQuery(query)
@@ -58,7 +58,7 @@ func (e *Engine) lexicalPhase(query string, f *Filter) (rawTokens []string, keyw
 
 	e.inverted.RLock()
 	e.phonetics.RLock()
-	keywordScores = e.lexicalPass(rawTokens)
+	keywordScores = e.lexicalPass(rawTokens, phoneticWeight)
 	e.phonetics.RUnlock()
 	e.inverted.RUnlock()
 	e.filterCandidates(f.pred(), keywordScores)
@@ -69,15 +69,67 @@ func (e *Engine) lexicalPhase(query string, f *Filter) (rawTokens []string, keyw
 	return rawTokens, keywordScores, bm25Results
 }
 
+// Weights overrides the per-list ranking weights for a single SearchFilteredWeighted
+// call. A zero field uses the engine's configured default (Config.VectorWeight,
+// Config.PhoneticWeight, Config.RRFConstant respectively) — mirroring the
+// zero-means-default convention ranking.NewWeightedRRFRanker already uses for
+// its own weight arguments. The keyword/lexical list weight is not
+// overridable: it stays fixed at 1.0, same as every engine-construction call
+// site (see cmd/server/main.go, pkg/zenith/zenith.go).
+type Weights struct {
+	Vector   float64
+	Phonetic float64
+	RRF      float64
+}
+
+// scorer resolves the ranking.Scorer to use for a single query: the engine's
+// shared scorer when w carries no override (the common, allocation-free
+// case), or a fresh RRFRanker built from w's overrides layered onto the
+// engine defaults otherwise. The engine's own e.scorer is never mutated, so
+// concurrent searches with different overrides never interfere with each
+// other or with un-overridden callers.
+func (e *Engine) scorerFor(w Weights) ranking.Scorer {
+	if w.Vector == 0 && w.RRF == 0 {
+		return e.scorer
+	}
+	vec := w.Vector
+	if vec == 0 {
+		vec = e.config.VectorWeight
+	}
+	k := w.RRF
+	if k == 0 {
+		k = e.config.RRFConstant
+	}
+	return ranking.NewWeightedRRFRanker(k, e.config.MaxResults, 1.0, vec)
+}
+
+// phoneticWeight resolves the phonetic match weight to use for a single
+// query: w's override, or the engine's configured default.
+func (e *Engine) phoneticWeightFor(w Weights) float64 {
+	if w.Phonetic != 0 {
+		return w.Phonetic
+	}
+	return e.config.PhoneticWeight
+}
+
 // SearchFiltered is SearchWithFilter with the filter as data: when f carries a
 // Spec, selective conditions are answered from the attribute index instead of
-// by testing documents one by one. f may be nil.
+// by testing documents one by one. f may be nil. Equivalent to
+// SearchFilteredWeighted with a zero Weights (every weight at its engine
+// default).
+func (e *Engine) SearchFiltered(ctx context.Context, query string, f *Filter) ([]SearchResponse, error) {
+	return e.SearchFilteredWeighted(ctx, query, f, Weights{})
+}
+
+// SearchFilteredWeighted is SearchFiltered with per-query overrides for the
+// ranking weights (see Weights) used only for this call — the engine's
+// configured defaults, and every other concurrent search, are unaffected.
 //
 // The query embedding runs concurrently with the lexical phase (the two are
 // independent), so a hybrid search costs the longer of them instead of their
 // sum. The embedding starts before the engine lock is taken and is waited for
 // with the lock held only briefly (see embedHoldMax).
-func (e *Engine) SearchFiltered(ctx context.Context, query string, f *Filter) ([]SearchResponse, error) {
+func (e *Engine) SearchFilteredWeighted(ctx context.Context, query string, f *Filter, w Weights) ([]SearchResponse, error) {
 	embedded := make(chan queryEmbedding, 1)
 	go func() {
 		v, err := embedding.EmbedQuery(ctx, e.embedder, query)
@@ -97,7 +149,8 @@ func (e *Engine) SearchFiltered(ctx context.Context, query string, f *Filter) ([
 		}
 	}()
 
-	rawTokens, keywordScores, bm25Results := e.lexicalPhase(query, f)
+	phoneticWeight := e.phoneticWeightFor(w)
+	rawTokens, keywordScores, bm25Results := e.lexicalPhase(query, f, phoneticWeight)
 	if len(rawTokens) == 0 {
 		return nil, nil
 	}
@@ -121,7 +174,7 @@ func (e *Engine) SearchFiltered(ctx context.Context, query string, f *Filter) ([
 				qe = <-embedded
 				e.mu.RLock()
 				locked = true
-				rawTokens, keywordScores, bm25Results = e.lexicalPhase(query, f)
+				rawTokens, keywordScores, bm25Results = e.lexicalPhase(query, f, phoneticWeight)
 				if len(rawTokens) == 0 {
 					return nil, nil
 				}
@@ -137,7 +190,8 @@ func (e *Engine) SearchFiltered(ctx context.Context, query string, f *Filter) ([
 	vectorScores := e.vectorPass(queryVec, f)
 	e.vectors.RUnlock()
 
-	ranks := e.rankAndFuse(keywordScores, bm25Results, vectorScores)
+	scorer := e.scorerFor(w)
+	ranks := e.rankAndFuse(keywordScores, bm25Results, vectorScores, scorer)
 
 	// Neural expansion is meant to catch queries whose literal terms aren't
 	// in the vocabulary (typos, unusual phrasing) by pulling in embedding
@@ -165,7 +219,7 @@ func (e *Engine) SearchFiltered(ctx context.Context, query string, f *Filter) ([
 			expandedKeywords[id] += score
 		}
 
-		ranks = e.rankAndFuse(expandedKeywords, bm25Results, vectorScores)
+		ranks = e.rankAndFuse(expandedKeywords, bm25Results, vectorScores, scorer)
 	}
 
 	return ranks, nil
@@ -191,7 +245,7 @@ func (e *Engine) expandTokens(rawTokens []string) []string {
 // lexicalPass scores candidate documents by edge-n-gram coverage, phonetic
 // code and fuzzy (edit-distance) matches of the query tokens. Posting lists
 // are read from the delta and every segment (see eachFragDoc).
-func (e *Engine) lexicalPass(queryTokens []string) map[uint64]float64 {
+func (e *Engine) lexicalPass(queryTokens []string, phoneticWeight float64) map[uint64]float64 {
 	keywordScores := make(map[uint64]float64)
 	cap := e.prefixCap()
 
@@ -218,7 +272,7 @@ func (e *Engine) lexicalPass(queryTokens []string) map[uint64]float64 {
 		}
 
 		if phon := analysis.Soundex(token); phon != "" {
-			w := e.config.PhoneticWeight
+			w := phoneticWeight
 			e.eachPhonDoc(phon, func(id uint64) { keywordScores[id] += w })
 		}
 
@@ -367,6 +421,7 @@ func (e *Engine) rankAndFuse(
 	kwScores map[uint64]float64,
 	bm25Results []ranking.BM25Result,
 	vScores map[uint64]float64,
+	scorer ranking.Scorer,
 ) []SearchResponse {
 	bm25ByID := make(map[uint64]float64, len(bm25Results))
 	for _, r := range bm25Results {
@@ -380,7 +435,7 @@ func (e *Engine) rankAndFuse(
 
 	// BM25-only mode: no vector scores are present.
 	if len(vScores) == 0 {
-		scored := e.scorer.Score(kwIDs, kwRank, nil, nil, e.origID)
+		scored := scorer.Score(kwIDs, kwRank, nil, nil, e.origID)
 		results := make([]SearchResponse, len(scored))
 		for i, r := range scored {
 			results[i] = SearchResponse{ID: r.ID, Score: r.Score}
@@ -397,7 +452,7 @@ func (e *Engine) rankAndFuse(
 	}
 
 	// e.origID is safe here — Engine.mu.RLock() (Search) or Lock() (others) is held.
-	scored := e.scorer.Score(kwIDs, kwRank, vcIDs, vScores, e.origID)
+	scored := scorer.Score(kwIDs, kwRank, vcIDs, vScores, e.origID)
 
 	results := make([]SearchResponse, len(scored))
 	for i, r := range scored {

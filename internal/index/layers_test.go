@@ -148,7 +148,7 @@ func dumpBM25Detail(t *testing.T, tag string, e *Engine, query, targetName strin
 		return
 	}
 	e.mu.RLock()
-	rawTokens, _, bm25Results := e.lexicalPhase(query, nil)
+	rawTokens, _, bm25Results := e.lexicalPhase(query, nil, e.config.PhoneticWeight)
 	e.mu.RUnlock()
 	var full float64
 	for _, r := range bm25Results {

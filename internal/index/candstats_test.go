@@ -32,7 +32,7 @@ func TestCandidateStats(t *testing.T) {
 			raw = append(raw, tk.Term)
 		}
 		e.mu.RLock()
-		kw := e.lexicalPass(raw)
+		kw := e.lexicalPass(raw, e.config.PhoneticWeight)
 		bm := e.bm25.Query(raw)
 		e.mu.RUnlock()
 		cand += len(kw)

@@ -148,7 +148,7 @@ func TestMSMARCORecallDiag(t *testing.T) {
 
 			eng.inverted.RLock()
 			eng.phonetics.RLock()
-			kwScores := eng.lexicalPass(raw)
+			kwScores := eng.lexicalPass(raw, eng.config.PhoneticWeight)
 			eng.phonetics.RUnlock()
 			eng.inverted.RUnlock()
 
@@ -183,7 +183,7 @@ func TestMSMARCORecallDiag(t *testing.T) {
 				varLex:   make([]bool, len(variants)),
 				varFused: make([]bool, len(variants)),
 			}
-			for _, r := range eng.rankAndFuse(kwScores, bm25Results, vScores) {
+			for _, r := range eng.rankAndFuse(kwScores, bm25Results, vScores, eng.scorer) {
 				if r.ID == qrels[q.id] {
 					res.fusedHit = true
 					break
