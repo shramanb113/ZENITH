@@ -28,6 +28,7 @@ type options struct {
 	queryCacheNamespace         string
 	queryCacheSemanticThreshold float64
 	annThresholdBandPct         float64
+	queryCacheObserver          index.CacheObserver
 }
 
 func defaultOptions() *options {
@@ -362,6 +363,22 @@ func WithANNThresholdBand(pct float64) Option {
 			return ErrInvalidOption
 		}
 		o.annThresholdBandPct = pct
+		return nil
+	}
+}
+
+// WithQueryCacheObserver installs o to receive this DB's query-cache
+// hit/miss events (see internal/index.CacheObserver). Unset (default) means
+// no observer — the engine's own no-op default applies, so this call has no
+// effect on behavior, only observability. Internal callers that already
+// build on an engine directly (internal/collections, internal/sidecar) use
+// this to get the same metrics.NewQueryCacheObserver() wiring that
+// cmd/zenith/engine.go and cmd/server/main.go apply to a raw --db engine,
+// since zenith.Open gives them no other seam to reach the engine after
+// construction.
+func WithQueryCacheObserver(o index.CacheObserver) Option {
+	return func(opt *options) error {
+		opt.queryCacheObserver = o
 		return nil
 	}
 }

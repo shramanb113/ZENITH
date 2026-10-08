@@ -4,7 +4,50 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/shramanb113/ZENITH/internal/index"
 )
+
+type fakeDBCacheObserver struct {
+	hits   map[string]int
+	misses int
+}
+
+func (f *fakeDBCacheObserver) ObserveQueryCacheHit(tier string) {
+	if f.hits == nil {
+		f.hits = map[string]int{}
+	}
+	f.hits[tier]++
+}
+func (f *fakeDBCacheObserver) ObserveQueryCacheMiss() { f.misses++ }
+
+func TestWithQueryCacheObserver_ReceivesHitsAndMisses(t *testing.T) {
+	ctx := context.Background()
+	obs := &fakeDBCacheObserver{}
+	db, err := Open(":memory:", WithBM25Only(), WithQueryCacheObserver(obs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := db.Add(ctx, "doc1", "hello world"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Search(ctx, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if obs.misses != 1 {
+		t.Fatalf("misses = %d after first (uncached) search, want 1", obs.misses)
+	}
+	if _, err := db.Search(ctx, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if obs.hits["l1"] != 1 {
+		t.Fatalf("hits[l1] = %d after second (cached) search, want 1; hits=%v", obs.hits["l1"], obs.hits)
+	}
+}
+
+var _ index.CacheObserver = (*fakeDBCacheObserver)(nil)
 
 func TestWithQueryCacheSize_ZeroDisablesCache(t *testing.T) {
 	ctx := context.Background()

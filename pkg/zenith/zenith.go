@@ -124,6 +124,9 @@ func Open(path string, opt ...Option) (*DB, error) {
 	if o.annMinDocs >= 0 {
 		eng.SetANNThreshold(o.annMinDocs)
 	}
+	if o.queryCacheObserver != nil {
+		eng.SetCacheObserver(o.queryCacheObserver)
+	}
 
 	db := &DB{
 		engine: eng,

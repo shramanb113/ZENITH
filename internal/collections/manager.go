@@ -228,13 +228,13 @@ func (m *Manager) refreshCollectionsGauge() {
 	metrics.Collections.WithLabelValues("closed").Set(float64(total - open))
 }
 
-// openOpts returns the zenith.Open options shared by every collection.
 // openOpts returns the zenith.Open options shared by every collection,
 // specialized per collection id so a shared Redis (if configured) never lets
 // one collection's cached results collide with another's.
 func (m *Manager) openOpts(id string) []zenith.Option {
-	opts := make([]zenith.Option, 0, 5)
-	opts = append(opts, zenith.WithoutWordVectors(), zenith.WithLimit(100), zenith.WithQueryCacheNamespace(id))
+	opts := make([]zenith.Option, 0, 6)
+	opts = append(opts, zenith.WithoutWordVectors(), zenith.WithLimit(100), zenith.WithQueryCacheNamespace(id),
+		zenith.WithQueryCacheObserver(metrics.NewQueryCacheObserver()))
 	if m.cfg.QueryCacheRedisAddr != "" {
 		opts = append(opts, zenith.WithQueryCacheRedisAddr(m.cfg.QueryCacheRedisAddr))
 	}

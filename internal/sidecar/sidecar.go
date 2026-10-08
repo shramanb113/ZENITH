@@ -263,7 +263,10 @@ func (s *Server) putDocs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	opts := []zenith.Option{zenith.WithoutWordVectors(), zenith.WithLimit(s.cfg.MaxDocs)}
+	opts := []zenith.Option{
+		zenith.WithoutWordVectors(), zenith.WithLimit(s.cfg.MaxDocs),
+		zenith.WithQueryCacheObserver(metrics.NewQueryCacheObserver()),
+	}
 	if s.cfg.Embedder != nil {
 		opts = append(opts, zenith.WithEmbedder(s.cfg.Embedder))
 	} else {
