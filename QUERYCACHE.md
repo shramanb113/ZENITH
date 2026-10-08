@@ -54,10 +54,19 @@ counters), `cmd/zenith/serve.go` and `cmd/server/main.go` (flags/wiring),
 
 **Out of scope, explicitly:** `pkg/zenith`'s public API gets no new `SearchOption` or
 exported method this round — the cache is an internal implementation detail of `Engine`,
-invisible to callers except as a (hopefully faster) `Search`. Semantic/near-duplicate
-cache matching (e.g. "weather in SF" hitting a cached "SF weather") is out of scope —
-this is an exact-match cache only. Query planning, rate limiting/admission control, and
-any `pkg/zenith` changes are separate future work, not folded in here.
+invisible to callers except as a (hopefully faster) `Search`.
+
+**Added to scope, 2026-10-08** (originally deferred during the first design pass, folded
+in on request — see "Semantic/near-duplicate caching," "Query-adaptive ANN threshold,"
+and "Rate limiting / admission control" below for the full design of each):
+
+- Semantic/near-duplicate cache matching (e.g. "weather in SF" hitting a cached "SF
+  weather"), opt-in and off by default given its correctness trade-off.
+- Making the ANN-vs-exact threshold adaptive to measured per-shape latency instead of a
+  single static `Config` value.
+- Rate limiting / admission control — a service-layer feature (`cmd/server`,
+  `internal/sidecar`, `internal/collections`), not `internal/index`, following the same
+  per-collection-quota precedent already in `internal/collections`.
 
 ## Decision: two-tier cache (L1 in-process, optional L2 Redis)
 
@@ -73,7 +82,7 @@ approach, at zero extra cost.
 
 ## Architecture
 
-```
+```text
 SearchFilteredWeighted(ctx, query, filter, weights)
   │
   ├─ filter has no structured Spec (raw Predicate closure)? ─→ bypass cache entirely,
@@ -167,6 +176,10 @@ construction site — `cmd/server/main.go`, `cmd/zenith/engine.go`, `pkg/zenith/
   by default).
 - `QueryCacheRedisAddr string` (default `""` = L2 disabled).
 - `QueryCacheNamespace string` (default `""`; see below).
+- `QueryCacheSemanticThreshold float64` (default `0` = disabled; see "Semantic/
+  near-duplicate caching" below).
+- `ANNThresholdBandPct float64` (default `0` = disabled, static threshold only; see
+  "Query-adaptive ANN threshold" below).
 
 **Redis namespacing:** a shared Redis used by multiple collections must not let one
 tenant's cached results collide with another's. `internal/collections.Manager` already
@@ -186,10 +199,78 @@ observer hook (default no-op), and `cmd/zenith/serve.go`/`cmd/server/main.go` wi
 `zenith_query_cache_misses_total`.
 
 **New CLI flags** on `zenith serve` (both `--http` and gRPC modes) and `cmd/server`:
-`--query-cache-size`, `--query-cache-ttl`, `--query-cache-redis-addr`. (No
+`--query-cache-size`, `--query-cache-ttl`, `--query-cache-redis-addr`,
+`--query-cache-semantic-threshold` (0 = off), `--ann-threshold-band-pct` (0 = off),
+`--rate-limit-rps` / `--rate-limit-burst` (unset = off, service-layer flags consumed by
+`internal/collections`/`internal/sidecar`'s wiring, not `Engine`). (No
 `--query-cache-namespace` flag — `collections` sets it automatically; a raw-engine user
 needing it is advanced enough to be out of this design's CLI-ergonomics scope and can be
 revisited if real demand shows up.)
+
+## Semantic/near-duplicate caching (opt-in, off by default)
+
+An exact-match cache misses on "weather in SF" when "SF weather" is already cached, even
+though both would likely embed close together. Closing that gap means comparing the
+*incoming* query's embedding against embeddings of *recently cached* queries — a real
+capability, but one with a real correctness cost that the exact-match design above
+doesn't have: two queries can be semantically close without being interchangeable
+("best restaurants in SF" vs. "worst restaurants in SF" embed close but want opposite
+results), so a wrong near-duplicate hit is a silently wrong answer, not a slow one.
+
+**Design:** this stays strictly additive to the exact-match path, never a replacement —
+filter and weights must still match *exactly*; only the query-text side gets fuzzy
+matching, and only after an exact-key miss. `Engine`'s L1 entries grow a `queryVec
+[]float32` field (the query embedding already computed for that search, so this costs no
+extra embedding calls). On an exact-key miss, if `Config.QueryCacheSemanticThreshold > 0`,
+the engine does a linear scan of L1's bounded entry set (≤ `QueryCacheSize` entries, a few
+thousand floats each — cheap at this scale, no new ANN structure needed) comparing cosine
+similarity against the incoming query's embedding *for entries sharing the same filter
+key and weights*, and returns the closest entry above the threshold. L2 (Redis) is never
+part of this scan — it stays exact-match only, since scanning a remote store's full
+contents on every miss would defeat the point of a cache.
+
+**Default OFF** (`Config.QueryCacheSemanticThreshold == 0`): given the wrong-answer risk
+above, this is opt-in, not a default behavior change, unlike the rest of this design. A
+suggested starting threshold (0.97 cosine similarity — deliberately conservative) is
+documented, not hardcoded, and the observability counters below (`tier="semantic"`) make
+it possible to tune it from real hit-rate data rather than a guess, matching this
+project's standing "measure before fixing" practice.
+
+## Query-adaptive ANN threshold
+
+Today's planner is corpus-size-static: `WithANNThreshold` (default 20,000 docs) is one
+fixed number, and the selective-filter shortcut in `vectorPass` already adapts to filter
+selectivity (an attribute-index estimate), so "query-adaptive" here means something
+narrower and real: **the ANN-vs-exact choice near the threshold boundary should follow
+measured latency, not just doc count.** `Engine` keeps two small rolling-average latency
+trackers (exact-scan and ANN, exponentially-weighted, a handful of float64s — no new
+dependency) fed by every search that actually took one path or the other. When a corpus
+is within a configurable band of the static threshold (e.g. ±20%), the engine picks
+whichever path's rolling average is currently faster instead of always taking the static
+side of the line; outside that band, the static threshold still decides, unchanged from
+today. This is deliberately narrow — it does not attempt query-shape classification
+(short vs. long query, rare vs. common terms) in this pass; that is a larger, separate
+investigation if the banded version doesn't move the needle, not assumed to be needed
+up front.
+
+## Rate limiting / admission control
+
+A service-layer feature, not `internal/index` — `Engine` gets no rate limiter. This
+follows the existing per-collection doc/body quota precedent in `internal/collections`
+(risk #8's "persistent per-collection tenancy... per-collection API keys and doc/body
+quotas") rather than inventing a new shape: a per-tenant token-bucket limiter
+(`golang.org/x/time/rate` — new dependency, but tiny and dependency-free of its own,
+same family as the already-used `golang.org/x/sync`), one bucket per collection ID
+(`internal/collections.Manager`) or per API key (`internal/sidecar`, `cmd/server`'s gRPC
+interceptor chain, alongside the existing auth interceptor). An exceeded limit returns a
+clear, typed error — gRPC `ResourceExhausted`, HTTP 429 — never a silent drop or a slow
+response, and increments a new `zenith_ratelimit_rejections_total{tenant}` counter
+(`internal/metrics`, same registry as everything else). Default limit: unset (no
+limiting) — this is an operator opt-in via a new flag, not a default behavior change,
+since an unexpected default limit would be a production surprise for existing
+deployments, which this project's culture (see `DECISIONS.md`'s monetization guardrails:
+"no license-gated core features," "exit stays cheap") treats as worth avoiding by
+default.
 
 ## Error handling
 
@@ -222,7 +303,22 @@ revisited if real demand shows up.)
     identically to today.
   - `ctx` cancellation on a large synthetic exact-scan corpus returns promptly with
     `ctx.Err()` instead of finishing the scan.
-- `-race` on `internal/index`, `internal/querycache`.
+  - Semantic matching: a near-duplicate query above threshold hits; one below threshold
+    misses and recomputes; two queries with the same text but different filters/weights
+    never match each other semantically (filter/weights stay exact-only).
+  - Semantic matching defaults off: `QueryCacheSemanticThreshold == 0` never scans L1,
+    confirmed by a call-count assertion on the scan path, not just absence of a hit.
+  - Adaptive ANN threshold: a synthetic corpus sized inside the configured band picks
+    whichever path's rolling average is lower, confirmed by forcing one path's average
+    artificially high and asserting the other is chosen; outside the band, the static
+    threshold decides unchanged from today (regression test against the existing
+    behavior).
+  - Rate limiting (`internal/collections`/`internal/sidecar`): a tenant exceeding its
+    configured RPS gets `ResourceExhausted`/429, a different tenant is unaffected
+    (per-tenant bucket isolation), and the rejection counter increments; unset limit
+    behaves identically to today (regression test).
+- `-race` on `internal/index`, `internal/querycache`, `internal/collections`,
+  `internal/sidecar`.
 - `gofmt -l`, `go build`/`go vet`/`go test` under both `CGO_ENABLED=0` and `=1` (CGO is
   unrelated to this subsystem, but kept as the project's standing verification bar).
 
@@ -235,15 +331,21 @@ return faster) rather than a silent one. Redis L2 defaults **off**; enabling it 
 `go-redis` into the binary unconditionally once the dependency is added (same binary-size
 trade-off already accepted for `prometheus/client_golang` in item N), but has zero runtime
 effect until `--query-cache-redis-addr` (or `Config.QueryCacheRedisAddr`) is actually set.
+Semantic/near-duplicate matching, adaptive ANN threshold banding, and rate limiting all
+default **off** — each is a correctness or behavior trade-off (wrong-answer risk,
+threshold-flip risk, request-rejection risk respectively) that an operator opts into
+deliberately, unlike the base cache's default-on exact-match behavior.
 
 ## Documentation to update once implemented
 
 - `DECISIONS.md`: why generation-in-key beats active invalidation; why Redis is optional
   and namespaced per-collection; why the `ctx`-cancellation fix rode along with this
-  change instead of shipping separately.
+  change instead of shipping separately; why semantic caching, adaptive threshold
+  banding, and rate limiting are each opt-in rather than default-on, unlike the base
+  cache.
 - `README.md`: new "Query result caching" section, same structure as the existing
-  "Metadata filtering" section — defaults, flags, and the explicit non-goal (exact-match
-  only, no semantic/near-duplicate matching).
+  "Metadata filtering" section — defaults, flags, the exact-match default, and the
+  opt-in semantic-matching/adaptive-threshold/rate-limiting flags.
 - `ROADMAP.md`: a new backlog item once shipped, in the existing item format, with real
   measured hit-rate/latency numbers (not projected ones) the same way every other item in
   that document is backed by a real run.

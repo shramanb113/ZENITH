@@ -130,7 +130,42 @@ Other open notes: the maximum probe latency *during* a checkpoint's segment writ
 
 - Distributed clustering before there are users.
 - Billion-vector ambitions.
-- A generic vector-database feature race against Qdrant or Milvus.
+- ~~A generic vector-database feature race against Qdrant or Milvus.~~ **Superseded,
+  2026-10-08:** the maintainer's updated goal is to fold every common production-RAG
+  concern into the database itself as a built-in feature — not to match a competitor's
+  feature list point-for-point, but to remove the need to hand-write RAG glue code around
+  ZENITH at all. See "RAG-platform roadmap" below for the sequenced work this implies.
+  Distributed clustering and billion-vector scale remain explicit non-goals; this change
+  is about retrieval/serving depth, not horizontal scale.
+
+## RAG-platform roadmap (added 2026-10-08)
+
+The retrieval foundation above (hybrid search, filtering, reranking, multilingual
+embeddings, ANN at 1M-doc scale, crash safety, Prometheus metrics) is done. This section
+tracks what's still missing for "nobody has to write RAG glue code around ZENITH," each
+scoped as its own sub-project (same decomposition this roadmap already uses elsewhere —
+one spec, one plan, one PR per item, not one giant change) and sequenced by rough
+dependency order, not by how interesting each one is.
+
+**In progress:** query-serving layer result caching (two-tier in-process + optional
+Redis, write-generation invalidation, `ctx` cancellation, opt-in semantic/near-duplicate
+matching, opt-in adaptive ANN threshold banding, service-layer rate limiting). Full
+design: `QUERYCACHE.md`.
+
+| # | Item | Why this order | Status |
+|---|------|-----------------|--------|
+| R1 | **Chunking strategy** — ZENITH indexes whatever text it's handed; it has no opinion on how a large document is split before `Add`. Add recursive/semantic/sentence-window splitting options, with parent-document retrieval (search matches a chunk, returns its parent's context) as the payoff. | Foundational — context assembly (R4) and diversity-aware shaping (R3) both get more effective once chunk boundaries are sane, and retrofitting chunking after callers have adopted a document-level API is the expensive order to discover this in. | PLANNED |
+| R2 | **Query understanding beyond synonym expansion** — multi-query fan-out (one user query → several reformulated searches, results merged), HyDE (embed a hypothetical answer, not just the query), query rewriting/classification. | Independent of chunking; improves recall before worrying about how results are presented, which R3/R4 build on. | PLANNED |
+| R3 | **Diversity-aware result shaping** — MMR (maximal marginal relevance) or near-duplicate suppression among top-K results; the existing reranker (`internal/reranker`) improves relevance, not diversity. | Builds directly on whatever R1 chunking produces (near-duplicate chunks from the same source document are the main case this fixes) and on R2's larger candidate pool from multi-query fan-out. | PLANNED |
+| R4 | **Context assembly** — turn retrieved chunks into a token-budgeted, citation-tracked block ready to hand to an LLM prompt. Doesn't exist at all today; callers currently do this by hand. | Depends on R1 (sane chunk boundaries) and benefits from R3 (deduplicated input) — assembling context from unshaped, un-deduplicated chunks produces a worse prompt than doing this last. | PLANNED |
+| R5 | **RAG-quality evaluation harness** — today's benchmarks (`TestBEIR`, `TestMSMARCOAblation`) measure retrieval quality (nDCG/Recall@10) only; nothing measures end-to-end answer faithfulness/relevancy once a context block (R4) is actually fed to an LLM. | Needs R4 to exist first — there's no "end-to-end" to evaluate before context assembly is built. | PLANNED |
+| R6 | **Streaming + guardrails** — streaming result delivery, and basic output guardrails (e.g. refuse-to-answer-from-empty-context signaling). | Serving-layer polish; lowest dependency risk, but least value until R1–R5 give it something real to wrap. | PLANNED |
+
+Each item gets its own design pass (brainstorming → spec → plan) when its turn comes,
+the same process `QUERYCACHE.md` went through — this table is a sequencing commitment,
+not a specification. Semantic/near-duplicate *caching* (as opposed to R3's
+near-duplicate *result* suppression) is already folded into the in-progress query-cache
+work above, not listed again here.
 
 ---
 
