@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -85,6 +86,84 @@ func TestEngine_DeleteAfterCloseRejected(t *testing.T) {
 	}
 	if err := e.Delete(context.Background(), []byte("k")); err == nil {
 		t.Fatal("Delete after Close: want error, got nil")
+	}
+}
+
+func TestEngine_ReplaySeesLivePutsInKeyOrder(t *testing.T) {
+	e := openTestEngine(t)
+	ctx := context.Background()
+	if err := e.Put(ctx, []byte("b"), []byte("vb")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := e.Put(ctx, []byte("a"), []byte("va")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	var gotKeys []string
+	var gotVals []string
+	var gotDeletes []bool
+	err := e.Replay(func(key, value []byte, isDelete bool) error {
+		gotKeys = append(gotKeys, string(key))
+		gotVals = append(gotVals, string(value))
+		gotDeletes = append(gotDeletes, isDelete)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	wantKeys := []string{"a", "b"}
+	wantVals := []string{"va", "vb"}
+	if len(gotKeys) != 2 || gotKeys[0] != wantKeys[0] || gotKeys[1] != wantKeys[1] {
+		t.Fatalf("Replay keys = %v, want %v (Pebble iteration order)", gotKeys, wantKeys)
+	}
+	if gotVals[0] != wantVals[0] || gotVals[1] != wantVals[1] {
+		t.Fatalf("Replay values = %v, want %v", gotVals, wantVals)
+	}
+	if gotDeletes[0] || gotDeletes[1] {
+		t.Fatal("Replay reported a live Put as a delete")
+	}
+}
+
+// This is the Review Focus case: a document deleted after the last segment
+// save, with a crash before the next save, must still be reported as deleted
+// by replay — not silently absent, which a caller would misread as "never
+// existed, nothing to do" instead of "existed, now gone, tell the index."
+func TestEngine_ReplaySeesDeletesNotJustAbsence(t *testing.T) {
+	e := openTestEngine(t)
+	ctx := context.Background()
+	if err := e.Put(ctx, []byte("doc1"), []byte("hello")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := e.Delete(ctx, []byte("doc1")); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	var sawDelete bool
+	err := e.Replay(func(key, value []byte, isDelete bool) error {
+		if string(key) == "doc1" {
+			sawDelete = isDelete
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if !sawDelete {
+		t.Fatal("Replay did not report doc1 as deleted — a plain iteration-skips-tombstones implementation would fail this")
+	}
+}
+
+func TestEngine_ReplayPropagatesCallbackError(t *testing.T) {
+	e := openTestEngine(t)
+	if err := e.Put(context.Background(), []byte("a"), []byte("va")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	wantErr := errors.New("callback failed")
+	err := e.Replay(func(key, value []byte, isDelete bool) error {
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Replay error = %v, want %v", err, wantErr)
 	}
 }
 

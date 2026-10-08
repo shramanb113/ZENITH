@@ -149,3 +149,38 @@ func (e *Engine) Get(key []byte) ([]byte, bool) {
 	copy(value, raw[1:])
 	return value, true
 }
+
+// Replay iterates every currently-journaled entry in key order and invokes
+// fn once per entry, reporting whether it was a logical delete. Unlike the
+// old engine's Records() (a WAL-record buffer populated once at Open and
+// drained by the caller), Replay reflects live state at call time — correct
+// because Pebble has already recovered everything into queryable state by
+// the time Open returns, with no separate "recovered records" buffer to
+// track.
+func (e *Engine) Replay(fn func(key, value []byte, isDelete bool) error) error {
+	iter, err := e.db.NewIter(nil)
+	if err != nil {
+		return fmt.Errorf("storage: new iterator: %w", err)
+	}
+	defer iter.Close()
+
+	for valid := iter.First(); valid; valid = iter.Next() {
+		raw := iter.Value()
+		if len(raw) == 0 {
+			continue
+		}
+		key := append([]byte(nil), iter.Key()...)
+		switch raw[0] {
+		case journalOpDelete:
+			if err := fn(key, nil, true); err != nil {
+				return err
+			}
+		case journalOpPut:
+			value := append([]byte(nil), raw[1:]...)
+			if err := fn(key, value, false); err != nil {
+				return err
+			}
+		}
+	}
+	return iter.Error()
+}
