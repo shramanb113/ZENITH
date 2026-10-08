@@ -21,7 +21,6 @@ import (
 	"github.com/shramanb113/ZENITH/internal/ranking"
 	"github.com/shramanb113/ZENITH/internal/server"
 	storage "github.com/shramanb113/ZENITH/internal/storage"
-	"github.com/shramanb113/ZENITH/internal/storage/wal"
 	"google.golang.org/grpc"
 )
 
@@ -80,8 +79,16 @@ func main() {
 	engine := index.NewEngine(appConfig, emb, scorer, tkz)
 
 	engine.SetFSTPath("./data/index.fst")
-	engine.SetTermStore(storageEng)
 	engine.SetCacheObserver(metrics.NewQueryCacheObserver())
+
+	// A cheap dry pass just to know whether the journal has anything to
+	// recover, for the Load error switch below — the real, mutating replay
+	// pass runs after Load (successful or not), same as before.
+	var hasReplayData bool
+	_ = storageEng.Replay(func(key, value []byte, isDelete bool) error {
+		hasReplayData = true
+		return nil
+	})
 
 	if err := engine.Load("zenith.db"); err != nil {
 		switch {
@@ -90,42 +97,46 @@ func main() {
 		case errors.Is(err, index.ErrIncompatibleVersion):
 			slog.Error("Index file is in an older on-disk format — run `zenith migrate --db zenith.db` (keeps a backup), then restart", "error", err)
 			os.Exit(1)
-		case len(storageEng.Records()) == 0:
-			// The gob snapshot exists but failed to load, and there is no WAL
-			// delta to reconstruct from. Starting "fresh" here would silently
-			// discard the corrupt file's data on the next Save — surface it
-			// instead so the operator can investigate or restore a backup.
-			slog.Error("Index file exists but failed to load, and no WAL delta is available to recover from", "error", err)
+		case !hasReplayData:
+			// The gob snapshot exists but failed to load, and there is no
+			// journal delta to reconstruct from. Starting "fresh" here would
+			// silently discard the corrupt file's data on the next Save —
+			// surface it instead so the operator can investigate or restore
+			// a backup.
+			slog.Error("Index file exists but failed to load, and no journal delta is available to recover from", "error", err)
 			os.Exit(1)
 		default:
-			slog.Warn("Index file failed to load; rebuilding from WAL delta only", "error", err)
+			slog.Warn("Index file failed to load; rebuilding from journal delta only", "error", err)
 		}
 	} else {
 		slog.Info("Successfully loaded index from disk.")
 		alog.Log("LOADED", "zenith.db")
 	}
 
-	// Replay WAL delta — documents indexed since the last gob checkpoint.
+	// Replay journal delta — documents indexed since the last gob checkpoint.
 	// The journal is NOT set yet, so these Add/Remove calls do not re-journal.
 	replayCtx := context.Background()
-	for _, r := range storageEng.Records() {
-		switch r.Op {
-		case wal.OpTypePut:
-			text, attrs := index.DecodeJournalValue(r.Value)
-			var err error
-			if len(attrs) > 0 {
-				err = engine.AddWithVectorAttrs(replayCtx, string(r.Key), text, engine.EmbedText(replayCtx, text), attrs)
-			} else {
-				err = engine.Add(replayCtx, string(r.Key), text)
+	if err := storageEng.Replay(func(key, value []byte, isDelete bool) error {
+		id := string(key)
+		if isDelete {
+			if err := engine.Remove(replayCtx, id); err != nil {
+				slog.Warn("storage replay: remove failed", "id", id, "error", err)
 			}
-			if err != nil {
-				slog.Warn("WAL replay: re-index failed", "id", string(r.Key), "error", err)
-			}
-		case wal.OpTypeDelete:
-			if err := engine.Remove(replayCtx, string(r.Key)); err != nil {
-				slog.Warn("WAL replay: remove failed", "id", string(r.Key), "error", err)
-			}
+			return nil
 		}
+		text, attrs := index.DecodeJournalValue(value)
+		var err error
+		if len(attrs) > 0 {
+			err = engine.AddWithVectorAttrs(replayCtx, id, text, engine.EmbedText(replayCtx, text), attrs)
+		} else {
+			err = engine.Add(replayCtx, id, text)
+		}
+		if err != nil {
+			slog.Warn("storage replay: re-index failed", "id", id, "error", err)
+		}
+		return nil
+	}); err != nil {
+		slog.Warn("storage replay failed", "error", err)
 	}
 	// Connect the journal — all future mutations are durably recorded first.
 	engine.SetDocumentJournal(storageEng)
@@ -164,16 +175,20 @@ func main() {
 	slog.Info("Graceful shutdown initiated")
 	grpcServer.GracefulStop()
 
+	snap := storageEng.Snapshot()
 	if err := engine.Save("zenith.db"); err != nil {
 		slog.Error("Failed to save index", "error", err)
 	} else {
 		slog.Info("Index saved. Goodbye.")
 		alog.Log("SAVED", "zenith.db")
-		// Checkpoint the WAL — the gob is now authoritative; clear the delta journal.
-		if err := storageEng.Checkpoint(); err != nil {
-			slog.Error("WAL checkpoint failed", "error", err)
+		// The gob is now authoritative for everything this snapshot saw —
+		// prune exactly those journal entries, not "everything now" (which
+		// would race against writes arriving during Save).
+		if err := storageEng.Prune(snap); err != nil {
+			slog.Warn("storage: prune after save failed (journal will just be larger than necessary)", "error", err)
 		}
 	}
+	_ = snap.Close()
 	if err := engine.SaveANN(); err != nil {
 		slog.Warn("Could not save the ANN graph; the next start will rebuild it", "error", err)
 	}

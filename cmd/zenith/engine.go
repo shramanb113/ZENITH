@@ -8,9 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/shramanb113/ZENITH/internal/activitylog"
@@ -21,8 +19,6 @@ import (
 	"github.com/shramanb113/ZENITH/internal/localembedder"
 	"github.com/shramanb113/ZENITH/internal/metrics"
 	"github.com/shramanb113/ZENITH/internal/ranking"
-	storage "github.com/shramanb113/ZENITH/internal/storage"
-	"github.com/shramanb113/ZENITH/internal/storage/wal"
 )
 
 // cliFlags holds the flag values shared across all commands.
@@ -39,24 +35,6 @@ var cliFlags struct {
 	queryCacheRedisAddr         string
 	queryCacheSemanticThreshold float64
 	annThresholdBandPct         float64
-}
-
-// defaultStorageConfig returns a storage config rooted at ~/.zenith/.
-func defaultStorageConfig() storage.EngineConfig {
-	cfg := storage.DefaultEngineConfig()
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return cfg
-	}
-	base := filepath.Join(home, ".zenith")
-	cfg.WALPath = filepath.Join(base, "data", "wal", "zenith.wal")
-	cfg.WALConfig = wal.WALConfig{
-		SyncMode: wal.SyncAlways,
-		Dir:      filepath.Join(base, "data", "wal"),
-	}
-	cfg.SSTDir = filepath.Join(base, "data", "sst")
-	cfg.FSTPath = filepath.Join(base, "data", "terms.fst")
-	return cfg
 }
 
 // buildEngine constructs and optionally loads a ready-to-use index.Engine.
@@ -83,34 +61,12 @@ func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) 
 
 	alog := activitylog.Open()
 
-	var (
-		storageEng   *storage.Engine
-		storageErr   error
-		emb          embedding.Embedder
-		embedderName string
-	)
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		storageEng, storageErr = storage.Open(defaultStorageConfig())
-	}()
-	go func() {
-		defer wg.Done()
-		emb, embedderName = resolveEmbedder(appConfig, alog)
-	}()
-	wg.Wait()
-
-	if storageErr != nil {
-		alog.Close()
-		return nil, nil, nil, storageErr
-	}
+	emb, embedderName := resolveEmbedder(appConfig, alog)
 
 	tkz := analysis.NewStandardAnalyzer()
 	scorer := ranking.NewWeightedRRFRanker(appConfig.RRFConstant, appConfig.MaxResults, 1.0, appConfig.VectorWeight)
 	engine := index.NewEngine(appConfig, emb, scorer, tkz)
 	engine.SetFSTPath(cliFlags.fstPath)
-	engine.SetTermStore(storageEng)
 	engine.SetCacheObserver(metrics.NewQueryCacheObserver())
 
 	_ = embedderName
@@ -126,7 +82,6 @@ func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) 
 			// Never fall through to "fresh": teardown saves to this path, so an
 			// index we merely failed to read (older format, different embedder,
 			// damage) would be overwritten by an empty one.
-			_ = storageEng.Close()
 			alog.Close()
 			return nil, nil, nil, fmt.Errorf("cannot open index %s: %w%s", cliFlags.dbPath, err, mismatchHint(err))
 		}
@@ -143,9 +98,6 @@ func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) 
 		}
 		if err := engine.Close(); err != nil {
 			slog.Error("Failed to release index files", "error", err)
-		}
-		if err := storageEng.Close(); err != nil {
-			slog.Error("Storage engine close failed", "error", err)
 		}
 		alog.Close()
 	}
