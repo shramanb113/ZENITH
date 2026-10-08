@@ -147,10 +147,30 @@ scoped as its own sub-project (same decomposition this roadmap already uses else
 one spec, one plan, one PR per item, not one giant change) and sequenced by rough
 dependency order, not by how interesting each one is.
 
-**In progress:** query-serving layer result caching (two-tier in-process + optional
-Redis, write-generation invalidation, `ctx` cancellation, opt-in semantic/near-duplicate
-matching, opt-in adaptive ANN threshold banding, service-layer rate limiting). Full
-design: `QUERYCACHE.md`.
+**Done, 2026-10-08** (query-result cache; rate limiting split out as a separate plan,
+not yet started): two-tier query-result cache (`internal/querycache.Tiered`, L1
+in-process LRU default-on at 1,000 entries, optional L2 Redis default-off) wired into
+`internal/index.Engine.SearchFilteredWeighted`, keyed on query text + structured filter
++ ranking weights + an internal write-generation counter so a write makes every
+previously-cached entry for that engine unreachable on the next query with no active
+invalidation step (see DECISIONS.md for why). Concurrent identical misses are
+de-duplicated via `golang.org/x/sync/singleflight`. Found and fixed a real latent bug
+while implementing this (not shipped separately — see DECISIONS.md): `vectorPass`'s
+exact-scan fallback had no `ctx`-cancellation check, so a canceled search would pay for
+the full scan anyway; `eachVector`/`lexicalPhase`/`vectorPass`/`rankAndFuse` now thread
+`ctx` and check it periodically. Three opt-in extensions, each off by default (see
+DECISIONS.md for why each is a trade-off rather than a pure win): semantic/near-duplicate
+query matching (`Config.QueryCacheSemanticThreshold`), adaptive ANN-vs-exact threshold
+banding on measured rolling latency (`Config.ANNThresholdBandPct`), and a Redis L2 tier
+namespaced automatically per `internal/collections` tenant. New `zenith_query_cache_hits_total{tier}`
+/ `..._misses_total` Prometheus counters (Task 9) plus `--query-cache-*`/`--ann-threshold-band-pct`
+CLI flags and matching `zenith.With*` Open-time Options (Tasks 12, 14). **Not yet
+measured:** real hit-rate/latency numbers from running those counters against a real
+workload — consistent with every other number in this document (e.g. items D, K, L
+above), that number is recorded here once a real run exists, not projected. Full design:
+`QUERYCACHE.md`. Rate limiting
+(service-layer admission control, `golang.org/x/time/rate`) was scoped alongside this
+work as a separate, independent plan ("Plan B") and has not been started.
 
 | # | Item | Why this order | Status |
 |---|------|-----------------|--------|

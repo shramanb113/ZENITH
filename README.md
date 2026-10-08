@@ -288,6 +288,11 @@ zenith index --db my-index.db ~/Projects
 --attr         key=value  Attach metadata to every indexed document (repeatable), e.g.
                            --attr tenant=acme --attr year=2024 --attr public=true.
                            Search it back with --where / --filter (see "Metadata filtering").
+--query-cache-size int              Query-result cache entry count, L1 in-process (default: 1000; 0 disables it)
+--query-cache-ttl duration          L2 (Redis) entry TTL; no effect without --query-cache-redis-addr (default: 5m)
+--query-cache-redis-addr string     Optional shared L2 Redis address (default: "", in-process only)
+--query-cache-semantic-threshold float  Near-duplicate cache matching above this cosine similarity (default: 0, disabled)
+--ann-threshold-band-pct float      Let measured latency pick ANN vs. exact scan within this band (default: 0, disabled)
 ```
 
 ---
@@ -316,7 +321,14 @@ zenith search --db my-index.db "query"
                   (needs: zenith models pull ms-marco-MiniLM-L-6-v2)
 --rerank-model   Reranker id from `zenith models list --rerankers` (default:
                   ms-marco-MiniLM-L-6-v2)
+--query-cache-size int              Query-result cache entry count, L1 in-process (default: 1000; 0 disables it)
+--query-cache-ttl duration          L2 (Redis) entry TTL; no effect without --query-cache-redis-addr (default: 5m)
+--query-cache-redis-addr string     Optional shared L2 Redis address (default: "", in-process only)
+--query-cache-semantic-threshold float  Near-duplicate cache matching above this cosine similarity (default: 0, disabled)
+--ann-threshold-band-pct float      Let measured latency pick ANN vs. exact scan within this band (default: 0, disabled)
 ```
+
+See "Query result caching" above for what each of these does.
 
 ---
 
@@ -446,6 +458,7 @@ zenith search <query>          ▼
 | In-memory mode (`:memory:`) | Active | Library — zero-cleanup testing |
 | Persistent multi-tenant collections (HTTP) | Active | per-collection keys + quotas; see "HTTP server" |
 | Prometheus metrics | Active | `--metrics-addr`; see "Observability" |
+| Query-result caching | Active | On by default (L1); optional Redis L2, semantic matching, adaptive ANN banding — see "Query result caching" |
 | OpenAI embedder | Planned | |
 | OpenTelemetry traces | Planned | |
 
@@ -606,6 +619,51 @@ configured defaults or affect any other concurrent search:
   results, _ := db.Search(ctx, "release notes", zenith.SortBy("year", true)) // newest first
   ```
 
+## Query result caching
+
+Every `Search` is cached by default: the engine keys a result list on the query text,
+the structured filter, the ranking weights, and an internal write-generation counter — so
+a write to the index makes every previously-cached result for that engine unreachable on
+the very next query, with no active invalidation step. An in-process LRU (`QueryCacheSize`,
+default 1,000 entries) is the only tier unless you opt into more. Concurrent identical
+queries that miss the cache share one computation (`golang.org/x/sync/singleflight`), so a
+burst of requests for the same uncached query never pays for it N times.
+
+```bash
+zenith search --query-cache-size 5000 "kubernetes oom"   # bigger L1, still in-process only
+zenith search --query-cache-size 0 "kubernetes oom"      # disable the cache for this process
+```
+
+From Go: `zenith.WithQueryCacheSize(n)` at `Open` time (0 disables it). `internal/collections.Manager`
+gives every collection its own cache automatically — nothing to configure for the HTTP server's
+persistent-collections path.
+
+**Optional Redis L2** (`--query-cache-redis-addr` / `zenith.WithQueryCacheRedisAddr`, HTTP
+collections: `--collection-query-cache-redis-addr`) adds a shared tier across processes. It is
+off by default — ZENITH stays a library with zero required infrastructure — and any Redis
+error (unreachable, timeout, decode failure) degrades to a cache miss, never a `Search` error.
+Each collection is namespaced by its own id automatically, so one shared Redis instance never
+lets one tenant's cached results leak into another's.
+
+**Opt-in, off by default, each a deliberate trade-off:**
+- **Semantic/near-duplicate matching** (`--query-cache-semantic-threshold` /
+  `zenith.WithQueryCacheSemanticThreshold(0.97)`): on an exact-key miss, returns the closest
+  recently-cached query above this cosine similarity, instead of recomputing. Below a
+  conservative threshold this can return a genuinely different query's answer — a
+  wrong-answer risk, not just a slowness one, which is why it defaults to `0` (disabled)
+  rather than guessing a threshold for you.
+- **Adaptive ANN-vs-exact threshold banding** (`--ann-threshold-band-pct` /
+  `zenith.WithANNThresholdBand(0.2)`): within this fraction of the configured ANN threshold,
+  lets measured rolling-average latency pick the faster of the ANN graph or the exact scan,
+  instead of the static threshold alone. This means the same corpus size can take a different
+  code path on different runs — predictable-behavior trade-off, so it's off unless you ask
+  for it.
+
+See [DECISIONS.md](./DECISIONS.md) for why generation-in-key invalidation was chosen over
+active invalidation, and why each opt-in feature trades a guarantee the base cache keeps.
+
+---
+
 ## Observability
 
 `zenith serve --metrics-addr 127.0.0.1:9464` runs a separate `GET /metrics` listener in
@@ -634,6 +692,7 @@ planned (ROADMAP P2-8), not required for metrics.
 | `zenith_namespace_queries_total` / `..._query_duration_seconds` | counter / histogram | none | ephemeral search, per query |
 | `zenith_namespaces_active` / `..._evictions_total` | gauge / counter | none / `reason` | ephemeral namespace lifecycle |
 | `zenith_embedding_duration_seconds` / `..._texts_total` | histogram / counter | `op` (`document`,`batch`,`query`) | `InstrumentEmbedder`, HTTP/collections mode only |
+| `zenith_query_cache_hits_total` / `..._misses_total` | counter | `tier` (`l1`,`l2`,`semantic`) / none | query-result cache, per search — see "Query result caching" |
 | `zenith_errors_total` | counter | `surface` (`http`/`grpc`/`embedder`), `code` | error paths on every surface |
 | `zenith_index_documents` | gauge | none | **gRPC `--db` mode only** |
 
@@ -672,7 +731,12 @@ ZENITH/
 │   ├── embedding/            # Ollama, deterministic adapters + LRU cache
 │   ├── storage/              # WAL, MemTable, SSTable, Bloom filter, compaction
 │   ├── index/                # inverted index + vector store + search orchestrator
+│   ├── querycache/           # query-result cache: L1 in-process LRU + optional L2 Redis
 │   ├── ranking/              # RRF + BM25 tiebreak + TF-IDF
+│   ├── collections/          # persistent multi-tenant collections (HTTP server)
+│   ├── sidecar/              # HTTP/JSON API — ephemeral namespaces + persistent collections
+│   ├── server/               # gRPC service implementation
+│   ├── metrics/              # Prometheus metrics registry and instrumentation
 │   └── config/               # all tunable parameters
 ├── pkg/
 │   └── zenith/               # public Go library API (go get github.com/shramanb113/ZENITH/pkg/zenith)
@@ -802,6 +866,11 @@ Defaults: 1000 collections, 1,000,000 documents and 8 MiB request body per colle
 per upsert batch, 100 results per search. Each is overridable per collection at creation
 (`max_docs`, `max_body_bytes`) or server-wide (`--max-collections`, `--collection-max-docs`,
 `--collection-max-open`, `--collection-idle-close`).
+
+Each collection gets its own query-result cache automatically (in-process L1, on by default —
+see "Query result caching"). `--collection-query-cache-redis-addr` points every collection at a
+shared Redis L2 instead; each collection is namespaced by its own id on that shared Redis, so
+they never see each other's cached results.
 
 **Capacity planning, measured (2026-10-08), not guessed:** a freshly started server with the
 bundled model loaded and zero collections open costs about **130-160 MB** (working set / private)
