@@ -31,7 +31,13 @@ jobs:
         include:
           - { os: ubuntu-latest, goos: linux, goarch: amd64, ext: "" }
           - { os: macos-latest, goos: darwin, goarch: arm64, ext: "" }
-          - { os: macos-13, goos: darwin, goarch: amd64, ext: "" }
+          # macos-13 (the old free Intel image) can't run Node24, which every
+          # JS-based action now requires since GitHub removed Node20 on
+          # 2026-09-23 — that silently stalled this leg. There's no rolling
+          # "latest" alias for Intel (macos-latest is arm64-only), so this is
+          # pinned to the newest standard free Intel image, macos-26-intel —
+          # bump it again whenever GitHub ships the next one.
+          - { os: macos-26-intel, goos: darwin, goarch: amd64, ext: "" }
           - { os: windows-latest, goos: windows, goarch: amd64, ext: ".exe" }
     steps:
       - uses: actions/checkout@v4
