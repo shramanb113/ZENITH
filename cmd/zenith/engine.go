@@ -3,6 +3,7 @@ package main
 // engine.go — shared engine construction used by index, search, watch, serve.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -19,12 +20,14 @@ import (
 	"github.com/shramanb113/ZENITH/internal/localembedder"
 	"github.com/shramanb113/ZENITH/internal/metrics"
 	"github.com/shramanb113/ZENITH/internal/ranking"
+	"github.com/shramanb113/ZENITH/internal/storage"
 )
 
 // cliFlags holds the flag values shared across all commands.
 var cliFlags struct {
 	dbPath      string
 	fstPath     string
+	storageDir  string // Pebble-backed document journal + persistent embedding cache
 	embedder    string // "auto" | "local" | "ollama" | "deterministic"
 	model       string // registered local model id; "" = the bundled one
 	ollamaURL   string
@@ -61,7 +64,16 @@ func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) 
 
 	alog := activitylog.Open()
 
+	storageEng, err := storage.Open(storage.EngineConfig{Dir: cliFlags.storageDir})
+	if err != nil {
+		alog.Close()
+		return nil, nil, nil, fmt.Errorf("cannot open storage engine at %s: %w", cliFlags.storageDir, err)
+	}
+
 	emb, embedderName := resolveEmbedder(appConfig, alog)
+	if pc, ok := emb.(embedding.PersistentCacheSetter); ok {
+		pc.SetPersistentCache(storageEng)
+	}
 
 	tkz := analysis.NewStandardAnalyzer()
 	scorer := ranking.NewWeightedRRFRanker(appConfig.RRFConstant, appConfig.MaxResults, 1.0, appConfig.VectorWeight)
@@ -83,21 +95,65 @@ func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) 
 			// index we merely failed to read (older format, different embedder,
 			// damage) would be overwritten by an empty one.
 			alog.Close()
+			_ = storageEng.Close()
 			return nil, nil, nil, fmt.Errorf("cannot open index %s: %w%s", cliFlags.dbPath, err, mismatchHint(err))
 		}
 	}
 
+	// Replay journal delta — documents indexed since the last Save. The
+	// journal is NOT set yet, so these Add/Remove calls do not re-journal.
+	// Mirrors cmd/server/main.go's replay loop exactly.
+	replayCtx := context.Background()
+	if err := storageEng.Replay(func(key, value []byte, isDelete bool) error {
+		id := string(key)
+		if isDelete {
+			if err := engine.Remove(replayCtx, id); err != nil {
+				slog.Warn("storage replay: remove failed", "id", id, "error", err)
+			}
+			return nil
+		}
+		text, vector, attrs := index.DecodeJournalValue(value)
+		var addErr error
+		switch {
+		case vector != nil:
+			addErr = engine.AddWithVectorAttrs(replayCtx, id, text, vector, attrs)
+		case len(attrs) > 0:
+			addErr = engine.AddWithVectorAttrs(replayCtx, id, text, engine.EmbedText(replayCtx, text), attrs)
+		default:
+			addErr = engine.Add(replayCtx, id, text)
+		}
+		if addErr != nil {
+			slog.Warn("storage replay: re-index failed", "id", id, "error", addErr)
+		}
+		return nil
+	}); err != nil {
+		slog.Warn("storage replay failed", "error", err)
+	}
+	// Connect the journal — all future mutations are durably recorded first.
+	engine.SetDocumentJournal(storageEng)
+
 	teardown := func() {
+		snap := storageEng.Snapshot()
 		if err := engine.Save(cliFlags.dbPath); err != nil {
 			slog.Error("Failed to save index", "error", err)
 		} else {
 			alog.Log("SAVED", cliFlags.dbPath)
+			// The saved segment is now authoritative for everything this
+			// snapshot saw — prune exactly those journal entries, not
+			// "everything now" (which would race writes arriving during Save).
+			if err := storageEng.Prune(snap); err != nil {
+				slog.Warn("storage: prune after save failed (journal will just be larger than necessary)", "error", err)
+			}
 		}
+		_ = snap.Close()
 		if err := engine.SaveANN(); err != nil {
 			slog.Warn("Could not save the ANN graph; the next open will rebuild it", "error", err)
 		}
 		if err := engine.Close(); err != nil {
 			slog.Error("Failed to release index files", "error", err)
+		}
+		if err := storageEng.Close(); err != nil {
+			slog.Error("Failed to close storage engine", "error", err)
 		}
 		alog.Close()
 	}
