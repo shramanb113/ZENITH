@@ -2,7 +2,9 @@ package embedding
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"log/slog"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"golang.org/x/sync/singleflight"
@@ -27,6 +29,34 @@ type CachingEmbedder struct {
 	// so a cache hit (the common case) never pays a string-concatenation
 	// allocation just to form a dedup key it won't use.
 	embedSF, querySF singleflight.Group
+
+	// persist is the optional second cache tier, checked on an LRU miss
+	// before the base embedder, and populated on a real embed. nil (the
+	// default for every existing construction site) disables it entirely —
+	// zero behavior change for any caller that doesn't opt in.
+	persist PersistentEmbedCache
+}
+
+// SetPersistentCache wires a crash-surviving second cache tier beneath this
+// embedder's in-memory LRUs. Call once after construction; nil (the default)
+// disables the tier.
+func (c *CachingEmbedder) SetPersistentCache(p PersistentEmbedCache) {
+	c.persist = p
+}
+
+// persistentKey builds the cache key for text under domain ('D' for
+// documents via Embed/EmbedBatch, 'Q' for queries via EmbedQuery). The
+// embedder identity is a literal prefix (not hashed into the digest) so a
+// future per-model prune can prefix-scan without decoding every value.
+func (c *CachingEmbedder) persistentKey(domain byte, text string) []byte {
+	sum := sha256.Sum256([]byte(text))
+	name := c.Name()
+	key := make([]byte, 0, len(name)+1+1+16)
+	key = append(key, []byte(name)...)
+	key = append(key, 0)
+	key = append(key, domain)
+	key = append(key, sum[:16]...)
+	return key
 }
 
 func NewCachingEmbedder(base Embedder, maxSize int) (*CachingEmbedder, error) {
@@ -61,6 +91,12 @@ func (c *CachingEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 	if val, ok := c.cache.Get(text); ok {
 		return cloneVec(val), nil
 	}
+	if c.persist != nil {
+		if val, ok := c.persist.GetEmbedding(c.persistentKey('D', text)); ok && len(val) == c.Dimensions() {
+			c.cache.Add(text, cloneVec(val))
+			return cloneVec(val), nil
+		}
+	}
 
 	v, err, _ := c.embedSF.Do(text, func() (any, error) {
 		vec, err := c.base.Embed(ctx, text)
@@ -70,6 +106,11 @@ func (c *CachingEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 		// keep getting a silent "success" with nothing usable.
 		if err == nil && len(vec) > 0 {
 			c.cache.Add(text, cloneVec(vec))
+			if c.persist != nil {
+				if perr := c.persist.PutEmbedding(c.persistentKey('D', text), vec); perr != nil {
+					slog.Warn("embedding: persistent cache write failed", "error", perr)
+				}
+			}
 		}
 		return vec, err
 	})
@@ -101,10 +142,17 @@ func (c *CachingEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]f
 	for i, txt := range texts {
 		if val, ok := c.cache.Get(txt); ok {
 			results[i] = cloneVec(val)
-		} else {
-			missingIdx = append(missingIdx, i)
-			missingTexts = append(missingTexts, txt)
+			continue
 		}
+		if c.persist != nil {
+			if val, ok := c.persist.GetEmbedding(c.persistentKey('D', txt)); ok && len(val) == c.Dimensions() {
+				results[i] = cloneVec(val)
+				c.cache.Add(txt, cloneVec(val))
+				continue
+			}
+		}
+		missingIdx = append(missingIdx, i)
+		missingTexts = append(missingTexts, txt)
 	}
 
 	if len(missingTexts) > 0 {
@@ -125,6 +173,11 @@ func (c *CachingEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]f
 			ogIdx := missingIdx[i]
 			results[ogIdx] = vec
 			c.cache.Add(missingTexts[i], cloneVec(vec))
+			if c.persist != nil {
+				if perr := c.persist.PutEmbedding(c.persistentKey('D', missingTexts[i]), vec); perr != nil {
+					slog.Warn("embedding: persistent cache write failed", "error", perr)
+				}
+			}
 		}
 	}
 
@@ -160,10 +213,21 @@ func (c *CachingEmbedder) EmbedQuery(ctx context.Context, text string) ([]float3
 	if val, ok := c.queryCache.Get(text); ok {
 		return cloneVec(val), nil
 	}
+	if c.persist != nil {
+		if val, ok := c.persist.GetEmbedding(c.persistentKey('Q', text)); ok && len(val) == c.Dimensions() {
+			c.queryCache.Add(text, cloneVec(val))
+			return cloneVec(val), nil
+		}
+	}
 	v, err, _ := c.querySF.Do(text, func() (any, error) {
 		vec, err := q.EmbedQuery(ctx, text)
 		if err == nil && len(vec) > 0 {
 			c.queryCache.Add(text, cloneVec(vec))
+			if c.persist != nil {
+				if perr := c.persist.PutEmbedding(c.persistentKey('Q', text), vec); perr != nil {
+					slog.Warn("embedding: persistent cache write failed", "error", perr)
+				}
+			}
 		}
 		return vec, err
 	})

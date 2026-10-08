@@ -34,3 +34,21 @@ func EmbedQuery(ctx context.Context, e Embedder, text string) ([]float32, error)
 	}
 	return e.Embed(ctx, text)
 }
+
+// PersistentEmbedCache is a crash-surviving second tier beneath
+// CachingEmbedder's in-memory LRU. Satisfied by *storage.Engine
+// (internal/storage) — its GetEmbedding/PutEmbedding signatures match
+// exactly; no import of internal/storage is needed here, mirroring how
+// DocumentJournal/Txn already decouple internal/index from internal/storage.
+type PersistentEmbedCache interface {
+	GetEmbedding(key []byte) ([]float32, bool)
+	PutEmbedding(key []byte, vec []float32) error
+}
+
+// PersistentCacheSetter is implemented by embedders that can be given a
+// PersistentEmbedCache after construction (CachingEmbedder). Callers that
+// build an embedder generically (cmd/zenith, cmd/server) type-assert against
+// this instead of depending on the concrete type.
+type PersistentCacheSetter interface {
+	SetPersistentCache(PersistentEmbedCache)
+}

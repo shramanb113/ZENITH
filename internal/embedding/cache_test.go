@@ -344,3 +344,116 @@ func TestCachingEmbedder_Dimensions(t *testing.T) {
 		t.Errorf("Dimensions() = %d, want %d", cached.Dimensions(), dims)
 	}
 }
+
+// fakePersistentCache is a minimal in-memory stand-in for *storage.Engine's
+// GetEmbedding/PutEmbedding, used so this package's tests don't need to
+// import internal/storage (keeping the decoupling the production code
+// relies on honest in the tests too).
+type fakePersistentCache struct {
+	mu      sync.Mutex
+	store   map[string][]float32
+	putCall int
+}
+
+func newFakePersistentCache() *fakePersistentCache {
+	return &fakePersistentCache{store: map[string][]float32{}}
+}
+
+func (f *fakePersistentCache) GetEmbedding(key []byte) ([]float32, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.store[string(key)]
+	return v, ok
+}
+
+func (f *fakePersistentCache) PutEmbedding(key []byte, vec []float32) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.putCall++
+	f.store[string(key)] = vec
+	return nil
+}
+
+func TestCachingEmbedder_PersistentCacheHitSkipsBaseEmbed(t *testing.T) {
+	base := &countingEmbedder{inner: newFakeVectorEmbedder(4)}
+	ce, err := NewCachingEmbedder(base, 10)
+	if err != nil {
+		t.Fatalf("NewCachingEmbedder: %v", err)
+	}
+	persist := newFakePersistentCache()
+	ce.SetPersistentCache(persist)
+
+	// First call: LRU miss, persistent miss, real embed — populates both tiers.
+	if _, err := ce.Embed(context.Background(), "hello"); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if n := base.calls.Load(); n != 1 {
+		t.Fatalf("calls = %d, want 1", n)
+	}
+
+	// A second CachingEmbedder sharing the same persistent store but an
+	// empty LRU simulates a fresh process reusing the same on-disk cache.
+	ce2, err := NewCachingEmbedder(base, 10)
+	if err != nil {
+		t.Fatalf("NewCachingEmbedder: %v", err)
+	}
+	ce2.SetPersistentCache(persist)
+	if _, err := ce2.Embed(context.Background(), "hello"); err != nil {
+		t.Fatalf("Embed (second instance): %v", err)
+	}
+	if n := base.calls.Load(); n != 1 {
+		t.Errorf("calls = %d, want still 1 (persistent cache hit must skip base.Embed)", n)
+	}
+}
+
+func TestCachingEmbedder_EmbedAndEmbedQuery_UseDistinctPersistentKeys(t *testing.T) {
+	base := &asymmetricEmbedder{inner: newFakeVectorEmbedder(4)}
+	ce, err := NewCachingEmbedder(base, 10)
+	if err != nil {
+		t.Fatalf("NewCachingEmbedder: %v", err)
+	}
+	persist := newFakePersistentCache()
+	ce.SetPersistentCache(persist)
+
+	if _, err := ce.Embed(context.Background(), "same text"); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if _, err := ce.EmbedQuery(context.Background(), "same text"); err != nil {
+		t.Fatalf("EmbedQuery: %v", err)
+	}
+	if persist.putCall != 2 {
+		t.Fatalf("putCall = %d, want 2 (distinct keys for Embed vs EmbedQuery)", persist.putCall)
+	}
+	if len(persist.store) != 2 {
+		t.Errorf("stored %d distinct keys, want 2 — Embed/EmbedQuery must not collide", len(persist.store))
+	}
+}
+
+func TestCachingEmbedder_EmbedBatch_ConsultsPersistentCache(t *testing.T) {
+	base := &countingEmbedder{inner: newFakeVectorEmbedder(4)}
+	ce, err := NewCachingEmbedder(base, 10)
+	if err != nil {
+		t.Fatalf("NewCachingEmbedder: %v", err)
+	}
+	persist := newFakePersistentCache()
+	ce.SetPersistentCache(persist)
+
+	if _, err := ce.EmbedBatch(context.Background(), []string{"a", "b"}); err != nil {
+		t.Fatalf("EmbedBatch: %v", err)
+	}
+	if n := base.calls.Load(); n != 2 {
+		t.Fatalf("calls = %d, want 2", n)
+	}
+
+	ce2, err := NewCachingEmbedder(base, 10)
+	if err != nil {
+		t.Fatalf("NewCachingEmbedder: %v", err)
+	}
+	ce2.SetPersistentCache(persist)
+	if _, err := ce2.EmbedBatch(context.Background(), []string{"a", "b"}); err != nil {
+		t.Fatalf("EmbedBatch (second instance): %v", err)
+	}
+	if n := base.calls.Load(); n != 2 {
+		t.Errorf("calls = %d, want still 2 (persistent cache must satisfy both texts)", n)
+	}
+}
