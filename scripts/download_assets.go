@@ -34,6 +34,18 @@ import (
 
 const ortVersion = "1.25.0"
 
+// Microsoft stopped publishing osx-x86_64 (Intel macOS) onnxruntime builds
+// after v1.23.0 (v1.24.0 doesn't exist; v1.25.0 is arm64-only) — the same
+// Intel-macOS sunset that forced the release workflow's darwin-amd64 CI leg
+// onto macos-26-intel. go.mod's onnxruntime_go is downgraded to v1.25.0,
+// whose vendored header requests ORT_API_VERSION 23 — satisfied by both this
+// older darwin/amd64 runtime (which implements exactly 23) and the v1.25.0
+// runtime every other platform uses (whose GetApi is `version <=
+// ORT_API_VERSION`, so a lower request against its newer, superset API
+// still succeeds). Bump this one platform again if Microsoft resumes
+// shipping Intel macOS, or drop it if ZENITH drops Intel macOS support.
+const ortVersionDarwinAmd64 = "1.23.0"
+
 // assetsDir resolves to internal/localembedder/assets/ relative to the
 // repository root, regardless of which directory go generate is called from.
 func assetsPath() string {
@@ -71,11 +83,21 @@ var ortReleases = map[string]ortRelease{
 		outName:  "libonnxruntime.dylib",
 	},
 	"darwin/amd64": {
-		url:      fmt.Sprintf("https://github.com/microsoft/onnxruntime/releases/download/v%s/onnxruntime-osx-x86_64-%s.tgz", ortVersion, ortVersion),
+		url:      fmt.Sprintf("https://github.com/microsoft/onnxruntime/releases/download/v%s/onnxruntime-osx-x86_64-%s.tgz", ortVersionDarwinAmd64, ortVersionDarwinAmd64),
 		archive:  "tgz",
-		libInZip: fmt.Sprintf("onnxruntime-osx-x86_64-%s/lib/libonnxruntime.%s.dylib", ortVersion, ortVersion),
+		libInZip: fmt.Sprintf("onnxruntime-osx-x86_64-%s/lib/libonnxruntime.%s.dylib", ortVersionDarwinAmd64, ortVersionDarwinAmd64),
 		outName:  "libonnxruntime.dylib",
 	},
+}
+
+// ortVersionFor reports which onnxruntime version a given platform's release
+// actually came from, so callers can log the real version instead of the
+// cross-platform default when they differ (see ortVersionDarwinAmd64 above).
+func ortVersionFor(platform string) string {
+	if platform == "darwin/amd64" {
+		return ortVersionDarwinAmd64
+	}
+	return ortVersion
 }
 
 func main() {
@@ -125,7 +147,7 @@ func main() {
 	}
 	fmt.Printf("  model.onnx saved (%s)\n", spec.ID)
 
-	fmt.Printf("Downloading onnxruntime %s for %s...\n", ortVersion, platform)
+	fmt.Printf("Downloading onnxruntime %s for %s...\n", ortVersionFor(platform), platform)
 	archiveData, err := fetchBytes(rel.url)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ort download failed: %v\n", err)

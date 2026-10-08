@@ -12,7 +12,7 @@ require (
 	github.com/prometheus/client_golang v1.24.1
 	github.com/spf13/cobra v1.10.2
 	github.com/x448/float16 v0.8.4
-	github.com/yalue/onnxruntime_go v1.30.1
+	github.com/yalue/onnxruntime_go v1.25.0
 	golang.org/x/net v0.57.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/text v0.40.0
