@@ -244,3 +244,24 @@ Ingest rate declines from 378 → 336 docs/s as segment count grows between comp
 **ANN recall@10 vs. exact scan over 1,000,000 docs: 0.9860** (100 queries) — the HNSW graph (`annK=300`, `annEF=400`, see P1-5) stays within ~1.4% of exhaustive search at this scale.
 
 **Caveat:** this run measures structural/memory/latency behavior with real text and realistic-shaped synthetic vectors, not retrieval quality at 1M scale — embedding 1M real passages would take hours (see "Why 100k passages" above) and is covered at smaller scale by the BEIR/MS MARCO suites instead.
+
+---
+
+## Fresh 100k-doc hybrid re-run with real embeddings (2026-10-08)
+
+**Harness:** `TestMSMARCOHybrid` (`internal/index/msmarco_hybrid_test.go`), `CGO_ENABLED=1 ZENITH_MSMARCO_HYBRID=1 ZENITH_MODEL=gte-small ZENITH_MSMARCO_QUERIES=1000 go test ./internal/index -run 'TestMSMARCOHybrid$' -v -timeout 3600s`. Run against a brand-new index cache path (no reuse of any previously-built index), so every document was re-embedded from scratch with the real `gte-small` ONNX model under everything shipped since the June 2026 baseline below — filters, per-query weight overrides, array attributes, sort-by-attribute, the hybrid-fusion shortcut, singleflight cache de-dup, overlapped query embedding. Windows 11, amd64. Total time 1,887.9s (~31.5 min).
+
+**Ingest:** 107,399 docs in 21m54s (~82 docs/s with real embedding cost — much slower than the 1M synthetic-vector run above, since every document pays a real ONNX inference here). Compacted to 1 segment in 2.79s.
+
+**Query latency/recall (1,000 queries each path), real `gte-small` embeddings:**
+
+| Path | Recall@10 | p50 | p95 | p99 |
+|---|---|---|---|---|
+| Exact scan, serial embed-then-search | 0.9640 | 84.42ms | 103.6ms | 112.26ms |
+| Exact scan, embed overlapped | 0.9640 | 81.08ms | 97.58ms | 107.18ms |
+| ANN, serial embed-then-search | 0.9580 | 14.53ms | 25.66ms | 32.07ms |
+| ANN, embed overlapped | 0.9580 | 11.59ms | 22.07ms | 29.11ms |
+
+Query embedding alone: p50 3.02ms, p95 4.1ms, p99 4.97ms. ANN-vs-exact top-10 overlap: 0.9903.
+
+**Versus the 2026-06-11 100k baseline above** (Recall@10 0.906, hybrid p50 346ms): recall is up (0.906 → 0.964 exact-scan / 0.958 ANN) and exact-scan latency is roughly 4× faster (346ms → ~84ms). This is a clean positive result from the accumulated work since June — no regressions and no new bugs surfaced. Result line as emitted: `RESULT hybrid model=gte-small embed_p50=3.0185ms exact_recall=0.9640 exact_serial_p50=84.4185ms exact_overlapped_p50=81.0756ms exact_engine_p50=85.6095ms ann_recall=0.9580 ann_serial_p50=14.528ms ann_overlapped_p50=11.5871ms ann_engine_p50=11.8138ms overlap=0.9903`.
