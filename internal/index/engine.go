@@ -81,9 +81,17 @@ type Engine struct {
 	// Persistence state. See layers.go: documents live either in segs
 	// (immutable, memory-mapped) or in the in-memory maps below (the delta).
 	segs        []*segLayer
-	dbPath      string              // manifest path the engine is bound to; "" until first Load/Save
-	nextGen     uint64              // next segment file number
-	manifestGen uint64              // generation of the last committed manifest
+	dbPath      string // manifest path the engine is bound to; "" until first Load/Save
+	nextGen     uint64 // next segment file number
+	manifestGen uint64 // generation of the last committed manifest
+	// writeGen counts mutations (Add/AddBatch/Remove) to the live delta,
+	// independent of manifestGen (which only bumps on a committed flush).
+	// Embedded into every query-cache key (see internal/querycache wiring in
+	// search.go): a write makes every previously-cached key for this engine
+	// permanently unreachable, with no enumeration or active invalidation
+	// logic required. Guarded by e.mu — every mutator already holds
+	// e.mu.Lock() when it bumps this, so no new lock or atomic is needed.
+	writeGen    uint64
 	pendingDels map[uint64]struct{} // segment docs deleted since the last flush
 	// frozen is the delta a flush is writing (nil when none): read-only, still
 	// searched, and replaced by a segment when the flush commits. See frozen.go.
@@ -494,6 +502,7 @@ func (e *Engine) Remove(ctx context.Context, originalID string) error {
 		// Not in the delta: it may live in a segment, where removal is a
 		// tombstone (the row is marked dead; postings are never edited).
 		e.killBase(internalID)
+		e.writeGen++
 		return nil
 	}
 
@@ -519,6 +528,7 @@ func (e *Engine) Remove(ctx context.Context, originalID string) error {
 
 	e.bm25.Remove(internalID)
 
+	e.writeGen++
 	return nil
 }
 
@@ -747,6 +757,7 @@ func (e *Engine) addInternal(ctx context.Context, originalID string, fullText st
 
 	e.bm25.Index(internalID, rawTokens)
 
+	e.writeGen++
 	return nil
 }
 
