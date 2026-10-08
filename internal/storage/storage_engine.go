@@ -232,3 +232,47 @@ func (e *Engine) Prune(s *Snapshot) error {
 	}
 	return nil
 }
+
+// Txn stages a batch of Put/Delete operations for one atomic commit: every
+// key becomes durable and visible together (one fsync), or Discard releases
+// it with nothing applied. Used for multi-document transactions — see
+// internal/index.Engine.AddTransaction.
+type Txn struct {
+	batch *pebble.Batch
+}
+
+// NewTxn starts a new transaction against e.
+func (e *Engine) NewTxn() *Txn {
+	return &Txn{batch: e.db.NewBatch()}
+}
+
+// Put stages a logical put. Not durable until Commit succeeds.
+func (t *Txn) Put(key, value []byte) error {
+	envelope := make([]byte, 1+len(value))
+	envelope[0] = journalOpPut
+	copy(envelope[1:], value)
+	return t.batch.Set(key, envelope, nil)
+}
+
+// Delete stages a logical delete. Not durable until Commit succeeds.
+func (t *Txn) Delete(key []byte) error {
+	return t.batch.Set(key, []byte{journalOpDelete}, nil)
+}
+
+// Commit durably applies every staged operation atomically: one fsync, every
+// key visible together or none are.
+func (t *Txn) Commit(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		_ = t.batch.Close()
+		return err
+	}
+	if err := t.batch.Commit(pebble.Sync); err != nil {
+		return fmt.Errorf("storage: txn commit: %w", err)
+	}
+	return nil
+}
+
+// Discard releases the transaction's resources without applying anything.
+func (t *Txn) Discard() error {
+	return t.batch.Close()
+}
