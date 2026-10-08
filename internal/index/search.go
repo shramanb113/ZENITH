@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -499,4 +500,81 @@ func (e *Engine) getSemanticNeighbors(token string, topN int, threshold float32)
 		out[i] = c.word
 	}
 	return out
+}
+
+// attrSortKey is the per-result sort key SortByAttribute compares. A
+// document missing the field, or holding an array value (kind is left at
+// its zero value, which is never AttrString/AttrNumber/AttrBool), has
+// has == false and always sorts last.
+type attrSortKey struct {
+	has  bool
+	kind AttrKind
+	s    string
+	n    float64
+}
+
+func attrSortKeyFor(a Attrs, field string) attrSortKey {
+	v, ok := a[field]
+	if !ok || v.Kind == AttrArray {
+		return attrSortKey{}
+	}
+	k := attrSortKey{has: true, kind: v.Kind}
+	if v.Kind == AttrString {
+		k.s = v.S
+	} else {
+		k.n = v.N
+	}
+	return k
+}
+
+// SortByAttribute reorders results by the named document attribute's value,
+// replacing their existing order entirely — not a secondary tiebreak. The
+// sort is stable, so documents tied on the attribute's value (including two
+// documents both missing it, both holding an array value, or holding
+// differently-typed values for it, which are incomparable) keep their
+// relative order from results as passed in. A document missing the field,
+// or holding an array value, always sorts after every document with a
+// comparable scalar (string/number/bool) value, regardless of desc.
+// field == "" is a no-op.
+func (e *Engine) SortByAttribute(results []SearchResponse, field string, desc bool) {
+	if field == "" || len(results) < 2 {
+		return
+	}
+	keys := make([]attrSortKey, len(results))
+	for i, r := range results {
+		keys[i] = attrSortKeyFor(e.GetAttrs(r.ID), field)
+	}
+	idx := make([]int, len(results))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(i, j int) bool {
+		a, b := keys[idx[i]], keys[idx[j]]
+		if a.has != b.has {
+			return a.has
+		}
+		if !a.has || a.kind != b.kind {
+			return false
+		}
+		var cmp int
+		if a.kind == AttrString {
+			cmp = strings.Compare(a.s, b.s)
+		} else {
+			switch {
+			case a.n < b.n:
+				cmp = -1
+			case a.n > b.n:
+				cmp = 1
+			}
+		}
+		if desc {
+			cmp = -cmp
+		}
+		return cmp < 0
+	})
+	sorted := make([]SearchResponse, len(results))
+	for i, j := range idx {
+		sorted[i] = results[j]
+	}
+	copy(results, sorted)
 }

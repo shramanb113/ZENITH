@@ -90,6 +90,10 @@ func (s *ZenithServer) Search(
 		return nil, status.Errorf(codes.Internal, "search failed: %v", err)
 	}
 
+	// sort_field replaces score ordering entirely, so it must run on the
+	// full candidate list before paginate truncates it.
+	s.Engine.SortByAttribute(results, req.GetSortField(), req.GetSortDesc())
+
 	results = paginate(results, int(req.GetOffset()), int(req.GetLimit()))
 
 	protoResults := make([]*zenithproto.SearchResult, 0, len(results))

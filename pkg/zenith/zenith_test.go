@@ -562,6 +562,73 @@ func TestSearch_WithWeightsOverridesVectorWeight(t *testing.T) {
 	}
 }
 
+// SortBy replaces score ordering entirely — all three documents here match
+// the query equally well lexically, so without SortBy the order would be
+// whatever the hybrid ranker's tiebreak gives; with SortBy it's exactly the
+// requested attribute order, missing values sorted last.
+func TestSearch_SortByReplacesScoreOrder(t *testing.T) {
+	db := openMem(t)
+	mustAddAttrs(t, db, "mid", "widget gadget thing", zenith.Attrs{"year": float64(2015)})
+	mustAddAttrs(t, db, "new", "widget gadget thing", zenith.Attrs{"year": float64(2023)})
+	mustAddAttrs(t, db, "old", "widget gadget thing", zenith.Attrs{"year": float64(2005)})
+	mustAddAttrs(t, db, "none", "widget gadget thing", nil)
+
+	asc, err := db.Search(bgCtx(), "widget gadget", zenith.SortBy("year", false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAsc := []string{"old", "mid", "new", "none"}
+	if gotIDs := resultIDs(asc); !slicesEqual(gotIDs, wantAsc) {
+		t.Fatalf("SortBy(\"year\", false): got %v, want %v", gotIDs, wantAsc)
+	}
+
+	desc, err := db.Search(bgCtx(), "widget gadget", zenith.SortBy("year", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDesc := []string{"new", "mid", "old", "none"}
+	if gotIDs := resultIDs(desc); !slicesEqual(gotIDs, wantDesc) {
+		t.Fatalf("SortBy(\"year\", true): got %v, want %v", gotIDs, wantDesc)
+	}
+
+	// Without SortBy, score order is used again — proving the option is
+	// per-call, not a lingering DB-wide setting.
+	plain, err := db.Search(bgCtx(), "widget gadget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotIDs := resultIDs(plain); slicesEqual(gotIDs, wantAsc) || slicesEqual(gotIDs, wantDesc) {
+		t.Fatalf("plain Search after SortBy calls: got %v, which looks sorted by year — SortBy leaked", gotIDs)
+	}
+}
+
+func mustAddAttrs(t *testing.T, db *zenith.DB, id, text string, attrs zenith.Attrs) {
+	t.Helper()
+	if err := db.AddWithAttrs(bgCtx(), id, text, attrs); err != nil {
+		t.Fatalf("AddWithAttrs(%q): %v", id, err)
+	}
+}
+
+func resultIDs(results []zenith.Result) []string {
+	out := make([]string, len(results))
+	for i, r := range results {
+		out[i] = r.ID
+	}
+	return out
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // Regression test: the RRF ranker's internal candidate cap used to be
 // hardcoded to 10 regardless of the caller's requested limit, so Limit(n)
 // for n > 10 silently still returned at most 10 results. See

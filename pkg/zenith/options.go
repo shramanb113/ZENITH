@@ -39,10 +39,12 @@ type Option func(*options) error
 type SearchOption func(*searchOptions)
 
 type searchOptions struct {
-	limit   int
-	explain bool
-	filter  *Filter
-	weights index.Weights
+	limit     int
+	explain   bool
+	filter    *Filter
+	weights   index.Weights
+	sortField string
+	sortDesc  bool
 }
 
 // WithEmbedder replaces the default embedded ONNX embedder with a custom one.
@@ -178,6 +180,22 @@ func Explain() SearchOption {
 func WithWeights(vector, phonetic, rrfConstant float64) SearchOption {
 	return func(o *searchOptions) {
 		o.weights = index.Weights{Vector: vector, Phonetic: phonetic, RRF: rrfConstant}
+	}
+}
+
+// SortBy replaces score ordering for this one Search call with ordering by
+// the named document attribute's value instead — not a secondary tiebreak.
+// The sort is stable, so documents tied on the attribute's value (including
+// every document missing it) keep their relative score order. A document
+// missing field, or holding an array value for it, always sorts after every
+// document with a comparable scalar (string/number/bool) value, regardless
+// of desc. Documents holding differently-typed values for field (e.g. one
+// string, one number) are incomparable to each other and keep their
+// relative score order too.
+func SortBy(field string, desc bool) SearchOption {
+	return func(o *searchOptions) {
+		o.sortField = field
+		o.sortDesc = desc
 	}
 }
 

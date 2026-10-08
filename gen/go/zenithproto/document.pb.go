@@ -600,7 +600,15 @@ type SearchRequest struct {
 	// offset skips this many results from the top of the ranked list, for pagination.
 	Offset int32 `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
 	// filter, when set, restricts the search to documents whose attrs match.
-	Filter        *FilterNode `protobuf:"bytes,4,opt,name=filter,proto3" json:"filter,omitempty"`
+	Filter *FilterNode `protobuf:"bytes,4,opt,name=filter,proto3" json:"filter,omitempty"`
+	// sort_field, when non-empty, replaces score ordering entirely: results
+	// are ordered by this attribute's value instead (stable, so documents
+	// tied on it — including every document missing it — keep their
+	// relative score order). A document missing the field, or holding an
+	// array value, always sorts after every document with a comparable
+	// scalar value, regardless of sort_desc.
+	SortField     string `protobuf:"bytes,5,opt,name=sort_field,json=sortField,proto3" json:"sort_field,omitempty"`
+	SortDesc      bool   `protobuf:"varint,6,opt,name=sort_desc,json=sortDesc,proto3" json:"sort_desc,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -661,6 +669,20 @@ func (x *SearchRequest) GetFilter() *FilterNode {
 		return x.Filter
 	}
 	return nil
+}
+
+func (x *SearchRequest) GetSortField() string {
+	if x != nil {
+		return x.SortField
+	}
+	return ""
+}
+
+func (x *SearchRequest) GetSortDesc() bool {
+	if x != nil {
+		return x.SortDesc
+	}
+	return false
 }
 
 type SearchResult struct {
@@ -1275,12 +1297,15 @@ const file_document_proto_rawDesc = "" +
 	"\x04_max\"A\n" +
 	"\rIndexResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\bR\x06status\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\x7f\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\xbb\x01\n" +
 	"\rSearchRequest\x12\x14\n" +
 	"\x05query\x18\x01 \x01(\tR\x05query\x12\x14\n" +
 	"\x05limit\x18\x02 \x01(\x05R\x05limit\x12\x16\n" +
 	"\x06offset\x18\x03 \x01(\x05R\x06offset\x12*\n" +
-	"\x06filter\x18\x04 \x01(\v2\x12.zenith.FilterNodeR\x06filter\"\xd2\x02\n" +
+	"\x06filter\x18\x04 \x01(\v2\x12.zenith.FilterNodeR\x06filter\x12\x1d\n" +
+	"\n" +
+	"sort_field\x18\x05 \x01(\tR\tsortField\x12\x1b\n" +
+	"\tsort_desc\x18\x06 \x01(\bR\bsortDesc\"\xd2\x02\n" +
 	"\fSearchResult\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05score\x18\x02 \x01(\x01R\x05score\x128\n" +

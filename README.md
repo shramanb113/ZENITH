@@ -580,6 +580,32 @@ test, not just documentation.
 value, not roaring-bitmap-compressed postings. That's a pure efficiency project with no
 correctness or feature gap at today's scale, so it stays on the backlog (see ROADMAP.md).
 
+## Per-query ranking controls
+
+Two more `Search` options, both scoped to a single call — they never change the DB's
+configured defaults or affect any other concurrent search:
+
+- **`zenith.WithWeights(vector, phonetic, rrfConstant float64)`** overrides the RRF
+  vector-list weight, the phonetic match weight, and the RRF `k` constant for one call.
+  Pass `0` for any argument to keep that weight's engine default
+  (`VectorWeight` 2.0, `PhoneticWeight` 0.3, `RRFConstant` 20.0 by default — see
+  `internal/config.DefaultConfig`). Not exposed over gRPC.
+  ```go
+  // Lean harder on semantic similarity for this one query, without changing
+  // every other search's behavior.
+  results, _ := db.Search(ctx, "oom killer", zenith.WithWeights(4.0, 0, 0))
+  ```
+- **`zenith.SortBy(field string, desc bool)`** replaces score ordering *entirely* with a
+  stable sort by that attribute's value — it is not a secondary tiebreak layered on top of
+  relevance. A document missing the field, holding an array value for it, or holding a
+  differently-typed value than another document being compared, is treated as incomparable
+  and always sorts after every document with a comparable scalar value; ties (including two
+  incomparable documents) keep their relative order from the normal relevance ranking. Also
+  available over gRPC as `SearchRequest.sort_field` / `sort_desc`.
+  ```go
+  results, _ := db.Search(ctx, "release notes", zenith.SortBy("year", true)) // newest first
+  ```
+
 ---
 
 ## Project Structure

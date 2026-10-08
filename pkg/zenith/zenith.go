@@ -414,7 +414,9 @@ func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) (r
 		if err != nil {
 			return nil, fmt.Errorf("zenith: %w", err)
 		}
-		return buildExplained(terms, hits, raw, so.limit), nil
+		out := buildExplained(terms, hits, raw, 0)
+		db.sortResultsByAttribute(out, so.sortField, so.sortDesc)
+		return truncate(out, so.limit), nil
 	}
 
 	raw, err := db.engine.SearchFilteredWeighted(ctx, query, so.indexFilter(), so.weights)
@@ -426,7 +428,9 @@ func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) (r
 		raw = db.reranker.Rerank(ctx, query, raw, db.engine.GetText)
 	}
 
-	return buildResults(raw, so.limit), nil
+	out := buildResults(raw, 0)
+	db.sortResultsByAttribute(out, so.sortField, so.sortDesc)
+	return truncate(out, so.limit), nil
 }
 
 // estimatedBytesLocked returns the projected heap usage after adding
@@ -729,6 +733,37 @@ func sanitiseText(text string) string {
 }
 
 // --- Result construction ---
+
+// truncate slices results down to limit, or returns it unchanged when limit
+// is 0 (unlimited) or already satisfied.
+func truncate(results []Result, limit int) []Result {
+	if limit > 0 && len(results) > limit {
+		return results[:limit]
+	}
+	return results
+}
+
+// sortResultsByAttribute replaces results' order in place with the order
+// Engine.SortByAttribute gives for field/desc (a no-op when field is empty).
+// It round-trips through index.SearchResponse rather than duplicating
+// SortByAttribute's comparator here, since results (already deduplicated by
+// buildResults/buildExplained) and the round-tripped slice share the same
+// unique document IDs.
+func (db *DB) sortResultsByAttribute(results []Result, field string, desc bool) {
+	if field == "" || len(results) < 2 {
+		return
+	}
+	tmp := make([]index.SearchResponse, len(results))
+	byID := make(map[string]Result, len(results))
+	for i, r := range results {
+		tmp[i] = index.SearchResponse{ID: r.ID, Score: r.Score}
+		byID[r.ID] = r
+	}
+	db.engine.SortByAttribute(tmp, field, desc)
+	for i, t := range tmp {
+		results[i] = byID[t.ID]
+	}
+}
 
 func buildResults(raw []index.SearchResponse, limit int) []Result {
 	if len(raw) == 0 {

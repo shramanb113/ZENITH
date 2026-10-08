@@ -82,6 +82,14 @@ message SearchRequest{
     int32 offset = 3;
     // filter, when set, restricts the search to documents whose attrs match.
     FilterNode filter = 4;
+    // sort_field, when non-empty, replaces score ordering entirely: results
+    // are ordered by this attribute's value instead (stable, so documents
+    // tied on it — including every document missing it — keep their
+    // relative score order). A document missing the field, or holding an
+    // array value, always sorts after every document with a comparable
+    // scalar value, regardless of sort_desc.
+    string sort_field = 5;
+    bool sort_desc = 6;
 }
 
 message SearchResult {
