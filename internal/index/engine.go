@@ -443,16 +443,20 @@ func (e *Engine) AddBatch(ctx context.Context, docs []BatchDoc) error {
 // error with nothing applied to the in-memory index — unlike AddBatch, which
 // still applies documents before a later failure.
 func (e *Engine) AddTransaction(ctx context.Context, docs []BatchDoc, txn Txn) error {
+	// vecs is carried through to the apply loop below without re-embedding.
+	// Kept as a local slice rather than writing back into docs[i].Vector —
+	// AddBatch's own contract is non-mutating (it copies before sorting),
+	// and this must match: a caller is not expected to see its input slice
+	// altered after the call.
 	vecs := e.embedDocs(ctx, docs)
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	for i, d := range docs {
-		docVec := vecs[i]
-		if docVec == nil {
+		if vecs[i] == nil {
 			if v, err := e.embedder.Embed(ctx, d.Text); err == nil {
-				docVec = v
+				vecs[i] = v
 			} else {
 				slog.With("doc_id", d.ID).Warn("Embedding failed, indexing purely lexically", "error", err)
 			}
@@ -461,15 +465,14 @@ func (e *Engine) AddTransaction(ctx context.Context, docs []BatchDoc, txn Txn) e
 			_ = txn.Discard()
 			return fmt.Errorf("index: txn stage put %q: %w", d.ID, err)
 		}
-		docs[i].Vector = docVec // carried through to the apply loop below without re-embedding
 	}
 
 	if err := txn.Commit(ctx); err != nil {
 		return fmt.Errorf("index: txn commit: %w", err)
 	}
 
-	for _, d := range docs {
-		if err := e.applyInternal(ctx, d.ID, d.Text, d.Vector, d.Attrs); err != nil {
+	for i, d := range docs {
+		if err := e.applyInternal(ctx, d.ID, d.Text, vecs[i], d.Attrs); err != nil {
 			return fmt.Errorf("index: apply after committed txn: %w", err)
 		}
 	}

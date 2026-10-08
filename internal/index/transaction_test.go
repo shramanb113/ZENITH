@@ -134,3 +134,23 @@ func TestRemoveBatch_AllRemovedAfterCommit(t *testing.T) {
 		t.Fatal("doc1 still searchable after RemoveBatch committed")
 	}
 }
+
+// Review finding (final review, 2026-10-08): AddTransaction must not mutate
+// the caller's input slice — AddBatch's own contract is non-mutating (it
+// copies before sorting), and a future caller (e.g. a gRPC handler) that
+// reuses or inspects its docs slice after the call would be surprised to
+// find Vector populated with the computed embedding.
+func TestAddTransaction_DoesNotMutateCallerDocsSlice(t *testing.T) {
+	e := newTestEngineForTxn()
+	defer e.Close()
+	ctx := context.Background()
+	txn := newFakeTxn()
+
+	docs := []BatchDoc{{ID: "doc1", Text: "hello world"}}
+	if err := e.AddTransaction(ctx, docs, txn); err != nil {
+		t.Fatalf("AddTransaction: %v", err)
+	}
+	if docs[0].Vector != nil {
+		t.Fatalf("caller's docs[0].Vector = %v, want nil (unmutated) — AddTransaction must not write back into the caller's slice", docs[0].Vector)
+	}
+}
