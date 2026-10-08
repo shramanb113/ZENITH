@@ -410,14 +410,14 @@ func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) (r
 		if err != nil {
 			return nil, fmt.Errorf("zenith: %w", err)
 		}
-		raw, err := db.engine.SearchFiltered(ctx, query, so.indexFilter())
+		raw, err := db.engine.SearchFilteredWeighted(ctx, query, so.indexFilter(), so.weights)
 		if err != nil {
 			return nil, fmt.Errorf("zenith: %w", err)
 		}
 		return buildExplained(terms, hits, raw, so.limit), nil
 	}
 
-	raw, err := db.engine.SearchFiltered(ctx, query, so.indexFilter())
+	raw, err := db.engine.SearchFilteredWeighted(ctx, query, so.indexFilter(), so.weights)
 	if err != nil {
 		return nil, fmt.Errorf("zenith: %w", err)
 	}

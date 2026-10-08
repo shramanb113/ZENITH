@@ -494,6 +494,74 @@ func TestSearch_LimitSearchOption_OverridesDefault(t *testing.T) {
 	}
 }
 
+// fixedVecEmbedder returns a fixed vector per exact input text, keyed
+// verbatim — it gives a test full control over document and query vectors
+// without a real model, so a vector-weight override's effect on ranking is
+// exact and predictable rather than dependent on real semantic similarity.
+type fixedVecEmbedder struct {
+	vecs map[string][]float32
+	dims int
+}
+
+func (e *fixedVecEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
+	if v, ok := e.vecs[text]; ok {
+		return v, nil
+	}
+	return make([]float32, e.dims), nil
+}
+func (e *fixedVecEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i, t := range texts {
+		out[i], _ = e.Embed(ctx, t)
+	}
+	return out, nil
+}
+func (e *fixedVecEmbedder) Dimensions() int { return e.dims }
+
+// WithWeights(vector, ...) overrides only the RRF vector-list weight for a
+// single call: with the engine default (VectorWeight 2.0 > the fixed keyword
+// weight of 1.0), a vector-only match outranks a lexical-only match at the
+// same rank; overriding vector below 1.0 flips that for this call only.
+func TestSearch_WithWeightsOverridesVectorWeight(t *testing.T) {
+	emb := &fixedVecEmbedder{dims: 2, vecs: map[string][]float32{
+		"lexxx filler words":  {0, 1},
+		"vecyyy filler words": {1, 0},
+		"lexxx":               {1, 0},
+	}}
+	db, err := zenith.Open(":memory:", zenith.WithEmbedder(emb), zenith.WithoutWordVectors(), zenith.WithCacheSize(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mustAdd(t, db, "lexDoc", "lexxx filler words")
+	mustAdd(t, db, "vecDoc", "vecyyy filler words")
+
+	def, err := db.Search(bgCtx(), "lexxx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(def) == 0 || def[0].ID != "vecDoc" {
+		t.Fatalf("default weights: got %v, want vecDoc first", def)
+	}
+
+	ov, err := db.Search(bgCtx(), "lexxx", zenith.WithWeights(0.1, 0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ov) == 0 || ov[0].ID != "lexDoc" {
+		t.Fatalf("WithWeights(0.1, 0, 0): got %v, want lexDoc first", ov)
+	}
+
+	def2, err := db.Search(bgCtx(), "lexxx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(def2) == 0 || def2[0].ID != "vecDoc" {
+		t.Fatalf("default weights after override: got %v, want vecDoc first — the override must not leak into later searches", def2)
+	}
+}
+
 // Regression test: the RRF ranker's internal candidate cap used to be
 // hardcoded to 10 regardless of the caller's requested limit, so Limit(n)
 // for n > 10 silently still returned at most 10 results. See

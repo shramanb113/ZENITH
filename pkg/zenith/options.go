@@ -3,6 +3,8 @@ package zenith
 import (
 	"strings"
 	"time"
+
+	"github.com/shramanb113/ZENITH/internal/index"
 )
 
 type options struct {
@@ -40,6 +42,7 @@ type searchOptions struct {
 	limit   int
 	explain bool
 	filter  *Filter
+	weights index.Weights
 }
 
 // WithEmbedder replaces the default embedded ONNX embedder with a custom one.
@@ -156,6 +159,26 @@ func WithoutWordVectors() Option {
 // the document is not in the hybrid result list) and must not be used as a threshold.
 func Explain() SearchOption {
 	return func(o *searchOptions) { o.explain = true }
+}
+
+// WithWeights overrides the per-list ranking weights used to fuse this one
+// Search call's results, instead of the engine's configured defaults
+// (DefaultConfig: VectorWeight 2.0, PhoneticWeight 0.3, RRFConstant 20.0).
+// Pass 0 for any argument to keep that one at its engine default — the
+// override applies only to this call; concurrent and later searches are
+// unaffected.
+//
+//   - vector is the RRF weight of the semantic/vector result list, relative
+//     to a fixed keyword/lexical weight of 1.0.
+//   - phonetic is the per-match weight added for a Soundex phonetic hit
+//     during the lexical pass.
+//   - rrfConstant is the k in RRF's score(d) = Σ weight/(k + rank(d)); a
+//     smaller k rewards a top rank more steeply, a larger k flattens the
+//     advantage of ranking higher.
+func WithWeights(vector, phonetic, rrfConstant float64) SearchOption {
+	return func(o *searchOptions) {
+		o.weights = index.Weights{Vector: vector, Phonetic: phonetic, RRF: rrfConstant}
+	}
 }
 
 // WithMemoryLimit rejects new documents (Add/AddBatch return ErrIndexFull)
