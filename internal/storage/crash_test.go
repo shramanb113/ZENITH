@@ -87,3 +87,29 @@ func TestTxn_CrashBeforeCommitLeavesNothingAfterReopen(t *testing.T) {
 		t.Fatal("key 'b' visible after reopen despite the transaction never committing")
 	}
 }
+
+// TestEmbeddingCache_SurvivesReopen (storage_engine_test.go) already proves
+// PutEmbedding's entries persist across a clean Close+reopen, the same
+// durability pattern as TestEngine_SurvivesUncleanShutdown above. This test
+// instead proves the realistic "soft miss" case: a GetEmbedding lookup for a
+// key that was never written — the production stand-in for "a cache read
+// that would fail" — returns a clean miss and leaves the engine fully
+// usable, never panics or blocks the document journal. This package has no
+// byte-level fault injector (confirmed by reading this file — both existing
+// cases above use only Close+reopen, not injected I/O faults), so this is
+// the realistic case this harness can actually exercise.
+func TestEmbeddingCache_GetMissNeverBlocksDocumentJournal(t *testing.T) {
+	fs := vfs.NewMem()
+	e, err := openWithFS("/test-embcache-miss-db", fs)
+	if err != nil {
+		t.Fatalf("openWithFS: %v", err)
+	}
+	defer e.Close()
+
+	if _, ok := e.GetEmbedding([]byte("never-written-key")); ok {
+		t.Error("expected a miss")
+	}
+	if err := e.Put(context.Background(), []byte("doc1"), []byte("still works")); err != nil {
+		t.Errorf("document journal Put after an embedding-cache miss: %v", err)
+	}
+}
