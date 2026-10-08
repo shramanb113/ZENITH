@@ -3,9 +3,12 @@ package storage
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/cockroachdb/pebble"
@@ -31,7 +34,8 @@ const (
 // owns its own WAL, MemTable, SSTables, compaction, and crash recovery; none
 // of that is reimplemented here.
 type Engine struct {
-	db *pebble.DB
+	db    *pebble.DB
+	embDB *pebble.DB // persistent embedding cache — separate keyspace, see GetEmbedding/PutEmbedding
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -75,7 +79,21 @@ func openWithFS(dir string, fs vfs.FS) (*Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("storage: pebble open: %w", err)
 	}
-	return &Engine{db: db, closed: make(chan struct{})}, nil
+	// A second, separate Pebble instance for the embedding cache — not a
+	// shared keyspace with the document journal above. Document-journal
+	// keys are raw caller-supplied document IDs with no reserved prefix, so
+	// sharing one keyspace would require either migrating every existing
+	// journal entry to a prefixed key, or trusting that no caller-supplied
+	// ID ever collides with a reserved cache-key prefix, which cannot be
+	// guaranteed since IDs are arbitrary caller bytes. A second instance
+	// avoids both risks entirely.
+	embDir := filepath.Join(dir, "embcache")
+	embDB, err := pebble.Open(embDir, &pebble.Options{FS: fs})
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("storage: pebble open embedding cache: %w", err)
+	}
+	return &Engine{db: db, embDB: embDB, closed: make(chan struct{})}, nil
 }
 
 // Close flushes and closes the underlying Pebble store.
@@ -83,7 +101,12 @@ func (e *Engine) Close() error {
 	var closeErr error
 	e.closeOnce.Do(func() {
 		close(e.closed)
-		closeErr = e.db.Close()
+		if err := e.db.Close(); err != nil {
+			closeErr = err
+		}
+		if err := e.embDB.Close(); err != nil && closeErr == nil {
+			closeErr = err
+		}
 	})
 	return closeErr
 }
@@ -283,4 +306,43 @@ func (t *Txn) Commit(ctx context.Context) error {
 // Discard releases the transaction's resources without applying anything.
 func (t *Txn) Discard() error {
 	return t.batch.Close()
+}
+
+// GetEmbedding returns the cached vector for key, if present. A miss (never
+// written, I/O error, or corrupt entry) returns (nil, false) — this cache
+// must never turn a soft failure into a hard one for the embedding path it
+// sits beside.
+func (e *Engine) GetEmbedding(key []byte) ([]float32, bool) {
+	raw, closer, err := e.embDB.Get(key)
+	if err != nil {
+		return nil, false
+	}
+	defer closer.Close()
+	if len(raw) == 0 || len(raw)%4 != 0 {
+		return nil, false
+	}
+	vec := make([]float32, len(raw)/4)
+	for i := range vec {
+		vec[i] = math.Float32frombits(binary.LittleEndian.Uint32(raw[i*4 : i*4+4]))
+	}
+	return vec, true
+}
+
+// PutEmbedding stores vec under key. Uses pebble.NoSync deliberately, not
+// pebble.Sync: cache correctness never depends on durability — a lost entry
+// after a crash costs one re-embed, not data loss — and an fsync per cache
+// write would undercut the entire point of this cache. A write error is
+// never fatal to the caller; the caller logs and moves on.
+func (e *Engine) PutEmbedding(key []byte, vec []float32) error {
+	if e.isClosed() {
+		return errors.New("storage: engine is closed")
+	}
+	raw := make([]byte, len(vec)*4)
+	for i, f := range vec {
+		binary.LittleEndian.PutUint32(raw[i*4:i*4+4], math.Float32bits(f))
+	}
+	if err := e.embDB.Set(key, raw, pebble.NoSync); err != nil {
+		return fmt.Errorf("storage: embedding cache set: %w", err)
+	}
+	return nil
 }

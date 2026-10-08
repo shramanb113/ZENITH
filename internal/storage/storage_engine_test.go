@@ -237,3 +237,91 @@ func TestEngine_DurableAcrossReopen(t *testing.T) {
 		t.Fatalf("after reopen, Get = (%q, %v), want (%q, true)", val, ok, "hello")
 	}
 }
+
+func TestEmbeddingCache_PutThenGet(t *testing.T) {
+	e := openTestEngine(t)
+
+	key := []byte("model-a\x00Dabc123")
+	vec := []float32{0.5, -0.25, 1.0}
+	if err := e.PutEmbedding(key, vec); err != nil {
+		t.Fatalf("PutEmbedding: %v", err)
+	}
+	got, ok := e.GetEmbedding(key)
+	if !ok {
+		t.Fatal("expected a hit after Put")
+	}
+	if len(got) != len(vec) {
+		t.Fatalf("got len %d, want %d", len(got), len(vec))
+	}
+	for i := range vec {
+		if got[i] != vec[i] {
+			t.Errorf("got[%d] = %v, want %v", i, got[i], vec[i])
+		}
+	}
+}
+
+func TestEmbeddingCache_MissForUnknownKey(t *testing.T) {
+	e := openTestEngine(t)
+
+	if _, ok := e.GetEmbedding([]byte("never-written")); ok {
+		t.Error("expected a miss for a key never written")
+	}
+}
+
+func TestEmbeddingCache_Overwrite(t *testing.T) {
+	e := openTestEngine(t)
+
+	key := []byte("k")
+	_ = e.PutEmbedding(key, []float32{1, 2, 3})
+	_ = e.PutEmbedding(key, []float32{9, 9})
+	got, ok := e.GetEmbedding(key)
+	if !ok || len(got) != 2 || got[0] != 9 {
+		t.Errorf("got %v, ok=%v, want [9 9], true", got, ok)
+	}
+}
+
+func TestEmbeddingCache_SeparateFromDocumentJournal(t *testing.T) {
+	// The embedding cache and the document journal must not share a
+	// keyspace: writing a cache entry must never make Replay see it as a
+	// journalled document.
+	e := openTestEngine(t)
+
+	if err := e.PutEmbedding([]byte("same-bytes-as-a-docid"), []float32{1, 2}); err != nil {
+		t.Fatalf("PutEmbedding: %v", err)
+	}
+	seen := false
+	if err := e.Replay(func(key, value []byte, isDelete bool) error {
+		seen = true
+		return nil
+	}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if seen {
+		t.Error("Replay must never see embedding-cache entries")
+	}
+}
+
+func TestEmbeddingCache_SurvivesReopen(t *testing.T) {
+	dir := t.TempDir()
+	e1, err := Open(EngineConfig{Dir: dir})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	key := []byte("model-a\x00Dabc123")
+	if err := e1.PutEmbedding(key, []float32{1, 2, 3}); err != nil {
+		t.Fatalf("PutEmbedding: %v", err)
+	}
+	if err := e1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	e2, err := Open(EngineConfig{Dir: dir})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer e2.Close()
+	got, ok := e2.GetEmbedding(key)
+	if !ok || len(got) != 3 || got[0] != 1 {
+		t.Fatalf("after reopen, GetEmbedding = (%v, %v), want ([1 2 3], true)", got, ok)
+	}
+}
