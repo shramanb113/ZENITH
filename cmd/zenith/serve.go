@@ -20,6 +20,7 @@ import (
 	"github.com/shramanb113/ZENITH/internal/collections"
 	"github.com/shramanb113/ZENITH/internal/embedding"
 	"github.com/shramanb113/ZENITH/internal/localembedder"
+	"github.com/shramanb113/ZENITH/internal/metrics"
 	"github.com/shramanb113/ZENITH/internal/server"
 	"github.com/shramanb113/ZENITH/internal/sidecar"
 	"github.com/shramanb113/ZENITH/pkg/zenith"
@@ -41,6 +42,8 @@ var serveFlags struct {
 	collectionMaxDocs   int
 	collectionMaxOpen   int
 	collectionIdleClose time.Duration
+
+	metricsAddr string
 }
 
 var serveCmd = &cobra.Command{
@@ -86,9 +89,17 @@ where every acknowledged write survives a kill, use the Go library
 		}
 		_ = alog
 
+		metrics.BuildInfo.WithLabelValues(version, cliFlags.model).Set(1)
+		metrics.RegisterIndexDocuments(func() float64 { return float64(engine.Count()) })
+		metricsSrv, err := startMetrics(serveFlags.metricsAddr, serveFlags.key, serveFlags.allowUnauthed)
+		if err != nil {
+			return err
+		}
+
+		// Metrics first, so a call KeyAuth rejects is still counted.
 		grpcServer := grpc.NewServer(
-			grpc.ChainUnaryInterceptor(server.KeyAuthUnary(serveFlags.key)),
-			grpc.ChainStreamInterceptor(server.KeyAuthStream(serveFlags.key)),
+			grpc.ChainUnaryInterceptor(metrics.UnaryServerInterceptor(), server.KeyAuthUnary(serveFlags.key)),
+			grpc.ChainStreamInterceptor(metrics.StreamServerInterceptor(), server.KeyAuthStream(serveFlags.key)),
 		)
 		zenithproto.RegisterSearchServiceServer(grpcServer, &server.ZenithServer{Engine: engine})
 
@@ -108,6 +119,9 @@ where every acknowledged write survives a kill, use the Go library
 		<-stop
 		fmt.Printf("\n  %s  Shutting down...\n", dim("·"))
 		grpcServer.GracefulStop()
+		if metricsSrv != nil {
+			_ = metricsSrv.Close()
+		}
 		teardown()
 		return nil
 	},
@@ -127,6 +141,31 @@ func init() {
 	serveCmd.Flags().IntVar(&serveFlags.collectionMaxDocs, "collection-max-docs", 1_000_000, "Default per-collection document quota")
 	serveCmd.Flags().IntVar(&serveFlags.collectionMaxOpen, "collection-max-open", 64, "Maximum number of collections open (mapped into memory) at once")
 	serveCmd.Flags().DurationVar(&serveFlags.collectionIdleClose, "collection-idle-close", 10*time.Minute, "Idle time before an open collection is closed")
+	serveCmd.Flags().StringVar(&serveFlags.metricsAddr, "metrics-addr", "", "Prometheus /metrics listen address (e.g. 127.0.0.1:9464); empty disables it")
+}
+
+// startMetrics starts the Prometheus /metrics listener when addr is
+// non-empty, returning (nil, nil) when it's disabled. The listener has no
+// auth of its own — collection ids can appear in its labels — so a
+// non-loopback address needs the same --key/--allow-unauthenticated
+// exposure check as the main server.
+func startMetrics(addr, key string, allowUnauthed bool) (*http.Server, error) {
+	if addr == "" {
+		return nil, nil
+	}
+	if err := server.CheckExposure(addr, key, allowUnauthed); err != nil {
+		return nil, fmt.Errorf("metrics-addr: %w", err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", metrics.Handler())
+	hs := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server error", "error", err)
+		}
+	}()
+	slog.Info("metrics ready", "addr", addr)
+	return hs, nil
 }
 
 // runHTTP serves the HTTP/JSON API: ephemeral per-request namespaces (/v1/ns/*, in-memory, for
@@ -174,6 +213,12 @@ func runHTTP(addr string) error {
 		}
 	}
 
+	metrics.BuildInfo.WithLabelValues(version, model).Set(1)
+	metricsSrv, err := startMetrics(serveFlags.metricsAddr, serveFlags.key, serveFlags.allowUnauthed)
+	if err != nil {
+		return err
+	}
+
 	srv := sidecar.New(sidecar.Config{Key: serveFlags.key, Version: version, Model: model, Embedder: emb, Synonyms: synHash, Collections: mgr})
 	// A collection upsert embeds on the request path, so both timeouts are far
 	// more generous than the ephemeral-only defaults were.
@@ -193,6 +238,9 @@ func runHTTP(addr string) error {
 		shut, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		_ = hs.Shutdown(shut)
+		if metricsSrv != nil {
+			_ = metricsSrv.Close()
+		}
 	}()
 	printHeader("serve", addr)
 	fmt.Printf("  %s  HTTP sidecar on %s (model %s, key %v)\n", green("✓"), bold(addr), model, serveFlags.key != "")
@@ -227,10 +275,12 @@ func sidecarEmbedder(kind, model string) (zenith.Embedder, string, error) {
 			slog.Warn("ONNX embedder unavailable; sidecar runs BM25 + fuzzy only", "error", err)
 			return nil, "none", nil
 		}
-		if cached, err := embedding.NewCachingEmbedder(le, 10_000); err == nil {
+		// Instrument inside the cache, not outside it, so a cache hit is
+		// never counted as inference time.
+		if cached, err := embedding.NewCachingEmbedder(metrics.InstrumentEmbedder(le), 10_000); err == nil {
 			return cached, le.Spec().ID, nil
 		}
-		return le, le.Spec().ID, nil
+		return metrics.InstrumentEmbedder(le), le.Spec().ID, nil
 	default:
 		slog.Warn("embedder not supported in HTTP mode; using BM25 + fuzzy only", "embedder", kind)
 		return nil, "none", nil

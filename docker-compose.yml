@@ -10,7 +10,9 @@ services:
     ports:
       - "127.0.0.1:8080:8080"   # gRPC — the persistent engine (cmd/client, CLI)
     # 0.0.0.0 inside the container only; the host publishes on 127.0.0.1 (see ports: above).
-    command: ["serve", "--db", "/home/zenith/data/zenith.db", "--bind", "0.0.0.0", "--allow-unauthenticated"]
+    # --metrics-addr's port (9464) is not published to the host; it's reachable only on
+    # the compose network, scraped by the victoriametrics service below (profile "metrics").
+    command: ["serve", "--db", "/home/zenith/data/zenith.db", "--bind", "0.0.0.0", "--allow-unauthenticated", "--metrics-addr", "0.0.0.0:9464"]
 
   http:
     image: zenith-demo:latest
@@ -22,8 +24,19 @@ services:
       - "127.0.0.1:7700:7700"     # HTTP API: ephemeral namespaces + persistent collections
     environment:
       - ZENITH_KEY=${ZENITH_KEY:-}
-    command: ["serve", "--http", ":7700", "--bind", "0.0.0.0", "--allow-unauthenticated"]
+    command: ["serve", "--http", ":7700", "--bind", "0.0.0.0", "--allow-unauthenticated", "--metrics-addr", "0.0.0.0:9464"]
     stop_grace_period: 60s        # lets CloseAll checkpoint every open collection
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.102.1
+    profiles: ["metrics"]
+    command: ["-promscrape.config=/etc/vm/scrape.yml", "-retentionPeriod=30d"]
+    volumes:
+      - ./deploy/victoriametrics/scrape.yml:/etc/vm/scrape.yml:ro
+      - vm-data:/victoria-metrics-data
+    ports:
+      - "127.0.0.1:8428:8428"     # VictoriaMetrics UI/API: http://127.0.0.1:8428/vmui
 
 volumes:
   zenith-home:
+  vm-data:

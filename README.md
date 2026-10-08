@@ -445,8 +445,8 @@ zenith search <query>          ▼
 | Image indexing (filename + OCR) | Active | OCR opt-in: build with `-tags ocr` + `CGO_ENABLED=1` against libtesseract; falls back to filename-only otherwise |
 | In-memory mode (`:memory:`) | Active | Library — zero-cleanup testing |
 | Persistent multi-tenant collections (HTTP) | Active | per-collection keys + quotas; see "HTTP server" |
+| Prometheus metrics | Active | `--metrics-addr`; see "Observability" |
 | OpenAI embedder | Planned | |
-| Prometheus metrics | Planned | |
 | OpenTelemetry traces | Planned | |
 
 ---
@@ -606,6 +606,51 @@ configured defaults or affect any other concurrent search:
   results, _ := db.Search(ctx, "release notes", zenith.SortBy("year", true)) // newest first
   ```
 
+## Observability
+
+`zenith serve --metrics-addr 127.0.0.1:9464` runs a separate `GET /metrics` listener in
+[Prometheus exposition format](https://github.com/prometheus/client_golang), alongside either
+`--http` or the default gRPC mode. It is disabled (no flag, no listener) by default. The
+listener has no auth of its own — collection ids appear in its labels — so a non-loopback
+address needs the same `--key` / `--allow-unauthenticated` rule as the main server. Any
+Prometheus-compatible scraper works; **[VictoriaMetrics](https://victoriametrics.com/)** (Apache-2.0,
+free to self-host; only its separate Enterprise edition is paid) is the recommended backend —
+bring it up with `docker compose --profile http --profile metrics up -d` (see
+`deploy/victoriametrics/scrape.yml`), then query `zenith_collection_queries_total` at
+`http://127.0.0.1:8428/vmui`. OpenTelemetry tracing is a separate, heavier concern, still
+planned (ROADMAP P2-8), not required for metrics.
+
+| Name | Type | Labels | Where |
+|---|---|---|---|
+| `zenith_build_info` | gauge (=1) | `version`, `model` | startup |
+| `zenith_http_requests_total` / `..._request_duration_seconds` | counter / histogram | `route`, `code` | every registered HTTP route |
+| `zenith_grpc_requests_total` / `..._request_duration_seconds` | counter / histogram | `method`, `code` | gRPC unary + stream interceptor |
+| `zenith_collection_queries_total` / `..._query_duration_seconds` | counter / histogram | `collection`[, `outcome`] | `Manager.Search`, per query |
+| `zenith_collection_documents` | gauge | `collection` | after create/upsert/delete and on load |
+| `zenith_collection_docs_upserted_total` / `..._deleted_total` | counter | `collection` | Upsert / DeleteDoc |
+| `zenith_collection_disk_bytes` / `..._wal_bytes` | gauge | `collection` | every `Sweep` (≈1/min), a live directory walk |
+| `zenith_collections` | gauge | `state` (`open`/`closed`) | after any open, close, create or delete |
+| `zenith_collection_lifecycle_total` | counter | `event` (`created`,`deleted`,`opened`,`closed_idle`,`closed_lru`,`closed_shutdown`) | Manager |
+| `zenith_namespace_queries_total` / `..._query_duration_seconds` | counter / histogram | none | ephemeral search, per query |
+| `zenith_namespaces_active` / `..._evictions_total` | gauge / counter | none / `reason` | ephemeral namespace lifecycle |
+| `zenith_embedding_duration_seconds` / `..._texts_total` | histogram / counter | `op` (`document`,`batch`,`query`) | `InstrumentEmbedder`, HTTP/collections mode only |
+| `zenith_errors_total` | counter | `surface` (`http`/`grpc`/`embedder`), `code` | error paths on every surface |
+| `zenith_index_documents` | gauge | none | **gRPC `--db` mode only** |
+
+Plus the standard Go runtime and process collectors (`go_goroutines`, `process_resident_memory_bytes`, ...).
+Latency histograms use the same exponential buckets everywhere (1 ms to ~8.2 s).
+
+**Known gaps, stated plainly:**
+- **WAL/checkpoint activity is not directly observable** — `pkg/zenith` exposes no checkpoint
+  counter. `zenith_collection_wal_bytes`'s sawtooth (drops at each checkpoint or close) is the
+  proxy.
+- **Embedding latency in gRPC `--db` mode is not exported** — that embedder is built inside the
+  raw-engine startup path, which has no metrics hook. HTTP/collections mode (`InstrumentEmbedder`,
+  wrapped inside the response cache so a cache hit is never counted as inference) is covered.
+- **Cardinality**: the `collection` label is bounded by `--max-collections` (default 1000); a
+  deleted collection's series are removed immediately (`Manager.Delete` calls
+  `metrics.ForgetCollection`), not left to linger.
+
 ---
 
 ## Project Structure
@@ -678,8 +723,8 @@ WAL with CRC framing, MemTable skip-list, SSTables, group committer, leveled com
 - [x] v1 → v2 auto-migration on upgrade
 - [ ] Benchmark suite (p50/p95/p99 vs Meilisearch/Typesense)
 
-### Phase 6 — Production Observability (planned)
-Prometheus metrics, OpenTelemetry traces, `make dev-stack`.
+### Phase 6 — Production Observability
+Prometheus metrics (done, `--metrics-addr`); OpenTelemetry traces (planned, ROADMAP P2-8); `make dev-stack`.
 
 ---
 

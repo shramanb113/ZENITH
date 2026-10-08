@@ -25,6 +25,6 @@ COPY --from=build /out/zenith /usr/local/bin/zenith
 COPY --from=build /out/zenith-client /usr/local/bin/zenith-client
 USER zenith
 ENV HOME=/home/zenith
-EXPOSE 7700 8080
+EXPOSE 7700 8080 9464
 ENTRYPOINT ["zenith"]
 CMD ["serve", "--db", "/home/zenith/data/zenith.db", "--bind", "0.0.0.0"]

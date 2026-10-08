@@ -1,0 +1,9 @@
+# VictoriaMetrics scrape config for ZENITH's Prometheus-format /metrics
+# endpoint (--metrics-addr). Uses standard Prometheus scrape_configs syntax,
+# so this same file works unmodified with Prometheus itself. See the
+# docker-compose.yml "metrics" profile and README.md "Observability".
+scrape_configs:
+  - job_name: zenith
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["zenith:9464", "http:9464"]

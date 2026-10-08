@@ -19,16 +19,16 @@ const adminBodyCap = 64 << 10
 // registerCollections attaches the persistent-collection routes to mux.
 // Called from Register only when Config.Collections is set.
 func (s *Server) registerCollections(mux *http.ServeMux) {
-	mux.Handle("POST /v1/collections", s.adminGuard(s.createCollection))
-	mux.Handle("GET /v1/collections", s.adminGuard(s.listCollections))
-	mux.Handle("DELETE /v1/collections/{id}", s.adminGuard(s.deleteCollection))
-	mux.Handle("POST /v1/collections/{id}/rotate-key", s.adminGuard(s.rotateKey))
+	route(mux, "POST /v1/collections", s.adminGuard(s.createCollection))
+	route(mux, "GET /v1/collections", s.adminGuard(s.listCollections))
+	route(mux, "DELETE /v1/collections/{id}", s.adminGuard(s.deleteCollection))
+	route(mux, "POST /v1/collections/{id}/rotate-key", s.adminGuard(s.rotateKey))
 
-	mux.Handle("PUT /v1/collections/{id}/docs", s.colGuard(s.putCollectionDocs))
-	mux.Handle("GET /v1/collections/{id}/docs/{doc...}", s.colGuard(s.getCollectionDoc))
-	mux.Handle("DELETE /v1/collections/{id}/docs/{doc...}", s.colGuard(s.deleteCollectionDoc))
-	mux.Handle("POST /v1/collections/{id}/search", s.colGuard(s.searchCollection))
-	mux.Handle("GET /v1/collections/{id}/stats", s.colGuard(s.statCollection))
+	route(mux, "PUT /v1/collections/{id}/docs", s.colGuard(s.putCollectionDocs))
+	route(mux, "GET /v1/collections/{id}/docs/{doc...}", s.colGuard(s.getCollectionDoc))
+	route(mux, "DELETE /v1/collections/{id}/docs/{doc...}", s.colGuard(s.deleteCollectionDoc))
+	route(mux, "POST /v1/collections/{id}/search", s.colGuard(s.searchCollection))
+	route(mux, "GET /v1/collections/{id}/stats", s.colGuard(s.statCollection))
 }
 
 type colErrBody struct {

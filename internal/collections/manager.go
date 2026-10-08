@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/shramanb113/ZENITH/internal/embedding"
+	"github.com/shramanb113/ZENITH/internal/metrics"
 	"github.com/shramanb113/ZENITH/pkg/zenith"
 )
 
@@ -203,8 +204,21 @@ func (m *Manager) scan() error {
 		}
 
 		m.entries[name] = &entry{id: name, dir: dir, meta: meta}
+		metrics.CollectionDocuments.WithLabelValues(name).Set(float64(meta.DocCount))
 	}
+	m.refreshCollectionsGauge()
 	return nil
+}
+
+// refreshCollectionsGauge recomputes zenith_collections{state} from the
+// manager's actual entry/open-LRU state, rather than incrementing/
+// decrementing it at every call site (which would drift silently if any
+// error path forgot to undo an increment). Called after every state change
+// below, plus once per Sweep.
+func (m *Manager) refreshCollectionsGauge() {
+	total, open := m.Counts()
+	metrics.Collections.WithLabelValues("open").Set(float64(open))
+	metrics.Collections.WithLabelValues("closed").Set(float64(total - open))
 }
 
 // openOpts returns the zenith.Open options shared by every collection.
@@ -262,6 +276,8 @@ func (m *Manager) acquire(id string) (*entry, error) {
 			e.elem = m.openLRU.PushFront(e)
 			e.lastUsed = m.cfg.Now()
 			m.mu.Unlock()
+			metrics.CollectionLifecycleTotal.WithLabelValues("opened").Inc()
+			m.refreshCollectionsGauge()
 		}
 		e.life.Unlock()
 		go m.enforceMaxOpen()
@@ -380,6 +396,11 @@ func (m *Manager) Create(id string, o CreateOptions) (Info, string, error) {
 	m.mu.Unlock()
 	go m.enforceMaxOpen()
 
+	metrics.CollectionDocuments.WithLabelValues(id).Set(0)
+	metrics.CollectionLifecycleTotal.WithLabelValues("created").Inc()
+	metrics.CollectionLifecycleTotal.WithLabelValues("opened").Inc()
+	m.refreshCollectionsGauge()
+
 	info := Info{
 		ID: id, Embedder: meta.Embedder, CreatedAt: now, LastUsed: now,
 		DocCount: 0, DocCountExact: true, MaxDocs: maxDocs, MaxBodyBytes: maxBody, Open: true,
@@ -424,6 +445,10 @@ func (m *Manager) Delete(id string) error {
 		e.elem = nil
 	}
 	m.mu.Unlock()
+
+	metrics.CollectionLifecycleTotal.WithLabelValues("deleted").Inc()
+	m.refreshCollectionsGauge()
+	metrics.ForgetCollection(id)
 	return nil
 }
 
@@ -616,6 +641,9 @@ func (m *Manager) Upsert(ctx context.Context, id string, docs map[string]string,
 		return UpsertResult{}, err
 	}
 
+	metrics.CollectionDocuments.WithLabelValues(id).Set(float64(e.meta.DocCount))
+	metrics.CollectionDocsUpsertedTotal.WithLabelValues(id).Add(float64(len(docs)))
+
 	return UpsertResult{Upserted: len(docs), New: newIDs, DocCount: e.meta.DocCount}, nil
 }
 
@@ -637,7 +665,12 @@ func (m *Manager) DeleteDoc(ctx context.Context, id, docID string) error {
 		return err
 	}
 	e.meta.DocCount--
-	return writeMeta(e.dir, e.meta)
+	if err := writeMeta(e.dir, e.meta); err != nil {
+		return err
+	}
+	metrics.CollectionDocuments.WithLabelValues(id).Set(float64(e.meta.DocCount))
+	metrics.CollectionDocsDeletedTotal.WithLabelValues(id).Inc()
+	return nil
 }
 
 // GetDoc returns the original text of docID in collection id.
@@ -658,26 +691,37 @@ func (m *Manager) GetDoc(ctx context.Context, id, docID string) (string, error) 
 	return text, nil
 }
 
-// Search runs a query against collection id.
+// Search runs a query against collection id. Latency is measured against
+// the real wall clock, not cfg.Now (which exists so tests can fast-forward
+// idle/LRU timing, not to control what a real request actually took).
 func (m *Manager) Search(ctx context.Context, id, query string, opts ...zenith.SearchOption) ([]zenith.Result, error) {
+	start := time.Now()
 	var res []zenith.Result
 	err := m.With(ctx, id, func(db *zenith.DB) error {
 		var err error
 		res, err = db.Search(ctx, query, opts...)
 		return err
 	})
+	metrics.CollectionQueryDuration.WithLabelValues(id).Observe(time.Since(start).Seconds())
+	outcome := "ok"
+	if err != nil {
+		outcome = "error"
+	}
+	metrics.CollectionQueriesTotal.WithLabelValues(id, outcome).Inc()
 	return res, err
 }
 
-// evict closes every entry selector returns. selector runs under m.mu and
-// must only read openLRU/lastUsed; the Close itself runs outside that lock
-// since it checkpoints to disk. An entry currently in use (life.TryLock
-// fails) is skipped and retried on the next sweep.
-func (m *Manager) evict(selector func() []*entry) {
+// evict closes every entry selector returns, recording reason
+// ("closed_idle" or "closed_lru") against each one actually closed. selector
+// runs under m.mu and must only read openLRU/lastUsed; the Close itself runs
+// outside that lock since it checkpoints to disk. An entry currently in use
+// (life.TryLock fails) is skipped and retried on the next sweep.
+func (m *Manager) evict(reason string, selector func() []*entry) {
 	m.mu.Lock()
 	victims := selector()
 	m.mu.Unlock()
 
+	closed := 0
 	for _, e := range victims {
 		if !e.life.TryLock() {
 			continue
@@ -687,6 +731,7 @@ func (m *Manager) evict(selector func() []*entry) {
 				m.cfg.Log.Error("collections: close failed", "id", e.id, "error", err)
 			}
 			e.db = nil
+			closed++
 		}
 		e.life.Unlock()
 
@@ -697,11 +742,17 @@ func (m *Manager) evict(selector func() []*entry) {
 		}
 		m.mu.Unlock()
 	}
+	if closed > 0 {
+		metrics.CollectionLifecycleTotal.WithLabelValues(reason).Add(float64(closed))
+		m.refreshCollectionsGauge()
+	}
 }
 
-// Sweep closes every open collection idle for longer than cfg.IdleClose.
+// Sweep closes every open collection idle for longer than cfg.IdleClose, and
+// refreshes the per-collection disk/WAL size gauges (a live directory walk,
+// same as Stat, run here instead of on every request).
 func (m *Manager) Sweep() {
-	m.evict(func() []*entry {
+	m.evict("closed_idle", func() []*entry {
 		cutoff := m.cfg.Now().Add(-m.cfg.IdleClose)
 		var victims []*entry
 		for el := m.openLRU.Back(); el != nil; el = el.Prev() {
@@ -712,12 +763,24 @@ func (m *Manager) Sweep() {
 		}
 		return victims
 	})
+
+	m.mu.Lock()
+	type idDir struct{ id, dir string }
+	snapshot := make([]idDir, 0, len(m.entries))
+	for id, e := range m.entries {
+		snapshot = append(snapshot, idDir{id, e.dir})
+	}
+	m.mu.Unlock()
+	for _, s := range snapshot {
+		metrics.CollectionDiskBytes.WithLabelValues(s.id).Set(float64(dirSize(s.dir)))
+		metrics.CollectionWALBytes.WithLabelValues(s.id).Set(float64(walSize(s.dir)))
+	}
 }
 
 // enforceMaxOpen closes the least-recently-used open collections until the
 // open count is back at or below cfg.MaxOpen.
 func (m *Manager) enforceMaxOpen() {
-	m.evict(func() []*entry {
+	m.evict("closed_lru", func() []*entry {
 		over := m.openLRU.Len() - m.cfg.MaxOpen
 		if over <= 0 {
 			return nil
@@ -767,6 +830,7 @@ func (m *Manager) CloseAll() error {
 	m.mu.Unlock()
 
 	var errs []error
+	closed := 0
 	for _, e := range ents {
 		e.life.Lock()
 		if e.db != nil {
@@ -774,9 +838,15 @@ func (m *Manager) CloseAll() error {
 				errs = append(errs, fmt.Errorf("collections: close %s: %w", e.id, err))
 			}
 			e.db = nil
+			closed++
 		}
 		e.life.Unlock()
 	}
+	if closed > 0 {
+		metrics.CollectionLifecycleTotal.WithLabelValues("closed_shutdown").Add(float64(closed))
+	}
+	metrics.Collections.WithLabelValues("open").Set(0)
+	metrics.Collections.WithLabelValues("closed").Set(float64(len(ents)))
 
 	registeredRoots.Delete(m.rootKey)
 	return errors.Join(errs...)

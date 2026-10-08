@@ -18,6 +18,7 @@ import (
 
 	"github.com/shramanb113/ZENITH/internal/analysis"
 	"github.com/shramanb113/ZENITH/internal/collections"
+	"github.com/shramanb113/ZENITH/internal/metrics"
 	"github.com/shramanb113/ZENITH/pkg/zenith"
 )
 
@@ -108,13 +109,20 @@ func (s *Server) Handler() http.Handler {
 // /v1/ns/* namespace routes, and, when Config.Collections is set, the
 // persistent /v1/collections/* routes (collections_http.go).
 func (s *Server) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /healthz", s.health)
-	mux.Handle("PUT /v1/ns/{ns}/docs", s.guard(s.putDocs))
-	mux.Handle("POST /v1/ns/{ns}/search", s.guard(s.search))
-	mux.Handle("DELETE /v1/ns/{ns}", s.guard(s.deleteNS))
+	route(mux, "GET /healthz", http.HandlerFunc(s.health))
+	route(mux, "PUT /v1/ns/{ns}/docs", s.guard(s.putDocs))
+	route(mux, "POST /v1/ns/{ns}/search", s.guard(s.search))
+	route(mux, "DELETE /v1/ns/{ns}", s.guard(s.deleteNS))
 	if s.cfg.Collections != nil {
 		s.registerCollections(mux)
 	}
+}
+
+// route registers h at pattern on mux, wrapped with metrics.Route so every
+// HTTP route (ephemeral and, from collections_http.go, persistent) is
+// counted and timed under the exact pattern string it was registered with.
+func route(mux *http.ServeMux, pattern string, h http.Handler) {
+	mux.Handle(pattern, metrics.Route(pattern, h))
 }
 
 // Run sweeps expired namespaces every interval until ctx is done.
@@ -138,7 +146,7 @@ func (s *Server) Sweep() {
 	cutoff := s.cfg.Now().Add(-s.cfg.TTL)
 	for name, n := range s.ns {
 		if n.used.Before(cutoff) {
-			s.dropLocked(name)
+			s.dropLocked(name, "ttl")
 		}
 	}
 }
@@ -148,11 +156,11 @@ func (s *Server) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for name := range s.ns {
-		s.dropLocked(name)
+		s.dropLocked(name, "shutdown")
 	}
 }
 
-func (s *Server) dropLocked(name string) {
+func (s *Server) dropLocked(name, reason string) {
 	n, ok := s.ns[name]
 	if !ok {
 		return
@@ -160,6 +168,8 @@ func (s *Server) dropLocked(name string) {
 	delete(s.ns, name)
 	s.lru.Remove(n.elem)
 	_ = n.db.Close()
+	metrics.NamespacesActive.Dec()
+	metrics.NamespaceEvictionsTotal.WithLabelValues(reason).Inc()
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -280,15 +290,16 @@ func (s *Server) putDocs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	s.dropLocked(name)
+	s.dropLocked(name, "replaced")
 	for len(s.ns) >= s.cfg.MaxNS {
 		oldest := s.lru.Back()
-		s.dropLocked(oldest.Value.(string))
+		s.dropLocked(oldest.Value.(string), "lru")
 	}
 	n := &namespace{db: db, ndocs: len(docs), spans: spans, used: s.cfg.Now()}
 	n.elem = s.lru.PushFront(name)
 	s.ns[name] = n
 	s.mu.Unlock()
+	metrics.NamespacesActive.Inc()
 
 	s.cfg.Log.Info("namespace indexed", "ns", name, "docs", len(docs), "ms", time.Since(start).Milliseconds())
 	writeJSON(w, http.StatusOK, map[string]int{"indexed": len(docs)})
@@ -380,7 +391,10 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	out := make(map[string]queryOut, len(req.Queries))
 	spansFor := func(docID string) map[string]span { return n.spans[docID] }
 	for _, q := range req.Queries {
+		qStart := time.Now()
 		res, err := n.db.Search(r.Context(), q.Text, append([]zenith.SearchOption{zenith.Explain(), zenith.Limit(limit)}, searchOpts...)...)
+		metrics.NamespaceQueryDuration.Observe(time.Since(qStart).Seconds())
+		metrics.NamespaceQueriesTotal.Inc()
 		if err != nil {
 			if errors.Is(err, zenith.ErrClosed) {
 				writeErr(w, http.StatusNotFound, "namespace closed")
@@ -429,7 +443,7 @@ func buildQueryOut(res []zenith.Result, spansFor func(docID string) map[string]s
 
 func (s *Server) deleteNS(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	s.dropLocked(r.PathValue("ns"))
+	s.dropLocked(r.PathValue("ns"), "deleted")
 	s.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
