@@ -48,7 +48,7 @@ func init() {
 // for txn add/remove (see buildEngine's doc comment).
 func runStorageInspect(cmd *cobra.Command, args []string) (bool, error) {
 	id := args[0]
-	storageEng, err := storage.Open(storage.EngineConfig{Dir: cliFlags.storageDir})
+	storageEng, err := storage.Open(storage.EngineConfig{Dir: effectiveStorageDir()})
 	if err != nil {
 		return false, fmt.Errorf("open storage engine: %w", err)
 	}
@@ -74,7 +74,7 @@ func runStorageInspect(cmd *cobra.Command, args []string) (bool, error) {
 // run on demand rather than only at process exit — useful for bounding
 // journal growth mid-session on a long-running `zenith watch`.
 func runStoragePrune(cmd *cobra.Command, args []string) error {
-	_, _, _, teardown, err := buildEngine(true)
+	_, _, _, teardown, err := buildEngine(true, true)
 	if err != nil {
 		return err
 	}

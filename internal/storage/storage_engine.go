@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -14,6 +15,19 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
 )
+
+// quietPebbleLogger silences Pebble's own internal Infof logging — its
+// default logger prints a "[JOB N] WAL file ... replayed N keys" line to
+// stderr on every Open, for every instance, so opening the two Pebble
+// instances this package now uses doubled that noise in every CLI
+// command's output. Fatalf is deliberately NOT silenced: a Pebble-fatal
+// error must stay visible.
+type quietPebbleLogger struct{}
+
+func (quietPebbleLogger) Infof(format string, args ...interface{}) {}
+func (quietPebbleLogger) Fatalf(format string, args ...interface{}) {
+	log.Fatalf(format, args...)
+}
 
 // journalOpPut/journalOpDelete prefix every journaled value with one byte so
 // a full-keyspace replay (Replay) can still see deletes. Pebble's public
@@ -75,7 +89,7 @@ func openWithFS(dir string, fs vfs.FS) (*Engine, error) {
 	if dir == "" {
 		return nil, errors.New("storage: dir must not be empty")
 	}
-	db, err := pebble.Open(dir, &pebble.Options{FS: fs})
+	db, err := pebble.Open(dir, &pebble.Options{FS: fs, Logger: quietPebbleLogger{}})
 	if err != nil {
 		return nil, fmt.Errorf("storage: pebble open: %w", err)
 	}
@@ -88,7 +102,7 @@ func openWithFS(dir string, fs vfs.FS) (*Engine, error) {
 	// guaranteed since IDs are arbitrary caller bytes. A second instance
 	// avoids both risks entirely.
 	embDir := filepath.Join(dir, "embcache")
-	embDB, err := pebble.Open(embDir, &pebble.Options{FS: fs})
+	embDB, err := pebble.Open(embDir, &pebble.Options{FS: fs, Logger: quietPebbleLogger{}})
 	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("storage: pebble open embedding cache: %w", err)
@@ -101,12 +115,9 @@ func (e *Engine) Close() error {
 	var closeErr error
 	e.closeOnce.Do(func() {
 		close(e.closed)
-		if err := e.db.Close(); err != nil {
-			closeErr = err
-		}
-		if err := e.embDB.Close(); err != nil && closeErr == nil {
-			closeErr = err
-		}
+		dbErr := e.db.Close()
+		embErr := e.embDB.Close()
+		closeErr = errors.Join(dbErr, embErr)
 	})
 	return closeErr
 }
@@ -168,6 +179,9 @@ func (e *Engine) Delete(ctx context.Context, key []byte) error {
 // correct, essentially free building block for tests and any future caller,
 // unlike the old engine's Get, which never read SSTables back at all.
 func (e *Engine) Get(key []byte) ([]byte, bool) {
+	if e.isClosed() {
+		return nil, false
+	}
 	raw, closer, err := e.db.Get(key)
 	if err != nil {
 		return nil, false
@@ -313,6 +327,9 @@ func (t *Txn) Discard() error {
 // must never turn a soft failure into a hard one for the embedding path it
 // sits beside.
 func (e *Engine) GetEmbedding(key []byte) ([]float32, bool) {
+	if e.isClosed() {
+		return nil, false
+	}
 	raw, closer, err := e.embDB.Get(key)
 	if err != nil {
 		return nil, false

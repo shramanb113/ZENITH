@@ -37,6 +37,17 @@ type CachingEmbedder struct {
 	persist PersistentEmbedCache
 }
 
+// persistUsable reports whether the persistent cache tier can ever produce
+// a usable hit. Dimensions() <= 0 (e.g. an Ollama model this binary doesn't
+// recognize — OllamaEmbedder.Dimensions() returns 0 for an unknown model
+// name) makes every lookup's `len(val) == c.Dimensions()` check impossible
+// to satisfy for any real, non-empty vector, so without this guard every
+// embed would still be written to the persistent store while no lookup
+// could ever hit — a cache that only ever grows, for zero benefit.
+func (c *CachingEmbedder) persistUsable() bool {
+	return c.persist != nil && c.Dimensions() > 0
+}
+
 // SetPersistentCache wires a crash-surviving second cache tier beneath this
 // embedder's in-memory LRUs. Call once after construction; nil (the default)
 // disables the tier.
@@ -91,7 +102,7 @@ func (c *CachingEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 	if val, ok := c.cache.Get(text); ok {
 		return cloneVec(val), nil
 	}
-	if c.persist != nil {
+	if c.persistUsable() {
 		if val, ok := c.persist.GetEmbedding(c.persistentKey('D', text)); ok && len(val) == c.Dimensions() {
 			c.cache.Add(text, cloneVec(val))
 			return cloneVec(val), nil
@@ -106,7 +117,7 @@ func (c *CachingEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 		// keep getting a silent "success" with nothing usable.
 		if err == nil && len(vec) > 0 {
 			c.cache.Add(text, cloneVec(vec))
-			if c.persist != nil {
+			if c.persistUsable() {
 				if perr := c.persist.PutEmbedding(c.persistentKey('D', text), vec); perr != nil {
 					slog.Warn("embedding: persistent cache write failed", "error", perr)
 				}
@@ -144,7 +155,7 @@ func (c *CachingEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]f
 			results[i] = cloneVec(val)
 			continue
 		}
-		if c.persist != nil {
+		if c.persistUsable() {
 			if val, ok := c.persist.GetEmbedding(c.persistentKey('D', txt)); ok && len(val) == c.Dimensions() {
 				results[i] = cloneVec(val)
 				c.cache.Add(txt, cloneVec(val))
@@ -173,7 +184,7 @@ func (c *CachingEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]f
 			ogIdx := missingIdx[i]
 			results[ogIdx] = vec
 			c.cache.Add(missingTexts[i], cloneVec(vec))
-			if c.persist != nil {
+			if c.persistUsable() {
 				if perr := c.persist.PutEmbedding(c.persistentKey('D', missingTexts[i]), vec); perr != nil {
 					slog.Warn("embedding: persistent cache write failed", "error", perr)
 				}
@@ -213,7 +224,7 @@ func (c *CachingEmbedder) EmbedQuery(ctx context.Context, text string) ([]float3
 	if val, ok := c.queryCache.Get(text); ok {
 		return cloneVec(val), nil
 	}
-	if c.persist != nil {
+	if c.persistUsable() {
 		if val, ok := c.persist.GetEmbedding(c.persistentKey('Q', text)); ok && len(val) == c.Dimensions() {
 			c.queryCache.Add(text, cloneVec(val))
 			return cloneVec(val), nil
@@ -223,7 +234,7 @@ func (c *CachingEmbedder) EmbedQuery(ctx context.Context, text string) ([]float3
 		vec, err := q.EmbedQuery(ctx, text)
 		if err == nil && len(vec) > 0 {
 			c.queryCache.Add(text, cloneVec(vec))
-			if c.persist != nil {
+			if c.persistUsable() {
 				if perr := c.persist.PutEmbedding(c.persistentKey('Q', text), vec); perr != nil {
 					slog.Warn("embedding: persistent cache write failed", "error", perr)
 				}

@@ -13,7 +13,7 @@ import (
 func addEngineFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&cliFlags.dbPath, "db", zenithDataPath("zenith.db"), "Index database file")
 	cmd.Flags().StringVar(&cliFlags.fstPath, "fst", zenithDataPath("data/index.fst"), "On-disk FST path")
-	cmd.Flags().StringVar(&cliFlags.storageDir, "storage-dir", zenithDataPath("data/pebble"), "Pebble-backed document-journal + embedding-cache directory")
+	cmd.Flags().StringVar(&cliFlags.storageDir, "storage-dir", "", "Pebble-backed document-journal + embedding-cache directory (default: <db>.pebble, tied to --db so different --db paths never share one journal)")
 	cmd.Flags().StringVar(&cliFlags.embedder, "embedder", "auto",
 		`Embedding backend:
   auto          Embedded ONNX model (requires CGo build; see docs/DECISIONS.md)

@@ -406,6 +406,79 @@ func TestCachingEmbedder_PersistentCacheHitSkipsBaseEmbed(t *testing.T) {
 	}
 }
 
+// TestCachingEmbedder_PersistentCacheDimensionMismatchIsTreatedAsMiss proves
+// a stored vector whose length doesn't match the current embedder's
+// Dimensions() is never returned to the caller as a hit — this guards
+// against a reused on-disk cache directory from a differently-sized model.
+// Flagged by review as missing: deleting the `len(val) == c.Dimensions()`
+// check in Embed/EmbedBatch/EmbedQuery would go unnoticed without this test.
+func TestCachingEmbedder_PersistentCacheDimensionMismatchIsTreatedAsMiss(t *testing.T) {
+	base := &countingEmbedder{inner: newFakeVectorEmbedder(4)}
+	ce, err := NewCachingEmbedder(base, 10)
+	if err != nil {
+		t.Fatalf("NewCachingEmbedder: %v", err)
+	}
+	persist := newFakePersistentCache()
+	// Pre-seed the persistent cache with a vector of the WRONG dimension
+	// (8, not base's 4) under the exact key ce will look up.
+	persist.store[string(ce.persistentKey('D', "hello"))] = []float32{1, 2, 3, 4, 5, 6, 7, 8}
+	ce.SetPersistentCache(persist)
+
+	vec, err := ce.Embed(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if len(vec) != 4 {
+		t.Fatalf("Embed returned a %d-dim vector, want 4 (the dimension-mismatched 8-dim cache entry must not be returned)", len(vec))
+	}
+	if n := base.calls.Load(); n != 1 {
+		t.Errorf("calls = %d, want 1 (a dimension mismatch must fall through to the base embedder, not short-circuit as a hit)", n)
+	}
+}
+
+// zeroDimButRealVectorEmbedder mimics OllamaEmbedder's actual failure shape
+// for an unrecognized model name: Dimensions() is a static lookup by model
+// name string, disconnected from what the API actually returns, so it can
+// report 0 while Embed still returns a real, non-empty vector.
+type zeroDimButRealVectorEmbedder struct{ inner *fakeVectorEmbedder }
+
+func (z *zeroDimButRealVectorEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	return z.inner.Embed(ctx, text)
+}
+func (z *zeroDimButRealVectorEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	return z.inner.EmbedBatch(ctx, texts)
+}
+func (z *zeroDimButRealVectorEmbedder) Dimensions() int { return 0 }
+
+// TestCachingEmbedder_ZeroDimensionBaseNeverUsesPersistentCache is a
+// regression test for a real review finding: an embedder reporting
+// Dimensions() <= 0 while still returning real, non-empty vectors (e.g.
+// OllamaEmbedder.Dimensions() for an unrecognized model name) makes every
+// persistent-cache lookup's dimension check (`len(val) == c.Dimensions()`)
+// impossible to satisfy — without persistUsable's guard, every embed would
+// still be written to the persistent store forever while no lookup could
+// ever hit it.
+func TestCachingEmbedder_ZeroDimensionBaseNeverUsesPersistentCache(t *testing.T) {
+	base := &zeroDimButRealVectorEmbedder{inner: newFakeVectorEmbedder(4)}
+	ce, err := NewCachingEmbedder(base, 10)
+	if err != nil {
+		t.Fatalf("NewCachingEmbedder: %v", err)
+	}
+	persist := newFakePersistentCache()
+	ce.SetPersistentCache(persist)
+
+	vec, err := ce.Embed(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if len(vec) != 4 {
+		t.Fatalf("Embed returned a %d-dim vector, want 4 (the base embedder's real output)", len(vec))
+	}
+	if persist.putCall != 0 {
+		t.Errorf("putCall = %d, want 0 — a zero-Dimensions() embedder must never write to a persistent cache it can never read a hit from", persist.putCall)
+	}
+}
+
 func TestCachingEmbedder_EmbedAndEmbedQuery_UseDistinctPersistentKeys(t *testing.T) {
 	base := &asymmetricEmbedder{inner: newFakeVectorEmbedder(4)}
 	ce, err := NewCachingEmbedder(base, 10)

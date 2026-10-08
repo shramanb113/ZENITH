@@ -128,7 +128,7 @@ var watchStartCmd = &cobra.Command{
 			return nil
 		}
 
-		engine, _, alog, teardown, err := buildEngine(true)
+		engine, _, alog, teardown, err := buildEngine(true, true)
 		if err != nil {
 			return fmt.Errorf("engine init: %w", err)
 		}
@@ -195,7 +195,7 @@ Use 'zenith watch add' + 'zenith watch start' for persistent watching.`,
 			return fmt.Errorf("not a directory: %s", dir)
 		}
 
-		engine, _, alog, teardown, err := buildEngine(true)
+		engine, _, alog, teardown, err := buildEngine(true, true)
 		if err != nil {
 			return fmt.Errorf("engine init: %w", err)
 		}

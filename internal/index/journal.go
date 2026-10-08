@@ -82,7 +82,12 @@ func decodeJournalV2(rest []byte, whole []byte) (text string, vector []float32, 
 	rest = rest[k1+int(attrsLen):]
 
 	vecDim, k2 := binary.Uvarint(rest)
-	if k2 <= 0 || uint64(len(rest)-k2) < vecDim*4 {
+	// Division, not vecDim*4 compared against a length: multiplying an
+	// attacker/corruption-controlled vecDim by 4 can overflow uint64 and
+	// wrap to a small number, which would let an oversized vecDim slip
+	// past this guard and then panic inside make([]float32, vecDim) below.
+	// Dividing the (bounded, real slice) length instead can never overflow.
+	if k2 <= 0 || vecDim > uint64(len(rest)-k2)/4 {
 		return string(whole), nil, nil
 	}
 	vecBytes := rest[k2 : k2+int(vecDim)*4]

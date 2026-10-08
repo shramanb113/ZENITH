@@ -41,13 +41,26 @@ var cliFlags struct {
 }
 
 // buildEngine constructs and optionally loads a ready-to-use index.Engine.
-// The returned *storage.Engine is the same instance buildEngine opened and
-// wired as the document journal — callers that need NewTxn() (zenith txn,
-// zenith storage) use it directly rather than opening a second
-// storage.Engine on the same --storage-dir, which Pebble's exclusive
-// directory lock would refuse. teardown closes it; callers must not close
+//
+// withStorage controls whether a storage.Engine (document journal +
+// persistent embedding cache) is opened at all. Pebble takes an exclusive
+// lock on its directory for as long as it is open, so opening it
+// unconditionally on every command — including a purely read-only one like
+// `zenith search` — would make `search` fail whenever a long-running
+// `zenith watch`/`zenith serve` (or another CLI invocation) already holds
+// that lock, breaking a workflow that worked before storage was wired into
+// cmd/zenith at all. Pass false for read-only commands that never mutate
+// the index and don't need crash-safe journaling or the embedding cache;
+// pass true for anything that adds, removes, or otherwise writes. The
+// returned *storage.Engine is nil when withStorage is false.
+//
+// When non-nil, the returned *storage.Engine is the same instance
+// buildEngine opened and wired as the document journal — callers that need
+// NewTxn() (zenith txn, zenith storage) use it directly rather than opening
+// a second storage.Engine on the same --storage-dir, which would hit the
+// same exclusive-lock problem. teardown closes it; callers must not close
 // it themselves.
-func buildEngine(load bool) (*index.Engine, *storage.Engine, *activitylog.Logger, func(), error) {
+func buildEngine(load bool, withStorage bool) (*index.Engine, *storage.Engine, *activitylog.Logger, func(), error) {
 	appConfig := config.DefaultConfig()
 
 	if cliFlags.queryCacheSize >= 0 {
@@ -70,15 +83,21 @@ func buildEngine(load bool) (*index.Engine, *storage.Engine, *activitylog.Logger
 
 	alog := activitylog.Open()
 
-	storageEng, err := storage.Open(storage.EngineConfig{Dir: cliFlags.storageDir})
-	if err != nil {
-		alog.Close()
-		return nil, nil, nil, nil, fmt.Errorf("cannot open storage engine at %s: %w", cliFlags.storageDir, err)
+	var storageEng *storage.Engine
+	if withStorage {
+		var err error
+		storageEng, err = storage.Open(storage.EngineConfig{Dir: effectiveStorageDir()})
+		if err != nil {
+			alog.Close()
+			return nil, nil, nil, nil, fmt.Errorf("cannot open storage engine at %s: %w", effectiveStorageDir(), err)
+		}
 	}
 
 	emb, embedderName := resolveEmbedder(appConfig, alog)
-	if pc, ok := emb.(embedding.PersistentCacheSetter); ok {
-		pc.SetPersistentCache(storageEng)
+	if storageEng != nil {
+		if pc, ok := emb.(embedding.PersistentCacheSetter); ok {
+			pc.SetPersistentCache(storageEng)
+		}
 	}
 
 	tkz := analysis.NewStandardAnalyzer()
@@ -101,70 +120,117 @@ func buildEngine(load bool) (*index.Engine, *storage.Engine, *activitylog.Logger
 			// index we merely failed to read (older format, different embedder,
 			// damage) would be overwritten by an empty one.
 			alog.Close()
-			_ = storageEng.Close()
+			if storageEng != nil {
+				_ = storageEng.Close()
+			}
 			return nil, nil, nil, nil, fmt.Errorf("cannot open index %s: %w%s", cliFlags.dbPath, err, mismatchHint(err))
 		}
 	}
 
-	// Replay journal delta — documents indexed since the last Save. The
-	// journal is NOT set yet, so these Add/Remove calls do not re-journal.
-	// Mirrors cmd/server/main.go's replay loop exactly.
-	replayCtx := context.Background()
-	if err := storageEng.Replay(func(key, value []byte, isDelete bool) error {
-		id := string(key)
-		if isDelete {
-			if err := engine.Remove(replayCtx, id); err != nil {
-				slog.Warn("storage replay: remove failed", "id", id, "error", err)
+	if storageEng != nil {
+		// Replay journal delta — documents indexed since the last Save. The
+		// journal is NOT set yet, so these Add/Remove calls do not
+		// re-journal. Mirrors cmd/server/main.go's replay loop, except for
+		// the dimension check below: a journalled vector is only trusted
+		// when it matches the embedder actually in use right now (see the
+		// comment on vector below for why).
+		replayCtx := context.Background()
+		if err := storageEng.Replay(func(key, value []byte, isDelete bool) error {
+			id := string(key)
+			if isDelete {
+				if err := engine.Remove(replayCtx, id); err != nil {
+					slog.Warn("storage replay: remove failed", "id", id, "error", err)
+				}
+				return nil
+			}
+			text, vector, attrs := index.DecodeJournalValue(value)
+			// A carried vector is only trusted when its dimension matches
+			// the embedder actually in use right now. Without this check,
+			// an unclean exit followed by a model switch (different
+			// --model, or --embedder ollama at a different dimension) would
+			// replay a vector the current embedder's vector space doesn't
+			// match: segment writes would then reject it outright (Save
+			// would fail on every run, forever, since the journal entry
+			// never gets pruned) or, worse, silently mix incompatible
+			// vector spaces when the dimension happens to match but the
+			// model doesn't. Falling back to re-embed is exactly today's
+			// existing behavior for a legacy (vector-less) entry, so a
+			// mismatch degrades to that, not to an error.
+			if vector != nil && len(vector) != emb.Dimensions() {
+				vector = nil
+			}
+			var addErr error
+			switch {
+			case vector != nil:
+				addErr = engine.AddWithVectorAttrs(replayCtx, id, text, vector, attrs)
+			case len(attrs) > 0:
+				addErr = engine.AddWithVectorAttrs(replayCtx, id, text, engine.EmbedText(replayCtx, text), attrs)
+			default:
+				addErr = engine.Add(replayCtx, id, text)
+			}
+			if addErr != nil {
+				slog.Warn("storage replay: re-index failed", "id", id, "error", addErr)
 			}
 			return nil
+		}); err != nil {
+			slog.Warn("storage replay failed", "error", err)
 		}
-		text, vector, attrs := index.DecodeJournalValue(value)
-		var addErr error
-		switch {
-		case vector != nil:
-			addErr = engine.AddWithVectorAttrs(replayCtx, id, text, vector, attrs)
-		case len(attrs) > 0:
-			addErr = engine.AddWithVectorAttrs(replayCtx, id, text, engine.EmbedText(replayCtx, text), attrs)
-		default:
-			addErr = engine.Add(replayCtx, id, text)
-		}
-		if addErr != nil {
-			slog.Warn("storage replay: re-index failed", "id", id, "error", addErr)
-		}
-		return nil
-	}); err != nil {
-		slog.Warn("storage replay failed", "error", err)
+		// Connect the journal — all future mutations are durably recorded first.
+		engine.SetDocumentJournal(storageEng)
 	}
-	// Connect the journal — all future mutations are durably recorded first.
-	engine.SetDocumentJournal(storageEng)
 
 	teardown := func() {
-		snap := storageEng.Snapshot()
+		var snap *storage.Snapshot
+		if storageEng != nil {
+			snap = storageEng.Snapshot()
+		}
 		if err := engine.Save(cliFlags.dbPath); err != nil {
 			slog.Error("Failed to save index", "error", err)
 		} else {
 			alog.Log("SAVED", cliFlags.dbPath)
-			// The saved segment is now authoritative for everything this
-			// snapshot saw — prune exactly those journal entries, not
-			// "everything now" (which would race writes arriving during Save).
-			if err := storageEng.Prune(snap); err != nil {
-				slog.Warn("storage: prune after save failed (journal will just be larger than necessary)", "error", err)
+			if snap != nil {
+				// The saved segment is now authoritative for everything this
+				// snapshot saw — prune exactly those journal entries, not
+				// "everything now" (which would race writes arriving during Save).
+				if err := storageEng.Prune(snap); err != nil {
+					slog.Warn("storage: prune after save failed (journal will just be larger than necessary)", "error", err)
+				}
 			}
 		}
-		_ = snap.Close()
+		if snap != nil {
+			_ = snap.Close()
+		}
 		if err := engine.SaveANN(); err != nil {
 			slog.Warn("Could not save the ANN graph; the next open will rebuild it", "error", err)
 		}
 		if err := engine.Close(); err != nil {
 			slog.Error("Failed to release index files", "error", err)
 		}
-		if err := storageEng.Close(); err != nil {
-			slog.Error("Failed to close storage engine", "error", err)
+		if storageEng != nil {
+			if err := storageEng.Close(); err != nil {
+				slog.Error("Failed to close storage engine", "error", err)
+			}
 		}
 		alog.Close()
 	}
 
 	return engine, storageEng, alog, teardown, nil
+}
+
+// effectiveStorageDir returns cliFlags.storageDir, or, when it was left
+// unset, a directory derived from --db. Tying the default to --db (rather
+// than one fixed global path regardless of --db) matters because the
+// storage directory carries document content, not just a cache: two
+// `zenith` invocations against different --db paths sharing one journal by
+// default would let documents from one database replay into the other's
+// index, and a prune from one invocation would delete journal entries a
+// different --db invocation still needed. An explicit --storage-dir always
+// wins, for a caller that wants to intentionally share one journal.
+func effectiveStorageDir() string {
+	if cliFlags.storageDir != "" {
+		return cliFlags.storageDir
+	}
+	return cliFlags.dbPath + ".pebble"
 }
 
 // resolveEmbedder selects the embedder based on cliFlags.embedder.

@@ -131,6 +131,17 @@ func main() {
 			return nil
 		}
 		text, vector, attrs := index.DecodeJournalValue(value)
+		// A carried vector is only trusted when its dimension matches the
+		// embedder actually in use right now — an unclean exit followed by
+		// a model change would otherwise replay a vector from a different
+		// vector space (rejected outright by the segment writer if the
+		// dimension itself differs, or silently wrong if it happens to
+		// match). Falling back to re-embed is exactly today's existing
+		// behavior for a legacy (vector-less) entry, so a mismatch
+		// degrades to that, not to an error.
+		if vector != nil && len(vector) != emb.Dimensions() {
+			vector = nil
+		}
 		var err error
 		switch {
 		case vector != nil:

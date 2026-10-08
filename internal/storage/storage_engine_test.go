@@ -89,6 +89,33 @@ func TestEngine_DeleteAfterCloseRejected(t *testing.T) {
 	}
 }
 
+func TestEngine_GetAfterCloseIsCleanMiss(t *testing.T) {
+	e := openTestEngine(t)
+	if err := e.Put(context.Background(), []byte("k"), []byte("v")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if val, ok := e.Get([]byte("k")); ok {
+		t.Fatalf("Get after Close: want a clean miss, got (%q, true)", val)
+	}
+}
+
+func TestEmbeddingCache_GetAfterCloseIsCleanMiss(t *testing.T) {
+	e := openTestEngine(t)
+	key := []byte("k")
+	if err := e.PutEmbedding(key, []float32{1, 2, 3}); err != nil {
+		t.Fatalf("PutEmbedding: %v", err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if val, ok := e.GetEmbedding(key); ok {
+		t.Fatalf("GetEmbedding after Close: want a clean miss, got (%v, true)", val)
+	}
+}
+
 func TestEngine_ReplaySeesLivePutsInKeyOrder(t *testing.T) {
 	e := openTestEngine(t)
 	ctx := context.Background()

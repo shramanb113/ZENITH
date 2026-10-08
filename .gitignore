@@ -8,3 +8,4 @@ internal/localembedder/assets/libonnxruntime.dylib
 bench/.cache/
 bench/results/
 *.exe
+.superpowers/

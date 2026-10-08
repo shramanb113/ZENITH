@@ -55,28 +55,57 @@ func init() {
 // toAttrs converts the loosely-typed JSON attrs map into index.Attrs.
 // index.AttrValue is {Kind AttrKind, S string, N float64, Arr []AttrValue}
 // — bools are stored as Kind: AttrBool, N: 1/0, not a separate bool field.
-// A JSON array value is silently dropped: this input format carries scalar
-// attrs only, matching cmd/zenith/index.go's --attr k=v flag.
-func toAttrs(m map[string]any) index.Attrs {
+// A JSON array of scalars becomes an AttrArray (the type system already
+// supports this — see internal/index/attrs.go's AttrKind doc comment: "an
+// element of Arr is never itself AttrArray"). null, a nested object, or an
+// array containing anything other than a string/bool/number is an error,
+// not a silent drop: losing part of a document's metadata without telling
+// the caller is worse than refusing the whole file up front.
+func toAttrs(m map[string]any) (index.Attrs, error) {
 	if len(m) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make(index.Attrs, len(m))
 	for k, v := range m {
-		switch tv := v.(type) {
-		case string:
-			out[k] = index.AttrValue{Kind: index.AttrString, S: tv}
-		case bool:
-			n := 0.0
-			if tv {
-				n = 1
-			}
-			out[k] = index.AttrValue{Kind: index.AttrBool, N: n}
-		case float64:
-			out[k] = index.AttrValue{Kind: index.AttrNumber, N: tv}
+		av, err := toAttrValue(v)
+		if err != nil {
+			return nil, fmt.Errorf("attrs[%q]: %w", k, err)
 		}
+		out[k] = av
 	}
-	return out
+	return out, nil
+}
+
+func toAttrValue(v any) (index.AttrValue, error) {
+	switch tv := v.(type) {
+	case string:
+		return index.AttrValue{Kind: index.AttrString, S: tv}, nil
+	case bool:
+		n := 0.0
+		if tv {
+			n = 1
+		}
+		return index.AttrValue{Kind: index.AttrBool, N: n}, nil
+	case float64:
+		return index.AttrValue{Kind: index.AttrNumber, N: tv}, nil
+	case []any:
+		arr := make([]index.AttrValue, len(tv))
+		for i, elem := range tv {
+			ev, err := toAttrValue(elem)
+			if err != nil {
+				return index.AttrValue{}, fmt.Errorf("[%d]: %w", i, err)
+			}
+			if ev.Kind == index.AttrArray {
+				return index.AttrValue{}, fmt.Errorf("[%d]: nested arrays are not supported", i)
+			}
+			arr[i] = ev
+		}
+		return index.AttrValue{Kind: index.AttrArray, Arr: arr}, nil
+	case nil:
+		return index.AttrValue{}, fmt.Errorf("null is not a supported attribute value")
+	default:
+		return index.AttrValue{}, fmt.Errorf("unsupported attribute value type %T", v)
+	}
 }
 
 func runTxnAdd(cmd *cobra.Command, args []string) error {
@@ -91,6 +120,14 @@ func runTxnAdd(cmd *cobra.Command, args []string) error {
 
 	var docs []index.BatchDoc
 	scanner := bufio.NewScanner(f)
+	// bufio.Scanner's default max token size is 64KiB, which a realistic
+	// document (not just its JSON wrapper) can easily exceed — the default
+	// would abort the whole file with an unhelpful "token too long" and no
+	// line number. 32MiB matches this project's own largest configured
+	// single-item limit elsewhere (nothing smaller is documented as a hard
+	// ceiling for one document's text).
+	const maxLineSize = 32 * 1024 * 1024
+	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 	lineNo := 0
 	for scanner.Scan() {
 		lineNo++
@@ -105,16 +142,22 @@ func runTxnAdd(cmd *cobra.Command, args []string) error {
 		if jd.ID == "" {
 			return fmt.Errorf("%s: line %d: missing \"id\"", txnAddFlags.file, lineNo)
 		}
-		docs = append(docs, index.BatchDoc{ID: jd.ID, Text: jd.Text, Attrs: toAttrs(jd.Attrs)})
+		attrs, err := toAttrs(jd.Attrs)
+		if err != nil {
+			return fmt.Errorf("%s: line %d: %w", txnAddFlags.file, lineNo, err)
+		}
+		docs = append(docs, index.BatchDoc{ID: jd.ID, Text: jd.Text, Attrs: attrs})
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("%s: scan: %w", txnAddFlags.file, err)
+		// scanner.Scan() already returned false for the line that failed
+		// without incrementing lineNo, so lineNo+1 is that line.
+		return fmt.Errorf("%s: line %d: scan: %w", txnAddFlags.file, lineNo+1, err)
 	}
 	if len(docs) == 0 {
 		return fmt.Errorf("%s: no documents found", txnAddFlags.file)
 	}
 
-	engine, storageEng, _, teardown, err := buildEngine(true)
+	engine, storageEng, _, teardown, err := buildEngine(true, true)
 	if err != nil {
 		return err
 	}
@@ -131,12 +174,23 @@ func runTxnRemove(cmd *cobra.Command, args []string) error {
 	if txnRemoveFlags.ids == "" {
 		return fmt.Errorf("--ids is required")
 	}
-	ids := strings.Split(txnRemoveFlags.ids, ",")
-	for i, id := range ids {
-		ids[i] = strings.TrimSpace(id)
+	var ids []string
+	for _, id := range strings.Split(txnRemoveFlags.ids, ",") {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			// A trailing/doubled comma ("a,", "a,,b") must not turn into a
+			// RemoveBatch call for an empty ID — there is no such document,
+			// and the printed count would otherwise include IDs that never
+			// existed.
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return fmt.Errorf("--ids contained no non-empty IDs")
 	}
 
-	engine, storageEng, _, teardown, err := buildEngine(true)
+	engine, storageEng, _, teardown, err := buildEngine(true, true)
 	if err != nil {
 		return err
 	}

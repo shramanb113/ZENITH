@@ -49,7 +49,7 @@ Supported formats:
 
 		printHeader("index", dir)
 
-		engine, _, alog, teardown, err := buildEngine(true)
+		engine, _, alog, teardown, err := buildEngine(true, true)
 		if err != nil {
 			return fmt.Errorf("engine init: %w", err)
 		}

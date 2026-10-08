@@ -64,6 +64,49 @@ func TestDecodeJournalValue_LegacyV1StillDecodes(t *testing.T) {
 	}
 }
 
+// TestDecodeJournalValue_OversizedVecDimNeverPanics is a regression test for
+// a real crash found by review: a v2 value whose vecDim varint decodes to a
+// huge number (e.g. near 2^62) used to pass the old `vecDim*4` overflow
+// check (the multiplication wrapped to a small number) and then panic
+// inside make([]float32, vecDim). Any corrupt or truncated journal entry —
+// not just a deliberately crafted one — must degrade to a safe fallback,
+// never crash the process that calls DecodeJournalValue (every replay).
+func TestDecodeJournalValue_OversizedVecDimNeverPanics(t *testing.T) {
+	var buf []byte
+	buf = append(buf, 0xFF, 'Z', 'A', '2')
+	buf = append(buf, 0) // attrsLen = 0
+	var n [binary.MaxVarintLen64]byte
+	k := binary.PutUvarint(n[:], 1<<62) // vecDim — absurdly large, no bytes follow
+	buf = append(buf, n[:k]...)
+	buf = append(buf, []byte("trailing")...)
+
+	text, vec, attrs := DecodeJournalValue(buf)
+	if vec != nil || attrs != nil {
+		t.Errorf("got vec=%v attrs=%v, want both nil for an oversized vecDim", vec, attrs)
+	}
+	if text != string(buf) {
+		t.Errorf("text = %q, want the whole raw buffer treated as text", text)
+	}
+}
+
+func TestDecodeJournalValue_TruncatedVectorBytesNeverPanics(t *testing.T) {
+	var buf []byte
+	buf = append(buf, 0xFF, 'Z', 'A', '2')
+	buf = append(buf, 0) // attrsLen = 0
+	var n [binary.MaxVarintLen64]byte
+	k := binary.PutUvarint(n[:], 4) // claims 4 float32s = 16 bytes
+	buf = append(buf, n[:k]...)
+	buf = append(buf, []byte{1, 2, 3}...) // only 3 bytes actually present
+
+	text, vec, attrs := DecodeJournalValue(buf)
+	if vec != nil || attrs != nil {
+		t.Errorf("got vec=%v attrs=%v, want both nil for a truncated vector", vec, attrs)
+	}
+	if text != string(buf) {
+		t.Errorf("text = %q, want the whole raw buffer treated as text", text)
+	}
+}
+
 func TestDecodeJournalValue_UnrecognizedMagicFallsBackToPlainText(t *testing.T) {
 	buf := append([]byte{0xFF, 'Z', 'A', '9'}, []byte("whatever")...)
 	text, vec, attrs := DecodeJournalValue(buf)

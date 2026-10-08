@@ -55,10 +55,10 @@ var serveCmd = &cobra.Command{
 API for remote clients. Loads the existing index from zenith.db on startup
 and saves it on graceful shutdown (SIGINT / SIGTERM).
 
-Writes received over gRPC are held in memory and saved on graceful shutdown
-(SIGINT/SIGTERM) only; a SIGKILL loses them. For write-ahead-logged writes
-where every acknowledged write survives a kill, use the Go library
-(pkg/zenith) directly.`,
+Writes received over gRPC are durably journaled (Pebble-backed, --storage-dir)
+before being acknowledged, so an acknowledged write survives a SIGKILL — the
+next start replays it from the journal. Unacknowledged in-flight writes at the
+moment of a kill are still lost, same as any other crash-safe system.`,
 
 	RunE: func(cmd *cobra.Command, args []string) error {
 		setupLogger()
@@ -85,7 +85,7 @@ where every acknowledged write survives a kill, use the Go library
 
 		printHeader("serve", addr)
 
-		engine, _, alog, teardown, err := buildEngine(true)
+		engine, _, alog, teardown, err := buildEngine(true, true)
 		if err != nil {
 			return fmt.Errorf("engine init: %w", err)
 		}
