@@ -396,11 +396,7 @@ One thing I explicitly chose not to do for the embeddable library is use the ful
 
 ### Memory scaling in :memory: mode
 
-```
-1,000,000 documents × 384 dimensions × 2 bytes (float16) = 768 MB for vectors alone
-```
-
-Plus postings lists, BK-tree nodes, and ID mappings. Nothing is evicted — everything stays in RAM. GC pressure grows linearly with index size, causing latency spikes in web handlers. Users who run `:memory:` in production with a large index will hit OOM kills. The godoc documents this formula explicitly. A `WithMemoryLimit(bytes int64)` option returns `ErrIndexFull` when the configured limit is exceeded rather than letting the process grow until the OS kills it.
+This was originally a back-of-envelope projection (`1,000,000 docs × 384 dims × 2 bytes float16 = 768 MB for vectors alone, plus postings/BK-tree/ID mappings, unmeasured`). `TestScale` (`internal/index/scale_test.go`, `bench/BENCHMARK.md`) has since measured it directly: ingesting 1,000,000 real-text documents (synthetic 384-dim vectors) reaches **1,575 MB Go heap in use**, 2,520 MB working set / 1,860 MB private before compaction. Nothing is evicted — everything stays in RAM. GC pressure grows linearly with index size, causing latency spikes in web handlers. Users who run `:memory:` in production with a large index will hit OOM kills. A `WithMemoryLimit(bytes int64)` option returns `ErrIndexFull` when the configured limit is exceeded rather than letting the process grow until the OS kills it, using a per-doc estimate derived from this same measurement (see `pkg/zenith/zenith.go`'s `estimatedBytesPerDoc`).
 
 ### Two :memory: opens are not the same database
 

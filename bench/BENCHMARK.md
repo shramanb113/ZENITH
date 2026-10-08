@@ -203,3 +203,44 @@ Neither engine supports semantic retrieval. If your queries are keyword-exact ("
 **Why in-process only:** All engines are loaded and queried inside a single Go process. No HTTP, no Docker, no inter-process communication. This is the intended deployment model for ZENITH as an embedded library. Latency numbers reflect pure engine performance with no network overhead.
 
 **Recall is measured only over the indexed subset:** If the ground-truth passage for a query is not in the 100k indexed passages, that query is excluded from the recall denominator. A query whose answer is in passage number 500,000 (not indexed) cannot be counted as a failure — the engine was never given the answer to find.
+
+---
+
+## 1M-document scale test (2026-10-08)
+
+**Harness:** `TestScale` (`internal/index/scale_test.go`), `ZENITH_SCALE=1 go test ./internal/index -run 'TestScale$' -v -timeout 20000s`. Text is real — the first 1,000,000 MS MARCO passages. Vectors are synthetic (clustered unit vectors, real 384-dim) rather than real ONNX embeddings, so the ANN graph has realistic structure and the vector path has realistic cost, but no claim is made about semantic quality at this scale — real-embedding quality is covered separately by `TestBEIR`/`TestMSMARCOAblation` at 100k. Run took 4,229.5s (~70.5 min) total, Windows 11, amd64.
+
+**Ingest:**
+
+| Docs | Elapsed | Rate | Segments | Working set | Private |
+|---|---|---|---|---|---|
+| 100,000 | 4m24s | 378 docs/s | 1 | 1,243 MB | 1,282 MB |
+| 500,000 | 21m12s | 393 docs/s | 5 | 1,802 MB | 1,516 MB |
+| 900,000 | 42m46s | 351 docs/s | 9 (then compacted) | 2,351 MB | 1,742 MB |
+| 1,000,000 | 49m33s | 336 docs/s | 2 | 2,520 MB | 1,860 MB |
+
+Ingest rate declines from 378 → 336 docs/s as segment count grows between compactions (more segments to search/flush against); 1m0s of the 49m33s total was spent in flush calls. An automatic compaction fired once mid-run (900k docs, 9→1 segments, 1m23s) under the test's default compaction trigger.
+
+**Compaction, ANN persistence, reopen (at 1,000,000 docs, post-ingest):**
+
+| Step | Time | Notes |
+|---|---|---|
+| Compaction to 1 segment | 1m3.06s | 2 segments → 1 |
+| ANN graph save | 1.827s | file size 85 MB |
+| Reopen (graph restored from file) | 1.822s | `restored-from-file=true`, no rebuild |
+
+**On-disk size at 1,000,000 docs (post-compaction):** segment file 1,374 MB + ANN sidecar 85 MB + manifest (153 B) ≈ **1,459 MB total, ≈1.49 KB/doc**.
+
+**Memory:** Go heap in use (post-ingest, pre-compaction) **1,575 MB for 1,000,000 docs ≈ 1.6 KB/doc** — see [Memory accounting caveat](#memory-accounting-caveat) for how this differs from the 100k MS MARCO benchmark's heap-delta methodology above. This measurement, not the 100k hybrid-benchmark figure, now backs `pkg/zenith`'s `estimatedBytesPerDoc` / `WithMemoryLimit`.
+
+**Query latency (query vector precomputed — embedding cost measured separately):**
+
+| Mode | Queries | p50 | p95 | p99 |
+|---|---|---|---|---|
+| Hybrid, first 200 (cold) | 200 | 193.56ms | 400.38ms | 565.26ms |
+| Hybrid, steady state | 3,000 | 187.48ms | 447.59ms | 575.5ms |
+| Lexical-only | 3,000 | 150.58ms | 371.51ms | 515.54ms |
+
+**ANN recall@10 vs. exact scan over 1,000,000 docs: 0.9860** (100 queries) — the HNSW graph (`annK=300`, `annEF=400`, see P1-5) stays within ~1.4% of exhaustive search at this scale.
+
+**Caveat:** this run measures structural/memory/latency behavior with real text and realistic-shaped synthetic vectors, not retrieval quality at 1M scale — embedding 1M real passages would take hours (see "Why 100k passages" above) and is covered at smaller scale by the BEIR/MS MARCO suites instead.

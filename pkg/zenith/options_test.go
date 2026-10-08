@@ -153,8 +153,8 @@ func TestWithMemoryLimit_ZeroOrNegative(t *testing.T) {
 }
 
 func TestWithMemoryLimit_RejectsGrowthPastLimit(t *testing.T) {
-	// ~11KB/doc estimate; 30KB fits ~2 docs before Add starts returning ErrIndexFull.
-	db, err := zenith.Open(":memory:", zenith.WithBM25Only(), zenith.WithMemoryLimit(30*1024))
+	// ~1.6KB/doc estimate; 4KB fits ~2 docs before Add starts returning ErrIndexFull.
+	db, err := zenith.Open(":memory:", zenith.WithBM25Only(), zenith.WithMemoryLimit(4*1024))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestWithMemoryLimit_RejectsGrowthPastLimit(t *testing.T) {
 }
 
 func TestWithMemoryLimit_AllowsUpdatingExistingDocAtLimit(t *testing.T) {
-	db, err := zenith.Open(":memory:", zenith.WithBM25Only(), zenith.WithMemoryLimit(30*1024))
+	db, err := zenith.Open(":memory:", zenith.WithBM25Only(), zenith.WithMemoryLimit(4*1024))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

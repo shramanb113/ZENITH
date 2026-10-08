@@ -204,10 +204,11 @@ func SortBy(field string, desc bool) SearchOption {
 // growing unbounded until the OS kills the process.
 //
 // The estimate is approximate, not exact accounting: it multiplies the
-// document count by a fixed per-document cost (~11KB) derived from the
-// measured hybrid-mode heap delta in bench/BENCHMARK.md (1,127MB / 100,000
-// docs). Actual usage varies with document length, vocabulary overlap, and
-// embedder mode — treat limitBytes as a safety margin, not a precise cap.
+// document count by a fixed per-document cost (~1.6KB) derived from
+// TestScale's 1M-doc run in bench/BENCHMARK.md (1,575MB Go heap in use /
+// 1,000,000 docs). Actual usage varies with document length, vocabulary
+// overlap, and embedder mode — treat limitBytes as a safety margin, not a
+// precise cap.
 func WithMemoryLimit(limitBytes int64) Option {
 	return func(o *options) error {
 		if limitBytes <= 0 {

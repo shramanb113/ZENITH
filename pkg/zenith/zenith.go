@@ -44,10 +44,15 @@ import (
 const maxIDBytes = 512
 
 // estimatedBytesPerDoc approximates per-document heap cost (postings,
-// BK-tree, BM25 state, vectors) for WithMemoryLimit. Derived from the
-// measured hybrid-mode heap delta in bench/BENCHMARK.md: 1,127MB / 100,000
-// docs ≈ 11KB/doc. This is an approximation, not exact accounting.
-const estimatedBytesPerDoc int64 = 11 * 1024
+// BK-tree, BM25 state, vectors) for WithMemoryLimit. Derived from TestScale's
+// 1M-doc run (internal/index/scale_test.go, see bench/BENCHMARK.md): Go heap
+// in use 1,575MB after ingesting 1,000,000 docs ≈ 1.6KB/doc. Superseded the
+// older ~11KB/doc figure (1,127MB / 100,000 docs from the MS MARCO hybrid
+// benchmark), which measured a HeapAlloc delta at 10x smaller scale, so fixed
+// overhead (ONNX runtime, cached vocabulary vectors) dominated its per-doc
+// average far more than it does at 1M docs. This is an approximation, not
+// exact accounting.
+const estimatedBytesPerDoc int64 = 1664 // ≈1.6 KiB, rounded up from 1,651.5 B/doc
 
 // DB is a handle to an open ZENITH search index.
 // All methods are safe for concurrent use by multiple goroutines.
