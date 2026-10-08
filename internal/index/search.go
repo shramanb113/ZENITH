@@ -156,9 +156,11 @@ func (e *Engine) SearchFilteredWeighted(ctx context.Context, query string, f *Fi
 	key := fullCacheKey(bucket, query)
 
 	if entry, ok := e.cache.Get(ctx, key); ok {
+		e.cacheObserver.ObserveQueryCacheHit("l1")
 		return cloneResponses(entry.Results), nil
 	}
 
+	e.cacheObserver.ObserveQueryCacheMiss()
 	v, err, _ := e.searchSF.Do(key, func() (any, error) {
 		return e.searchUncached(ctx, query, f, w)
 	})

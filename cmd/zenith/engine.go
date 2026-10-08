@@ -19,6 +19,7 @@ import (
 	"github.com/shramanb113/ZENITH/internal/embedding"
 	"github.com/shramanb113/ZENITH/internal/index"
 	"github.com/shramanb113/ZENITH/internal/localembedder"
+	"github.com/shramanb113/ZENITH/internal/metrics"
 	"github.com/shramanb113/ZENITH/internal/ranking"
 	storage "github.com/shramanb113/ZENITH/internal/storage"
 	"github.com/shramanb113/ZENITH/internal/storage/wal"
@@ -94,6 +95,7 @@ func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) 
 	engine := index.NewEngine(appConfig, emb, scorer, tkz)
 	engine.SetFSTPath(cliFlags.fstPath)
 	engine.SetTermStore(storageEng)
+	engine.SetCacheObserver(metrics.NewQueryCacheObserver())
 
 	_ = embedderName
 

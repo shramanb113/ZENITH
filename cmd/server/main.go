@@ -16,6 +16,7 @@ import (
 	"github.com/shramanb113/ZENITH/internal/embedding"
 	"github.com/shramanb113/ZENITH/internal/index"
 	"github.com/shramanb113/ZENITH/internal/localembedder"
+	"github.com/shramanb113/ZENITH/internal/metrics"
 	"github.com/shramanb113/ZENITH/internal/pdf"
 	"github.com/shramanb113/ZENITH/internal/ranking"
 	"github.com/shramanb113/ZENITH/internal/server"
@@ -80,6 +81,7 @@ func main() {
 
 	engine.SetFSTPath("./data/index.fst")
 	engine.SetTermStore(storageEng)
+	engine.SetCacheObserver(metrics.NewQueryCacheObserver())
 
 	if err := engine.Load("zenith.db"); err != nil {
 		switch {

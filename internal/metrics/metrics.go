@@ -112,6 +112,15 @@ var (
 		Help: "Texts embedded by op (document, batch, query).",
 	}, []string{"op"})
 
+	QueryCacheHitsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "zenith_query_cache_hits_total",
+		Help: "Query-result cache hits, by tier (l1, l2, semantic).",
+	}, []string{"tier"})
+	QueryCacheMissesTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "zenith_query_cache_misses_total",
+		Help: "Query-result cache misses.",
+	})
+
 	ErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "zenith_errors_total",
 		Help: "Errors by surface (http/grpc/embedder) and code.",
@@ -130,6 +139,7 @@ func init() {
 		CollectionDiskBytes, CollectionWALBytes, Collections, CollectionLifecycleTotal,
 		NamespaceQueriesTotal, NamespaceQueryDuration, NamespacesActive, NamespaceEvictionsTotal,
 		EmbeddingDuration, EmbeddingTextsTotal,
+		QueryCacheHitsTotal, QueryCacheMissesTotal,
 		ErrorsTotal,
 	)
 }

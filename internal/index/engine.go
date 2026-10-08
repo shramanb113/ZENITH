@@ -104,6 +104,9 @@ type Engine struct {
 	// otherwise each pay the full lexical+vector+fusion pipeline
 	// independently. Mirrors embedding.CachingEmbedder's embedSF/querySF.
 	searchSF singleflight.Group
+	// cacheObserver receives query-cache hit/miss events; defaults to a
+	// no-op so instrumentation is opt-in (see SetCacheObserver).
+	cacheObserver CacheObserver
 
 	pendingDels map[uint64]struct{} // segment docs deleted since the last flush
 	// frozen is the delta a flush is writing (nil when none): read-only, still
@@ -159,22 +162,23 @@ type Engine struct {
 // NewEngine constructs a fully initialised Engine.
 func NewEngine(cfg *config.Config, emb embedding.Embedder, scr ranking.Scorer, ana analysis.Analyzer) *Engine {
 	e := &Engine{
-		config:      cfg,
-		inverted:    NewInvertedIndex(),
-		vectors:     NewVectorStore(),
-		phonetics:   NewPhoneticIndex(),
-		embedder:    emb,
-		scorer:      scr,
-		analyzer:    ana,
-		idMapping:   make(map[uint64]string),
-		docText:     make(map[uint64]string),
-		attrs:       make(map[uint64]Attrs),
-		attrIdx:     newAttrIndex(),
-		annMinDocs:  defaultANNMinDocs,
-		autoCompact: true,
-		nextGen:     1,
-		bm25:        ranking.NewBM25Scorer(ranking.BM25Params{}),
-		fst:         analysis.NewFSTDictionary(),
+		config:        cfg,
+		inverted:      NewInvertedIndex(),
+		vectors:       NewVectorStore(),
+		phonetics:     NewPhoneticIndex(),
+		embedder:      emb,
+		scorer:        scr,
+		analyzer:      ana,
+		idMapping:     make(map[uint64]string),
+		docText:       make(map[uint64]string),
+		attrs:         make(map[uint64]Attrs),
+		attrIdx:       newAttrIndex(),
+		annMinDocs:    defaultANNMinDocs,
+		autoCompact:   true,
+		nextGen:       1,
+		bm25:          ranking.NewBM25Scorer(ranking.BM25Params{}),
+		fst:           analysis.NewFSTDictionary(),
+		cacheObserver: noopCacheObserver{},
 	}
 	e.bm25.SetBacking(segBacking{e})
 
