@@ -43,6 +43,23 @@ type Config struct {
 	Collections *collections.Manager
 	MaxBatch    int // docs per PUT .../docs; default 1000
 	MaxLimit    int // max search limit; default 100
+
+	// QueryCacheSize overrides the L1 entry count every ephemeral
+	// namespace's zenith.DB uses (default: zenith's own default, 1000).
+	// <= 0 leaves that default in place, the same "unconfigured" convention
+	// collections.Config.QueryCacheSize uses.
+	QueryCacheSize int
+	// QueryCacheTTL overrides the L2 (Redis) entry TTL. Has no effect
+	// unless a Redis addr is wired in by the caller — ephemeral namespaces
+	// have no Redis option of their own today.
+	QueryCacheTTL time.Duration
+	// QueryCacheSemanticThreshold enables near-duplicate query-cache
+	// matching for every namespace above this cosine similarity (default:
+	// 0, disabled).
+	QueryCacheSemanticThreshold float64
+	// ANNThresholdBandPct enables latency-adaptive ANN-vs-exact banding for
+	// every namespace (default: 0, disabled).
+	ANNThresholdBandPct float64
 }
 
 type span struct{ start, end, pos int }
@@ -116,6 +133,33 @@ func (s *Server) Register(mux *http.ServeMux) {
 	if s.cfg.Collections != nil {
 		s.registerCollections(mux)
 	}
+}
+
+// namespaceOpts returns the zenith.Open options shared by every ephemeral
+// namespace. Mirrors collections.Manager.openOpts's shape.
+func (s *Server) namespaceOpts() []zenith.Option {
+	opts := []zenith.Option{
+		zenith.WithoutWordVectors(), zenith.WithLimit(s.cfg.MaxDocs),
+		zenith.WithQueryCacheObserver(metrics.NewQueryCacheObserver()),
+	}
+	if s.cfg.QueryCacheSize > 0 {
+		opts = append(opts, zenith.WithQueryCacheSize(s.cfg.QueryCacheSize))
+	}
+	if s.cfg.QueryCacheTTL > 0 {
+		opts = append(opts, zenith.WithQueryCacheTTL(s.cfg.QueryCacheTTL))
+	}
+	if s.cfg.QueryCacheSemanticThreshold > 0 {
+		opts = append(opts, zenith.WithQueryCacheSemanticThreshold(s.cfg.QueryCacheSemanticThreshold))
+	}
+	if s.cfg.ANNThresholdBandPct > 0 {
+		opts = append(opts, zenith.WithANNThresholdBand(s.cfg.ANNThresholdBandPct))
+	}
+	if s.cfg.Embedder != nil {
+		opts = append(opts, zenith.WithEmbedder(s.cfg.Embedder))
+	} else {
+		opts = append(opts, zenith.WithBM25Only())
+	}
+	return opts
 }
 
 // route registers h at pattern on mux, wrapped with metrics.Route so every
@@ -263,15 +307,7 @@ func (s *Server) putDocs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	opts := []zenith.Option{
-		zenith.WithoutWordVectors(), zenith.WithLimit(s.cfg.MaxDocs),
-		zenith.WithQueryCacheObserver(metrics.NewQueryCacheObserver()),
-	}
-	if s.cfg.Embedder != nil {
-		opts = append(opts, zenith.WithEmbedder(s.cfg.Embedder))
-	} else {
-		opts = append(opts, zenith.WithBM25Only())
-	}
+	opts := s.namespaceOpts()
 	start := time.Now()
 	db, err := zenith.Open(":memory:", opts...)
 	if err != nil {

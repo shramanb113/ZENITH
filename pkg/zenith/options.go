@@ -387,8 +387,12 @@ func WithQueryCacheObserver(o index.CacheObserver) Option {
 // (internal/collections) that need to verify a []Option slice's effect
 // without a real Open call. Test-only; not part of the supported API.
 type optionsSnapshot struct {
-	QueryCacheNamespace string
-	QueryCacheRedisAddr string
+	QueryCacheNamespace         string
+	QueryCacheRedisAddr         string
+	QueryCacheSize              int
+	QueryCacheTTL               time.Duration
+	QueryCacheSemanticThreshold float64
+	ANNThresholdBandPct         float64
 }
 
 // SnapshotOptions applies opts to a fresh default options value and returns
@@ -401,5 +405,12 @@ func SnapshotOptions(opts ...Option) (optionsSnapshot, error) {
 			return optionsSnapshot{}, err
 		}
 	}
-	return optionsSnapshot{QueryCacheNamespace: o.queryCacheNamespace, QueryCacheRedisAddr: o.queryCacheRedisAddr}, nil
+	return optionsSnapshot{
+		QueryCacheNamespace:         o.queryCacheNamespace,
+		QueryCacheRedisAddr:         o.queryCacheRedisAddr,
+		QueryCacheSize:              o.queryCacheSize,
+		QueryCacheTTL:               o.queryCacheTTL,
+		QueryCacheSemanticThreshold: o.queryCacheSemanticThreshold,
+		ANNThresholdBandPct:         o.annThresholdBandPct,
+	}, nil
 }

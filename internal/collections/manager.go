@@ -46,6 +46,27 @@ type Config struct {
 	// the shared Redis. "" (default) keeps every collection's cache
 	// in-process (L1) only.
 	QueryCacheRedisAddr string
+	// QueryCacheSize overrides the L1 entry count every collection's
+	// zenith.DB uses (default: zenith's own default, 1000). <= 0 (the Go
+	// zero value included) leaves that default in place; there is
+	// currently no way to force-disable every collection's query cache
+	// through this field specifically (0 means "unconfigured" here, the
+	// same convention every other numeric field on this Config already
+	// uses) — open a direct zenith.DB with zenith.WithQueryCacheSize(0)
+	// for that one collection if you need it.
+	QueryCacheSize int
+	// QueryCacheTTL overrides the L2 (Redis) entry TTL (default: 5m). Has
+	// no effect unless QueryCacheRedisAddr is also set. <= 0 leaves the
+	// default in place.
+	QueryCacheTTL time.Duration
+	// QueryCacheSemanticThreshold enables near-duplicate query-cache
+	// matching for every collection above this cosine similarity (default:
+	// 0, disabled). See zenith.WithQueryCacheSemanticThreshold.
+	QueryCacheSemanticThreshold float64
+	// ANNThresholdBandPct enables latency-adaptive ANN-vs-exact banding for
+	// every collection (default: 0, disabled). See
+	// zenith.WithANNThresholdBand.
+	ANNThresholdBandPct float64
 }
 
 // CreateOptions customizes a single collection's quotas at Create time.
@@ -232,11 +253,23 @@ func (m *Manager) refreshCollectionsGauge() {
 // specialized per collection id so a shared Redis (if configured) never lets
 // one collection's cached results collide with another's.
 func (m *Manager) openOpts(id string) []zenith.Option {
-	opts := make([]zenith.Option, 0, 6)
+	opts := make([]zenith.Option, 0, 10)
 	opts = append(opts, zenith.WithoutWordVectors(), zenith.WithLimit(100), zenith.WithQueryCacheNamespace(id),
 		zenith.WithQueryCacheObserver(metrics.NewQueryCacheObserver()))
 	if m.cfg.QueryCacheRedisAddr != "" {
 		opts = append(opts, zenith.WithQueryCacheRedisAddr(m.cfg.QueryCacheRedisAddr))
+	}
+	if m.cfg.QueryCacheSize > 0 {
+		opts = append(opts, zenith.WithQueryCacheSize(m.cfg.QueryCacheSize))
+	}
+	if m.cfg.QueryCacheTTL > 0 {
+		opts = append(opts, zenith.WithQueryCacheTTL(m.cfg.QueryCacheTTL))
+	}
+	if m.cfg.QueryCacheSemanticThreshold > 0 {
+		opts = append(opts, zenith.WithQueryCacheSemanticThreshold(m.cfg.QueryCacheSemanticThreshold))
+	}
+	if m.cfg.ANNThresholdBandPct > 0 {
+		opts = append(opts, zenith.WithANNThresholdBand(m.cfg.ANNThresholdBandPct))
 	}
 	if m.cfg.Embedder != nil {
 		opts = append(opts, zenith.WithEmbedder(m.cfg.Embedder))

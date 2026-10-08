@@ -199,13 +199,17 @@ func runHTTP(addr string) error {
 	var mgr *collections.Manager
 	if !serveFlags.noCollections {
 		mgr, err = collections.New(collections.Config{
-			Root:                serveFlags.collectionsDir,
-			Embedder:            emb,
-			MaxCollections:      serveFlags.maxCollections,
-			DefaultMaxDocs:      serveFlags.collectionMaxDocs,
-			MaxOpen:             serveFlags.collectionMaxOpen,
-			IdleClose:           serveFlags.collectionIdleClose,
-			QueryCacheRedisAddr: serveFlags.queryCacheRedisAddr,
+			Root:                        serveFlags.collectionsDir,
+			Embedder:                    emb,
+			MaxCollections:              serveFlags.maxCollections,
+			DefaultMaxDocs:              serveFlags.collectionMaxDocs,
+			MaxOpen:                     serveFlags.collectionMaxOpen,
+			IdleClose:                   serveFlags.collectionIdleClose,
+			QueryCacheRedisAddr:         serveFlags.queryCacheRedisAddr,
+			QueryCacheSize:              cliFlags.queryCacheSize,
+			QueryCacheTTL:               cliFlags.queryCacheTTL,
+			QueryCacheSemanticThreshold: cliFlags.queryCacheSemanticThreshold,
+			ANNThresholdBandPct:         cliFlags.annThresholdBandPct,
 		})
 		if err != nil {
 			return fmt.Errorf("collections: %w", err)
@@ -223,7 +227,13 @@ func runHTTP(addr string) error {
 		return err
 	}
 
-	srv := sidecar.New(sidecar.Config{Key: serveFlags.key, Version: version, Model: model, Embedder: emb, Synonyms: synHash, Collections: mgr})
+	srv := sidecar.New(sidecar.Config{
+		Key: serveFlags.key, Version: version, Model: model, Embedder: emb, Synonyms: synHash, Collections: mgr,
+		QueryCacheSize:              cliFlags.queryCacheSize,
+		QueryCacheTTL:               cliFlags.queryCacheTTL,
+		QueryCacheSemanticThreshold: cliFlags.queryCacheSemanticThreshold,
+		ANNThresholdBandPct:         cliFlags.annThresholdBandPct,
+	})
 	// A collection upsert embeds on the request path, so both timeouts are far
 	// more generous than the ephemeral-only defaults were.
 	hs := &http.Server{Addr: addr, Handler: srv.Handler(), ReadHeaderTimeout: 5 * time.Second,
