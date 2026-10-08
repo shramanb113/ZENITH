@@ -38,6 +38,48 @@ type Config struct {
 	// expansion). Small per-request namespaces turn it off: it is the dominant indexing cost.
 	WordVectors bool
 
+	// QueryCacheSize is the in-process (L1) query-result cache's max entry
+	// count. <= 0 disables the query-result cache entirely (every Get/Set
+	// becomes a no-op in internal/index.Engine, byte-for-byte identical to
+	// the engine with no cache). Smaller than the embedding caches' 10,000
+	// default, since a result-list value is larger and less bounded in size
+	// than a fixed-dim []float32.
+	QueryCacheSize int
+	// QueryCacheTTL bounds how long an L2 (Redis) entry survives. 0 means
+	// "use the 5-minute default," not "no TTL" — an unbounded shared Redis
+	// cache is the one failure mode worth refusing by default. Has no effect
+	// when QueryCacheRedisAddr is unset (L1 has no TTL; staleness is handled
+	// by writeGen making old keys unreachable, reclaimed by LRU eviction).
+	QueryCacheTTL time.Duration
+	// QueryCacheRedisAddr is the L2 Redis address (e.g. "localhost:6379").
+	// "" (default) disables L2; the cache is then in-process (L1) only.
+	QueryCacheRedisAddr string
+	// QueryCacheNamespace prefixes every cache key, so a shared Redis used by
+	// multiple engines/collections doesn't let one tenant's cached results
+	// collide with another's. "" is always safe when QueryCacheRedisAddr is
+	// also unset (L1-only mode has no cross-process visibility to collide
+	// in). internal/collections.Manager sets this automatically per
+	// collection; a raw Engine user sharing Redis across their own multiple
+	// processes must set it explicitly.
+	QueryCacheNamespace string
+	// QueryCacheSemanticThreshold, when > 0, enables near-duplicate query
+	// matching: on an exact cache-key miss, the engine compares the
+	// incoming query's embedding against recently cached queries sharing the
+	// same filter+weights, returning the closest one above this cosine
+	// similarity. 0 (default) disables it — a wrong near-duplicate hit is a
+	// silently wrong answer, not just a slow one, so this is opt-in. A
+	// suggested starting point is 0.97 (deliberately conservative); tune
+	// from the zenith_query_cache_hits_total{tier="semantic"} counter.
+	QueryCacheSemanticThreshold float64
+	// ANNThresholdBandPct, when > 0, makes the ANN-vs-exact vector search
+	// choice near the corpus-size threshold follow measured rolling-average
+	// latency instead of always taking the static side of the line. E.g.
+	// 0.20 means: within ±20% of the configured ANN threshold, pick
+	// whichever path (ANN graph or exact scan) is currently faster. 0
+	// (default) disables this — the static threshold alone decides, exactly
+	// as today.
+	ANNThresholdBandPct float64
+
 	// Performance
 	EmbeddingWorkers int
 	CompactionInterv time.Duration
@@ -76,5 +118,12 @@ func DefaultConfig() *Config {
 		VectorWeight:     2.0, // RRF semantic-list weight (lexical list weight is 1.0)
 		NeuralWeight:     1.0,
 		WordVectors:      true,
+
+		QueryCacheSize:              1000,
+		QueryCacheTTL:               5 * time.Minute,
+		QueryCacheRedisAddr:         "",
+		QueryCacheNamespace:         "",
+		QueryCacheSemanticThreshold: 0,
+		ANNThresholdBandPct:         0,
 	}
 }
