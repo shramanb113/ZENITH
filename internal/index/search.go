@@ -160,6 +160,15 @@ func (e *Engine) SearchFilteredWeighted(ctx context.Context, query string, f *Fi
 		return cloneResponses(entry.Results), nil
 	}
 
+	if e.config.QueryCacheSemanticThreshold > 0 {
+		if qVec, ok := e.embedForSemanticScan(ctx, query); ok {
+			if entry, ok := e.semanticScan(bucket, qVec); ok {
+				e.cacheObserver.ObserveQueryCacheHit("semantic")
+				return cloneResponses(entry.Results), nil
+			}
+		}
+	}
+
 	e.cacheObserver.ObserveQueryCacheMiss()
 	v, err, _ := e.searchSF.Do(key, func() (any, error) {
 		return e.searchUncached(ctx, query, f, w)

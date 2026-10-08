@@ -107,6 +107,11 @@ type Engine struct {
 	// cacheObserver receives query-cache hit/miss events; defaults to a
 	// no-op so instrumentation is opt-in (see SetCacheObserver).
 	cacheObserver CacheObserver
+	// semanticScans counts how many times the semantic near-duplicate scan
+	// actually ran. Test-only visibility (package index tests read it
+	// directly); proves Config.QueryCacheSemanticThreshold == 0 truly skips
+	// the scan, not just that it found no hits.
+	semanticScans atomic.Int64
 
 	pendingDels map[uint64]struct{} // segment docs deleted since the last flush
 	// frozen is the delta a flush is writing (nil when none): read-only, still
