@@ -151,6 +151,10 @@ type Engine struct {
 	// not persisted: Load rebuilds it from the stored vectors.
 	ann        *ann.Index
 	annMinDocs int
+	// annLatency/exactLatency are rolling-average per-path search latencies
+	// (milliseconds), fed by every search that actually took that path.
+	// Used only when Config.ANNThresholdBandPct > 0 — see ann_adaptive.go.
+	annLatency, exactLatency ewma
 	// serialEmbed makes a search embed its query before starting the lexical
 	// phase instead of overlapping them. Test hook for measuring the overlap.
 	serialEmbed bool

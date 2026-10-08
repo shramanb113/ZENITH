@@ -459,8 +459,11 @@ func (e *Engine) vectorPass(ctx context.Context, queryVec []float32, f *Filter) 
 		}
 	}
 
-	if e.ann != nil && e.ann.Len() > 0 {
-		if hits, ok := e.annSearch(queryVec, pred); ok {
+	if e.ann != nil && e.ann.Len() > 0 && e.shouldUseANN(e.docCountLocked()) {
+		start := time.Now()
+		hits, ok := e.annSearch(queryVec, pred)
+		e.annLatency.observe(float64(time.Since(start).Milliseconds()))
+		if ok {
 			for _, h := range hits {
 				if h.Score > 0 {
 					scores[h.ID] = h.Score
@@ -470,6 +473,7 @@ func (e *Engine) vectorPass(ctx context.Context, queryVec []float32, f *Filter) 
 		}
 	}
 
+	start := time.Now()
 	count := 0
 	var canceled error
 	e.eachVector(func(id uint64, v []uint16) bool {
@@ -488,6 +492,7 @@ func (e *Engine) vectorPass(ctx context.Context, queryVec []float32, f *Filter) 
 		}
 		return true
 	})
+	e.exactLatency.observe(float64(time.Since(start).Milliseconds()))
 	if canceled != nil {
 		return nil, canceled
 	}
