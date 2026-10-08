@@ -44,6 +44,35 @@ The secondary position is that nobody else owns this category yet. Meilisearch, 
 
 ---
 
+## Repositioning, 2026-10-08: the database is the product; embeddability is a capability
+
+Everything above explains real reasoning and stays true as far as it goes: ZENITH *is*
+embeddable, zero-config, and that is a genuine, hard-won property (see "The Python
+sidecar that had to go" below for what it cost to get there). What changes here is which
+property is the *headline*.
+
+The framing above treats "embeddable library" as ZENITH's identity and everything else —
+retrieval quality, scale, RAG-platform features — as things to add carefully without
+breaking that identity. The updated position inverts the emphasis: **ZENITH is a
+full-featured hybrid/vector search database, and embeddability is one of its
+capabilities — a deployment mode, not the ceiling on ambition.** The SQLite analogy
+still holds for *how you can run it* (no sidecar, `go:embed`, `zenith.Open()` just
+works), but it no longer bounds *what it's allowed to become*. The RAG-platform roadmap
+in `ROADMAP.md` (chunking, query understanding, diversity-aware result shaping, context
+assembly, evaluation, streaming/guardrails) and the query-serving-layer work in
+`QUERYCACHE.md` are scoped against this updated identity, not the old one.
+
+**What does not change:** the architectural rule that keeps `pkg/zenith` a thin,
+dependency-light embeddable surface — ops complexity (auth, multi-tenancy, metrics,
+cache internals) stays in `cmd/`/`internal/`, never leaks into the library's public API
+— is unaffected by this repositioning. That rule was always about keeping the embeddable
+*deployment mode* honest, which is still a real capability worth protecting; it was never
+the reason the project's *ambition* was kept narrow, and those are now treated as two
+separate questions. Risk #1's mitigation below ("Don't compete as 'a vector database'")
+is superseded accordingly — see the note at that row.
+
+---
+
 ## The Python sidecar that had to go
 
 The earliest version of ZENITH used a Python process called `nerve` for ML inference and PDF extraction. The pitch at the time was "pure Go, single binary, drop it anywhere." The reality was that before the binary would do anything useful, you needed Python 3.10+, a pip or uv installation, a virtualenv, and about 600 MB of packages. That setup step could take up to 20 minutes on a cold machine.
