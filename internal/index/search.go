@@ -183,16 +183,28 @@ func (e *Engine) SearchFilteredWeighted(ctx context.Context, query string, f *Fi
 	}
 
 	e.cacheObserver.ObserveQueryCacheMiss()
-	v, err, _ := e.searchSF.Do(key, func() (any, error) {
-		return e.searchUncached(ctx, query, f, w)
+	// The shared computation runs on a ctx that can't be canceled by any one
+	// caller: DoChan fans the same result out to every concurrent caller of
+	// this key, so if it ran on the leader's own ctx, that caller hitting its
+	// deadline or disconnecting would hand every other waiter for the same
+	// popular query a spurious context.Canceled/DeadlineExceeded error too.
+	// Each caller still honors its own ctx below by racing it against the
+	// shared result instead of blocking on it unconditionally.
+	ch := e.searchSF.DoChan(key, func() (any, error) {
+		return e.searchUncached(context.WithoutCancel(ctx), query, f, w)
 	})
-	if err != nil {
-		return nil, err
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		entry := res.Val.(cacheResult)
+		entry.BucketKey = bucket
+		e.cache.Set(ctx, key, entry)
+		return cloneResponses(entry.Results), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	entry := v.(cacheResult)
-	entry.BucketKey = bucket
-	e.cache.Set(ctx, key, entry)
-	return cloneResponses(entry.Results), nil
 }
 
 // searchUncached is SearchFilteredWeighted's actual computation — the

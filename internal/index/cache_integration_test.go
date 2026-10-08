@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/shramanb113/ZENITH/internal/analysis"
 	"github.com/shramanb113/ZENITH/internal/config"
@@ -268,6 +269,93 @@ func TestCache_DisabledWhenSizeIsZero(t *testing.T) {
 	}
 	if n := emb.calls.Load(); n != 2 {
 		t.Fatalf("with cache disabled, 2 identical searches produced %d embedder calls, want 2 (no caching)", n)
+	}
+}
+
+// blockingEmbedder blocks every Embed/EmbedBatch call until release is
+// closed, letting a test hold a search's query-embedding step open for as
+// long as it needs to arrange a precise race.
+type blockingEmbedder struct {
+	release chan struct{}
+	vec     []float32
+}
+
+func (b *blockingEmbedder) Embed(ctx context.Context, _ string) ([]float32, error) {
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return b.vec, nil
+}
+func (b *blockingEmbedder) EmbedBatch(ctx context.Context, t []string) ([][]float32, error) {
+	out := make([][]float32, len(t))
+	for i := range t {
+		v, err := b.Embed(ctx, t[i])
+		if err != nil {
+			return nil, err
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+func (b *blockingEmbedder) Dimensions() int { return len(b.vec) }
+
+// Review Finding (code review, 2026-10-08): the shared singleflight
+// computation used to run on the triggering caller's own ctx, so one
+// caller's cancellation/timeout produced a spurious error for every other
+// concurrent caller of the same popular query. The computation must run on
+// a ctx no single caller can cancel; each caller's own cancellation must
+// only ever affect that caller's own return value.
+func TestCache_OneCallersCtxCancellationNeverAffectsAnother(t *testing.T) {
+	emb := &blockingEmbedder{release: make(chan struct{}), vec: []float32{1, 0}}
+	cfg := config.DefaultConfig()
+	cfg.WordVectors = false
+	cfg.QueryCacheSize = 1000
+	e := NewEngine(cfg, emb, ranking.NewWeightedRRFRanker(cfg.RRFConstant, cfg.MaxResults, 1.0, cfg.VectorWeight), analysis.NewStandardAnalyzer())
+	e.SetAutoCompact(false)
+	defer e.Close()
+	bg := context.Background()
+	if err := e.AddWithVectorAttrs(bg, "doc1", "hello world", []float32{1, 0}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	cancelCtx, cancel := context.WithCancel(bg)
+	type result struct {
+		res []SearchResponse
+		err error
+	}
+	cancelCh := make(chan result, 1)
+	liveCh := make(chan result, 1)
+
+	go func() {
+		res, err := e.SearchFiltered(cancelCtx, "hello", nil)
+		cancelCh <- result{res, err}
+	}()
+	go func() {
+		res, err := e.SearchFiltered(bg, "hello", nil)
+		liveCh <- result{res, err}
+	}()
+
+	// Give both goroutines time to register as waiters on the same
+	// singleflight key (both are still blocked inside Embed) before
+	// canceling one of them.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+	close(emb.release) // let the shared computation finish
+
+	cancelResult := <-cancelCh
+	liveResult := <-liveCh
+
+	if cancelResult.err == nil {
+		t.Fatal("the canceled caller's Search returned no error, want context.Canceled")
+	}
+	if liveResult.err != nil {
+		t.Fatalf("the live caller's Search returned an error (%v) because another caller's ctx was canceled — the shared computation must be immune to any one caller's cancellation", liveResult.err)
+	}
+	if len(liveResult.res) == 0 {
+		t.Fatal("the live caller's Search returned no results")
 	}
 }
 
