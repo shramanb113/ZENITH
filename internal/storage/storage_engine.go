@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 )
 
 // journalOpPut/journalOpDelete prefix every journaled value with one byte so
@@ -58,16 +59,23 @@ func Open(cfg EngineConfig) (*Engine, error) {
 	if err := os.MkdirAll(cfg.Dir, 0755); err != nil {
 		return nil, fmt.Errorf("storage: create dir: %w", err)
 	}
+	return openWithFS(cfg.Dir, nil) // nil FS → pebble.Options defaults to vfs.Default
+}
 
-	db, err := pebble.Open(cfg.Dir, &pebble.Options{})
+// openWithFS is Open with an injectable vfs.FS, used by tests to exercise
+// Pebble's own crash-recovery path (e.g. vfs.NewMem(), or a fault-injecting
+// FS) without touching the real OS filesystem. Open(cfg) is openWithFS with
+// the real OS filesystem (vfs.Default), which pebble.Options uses when FS is
+// left nil.
+func openWithFS(dir string, fs vfs.FS) (*Engine, error) {
+	if dir == "" {
+		return nil, errors.New("storage: dir must not be empty")
+	}
+	db, err := pebble.Open(dir, &pebble.Options{FS: fs})
 	if err != nil {
 		return nil, fmt.Errorf("storage: pebble open: %w", err)
 	}
-
-	return &Engine{
-		db:     db,
-		closed: make(chan struct{}),
-	}, nil
+	return &Engine{db: db, closed: make(chan struct{})}, nil
 }
 
 // Close flushes and closes the underlying Pebble store.
