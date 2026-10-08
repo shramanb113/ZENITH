@@ -67,7 +67,13 @@ func main() {
 	// Embedder: use local ONNX model when CGo is available, deterministic otherwise.
 	var emb embedding.Embedder
 	if localEmb, err := localembedder.New(); err == nil {
-		emb, _ = embedding.NewCachingEmbedder(localEmb, 10_000)
+		cached, cerr := embedding.NewCachingEmbedder(localEmb, 10_000)
+		if cerr == nil {
+			cached.SetPersistentCache(storageEng)
+			emb = cached
+		} else {
+			emb = localEmb
+		}
 		slog.Info("Local ONNX embedder ready")
 	} else {
 		slog.Warn("Local embedder unavailable, using deterministic", "error", err)
