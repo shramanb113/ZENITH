@@ -283,15 +283,20 @@ func (e *Engine) eachPhonDoc(code string, fn func(id uint64)) {
 	}
 }
 
-// eachVector calls fn for every live document that has a vector.
-func (e *Engine) eachVector(fn func(id uint64, v []uint16)) {
+// eachVector calls fn for every live document that has a vector, stopping
+// early if fn returns false.
+func (e *Engine) eachVector(fn func(id uint64, v []uint16) bool) {
 	for id, ent := range e.vectors.GetVectors() {
-		fn(id, ent.Vector)
+		if !fn(id, ent.Vector) {
+			return
+		}
 	}
 	if f := e.frozen; f != nil {
 		for id, ent := range f.vectors.GetVectors() {
 			if _, gone := f.dead[id]; !gone {
-				fn(id, ent.Vector)
+				if !fn(id, ent.Vector) {
+					return
+				}
 			}
 		}
 	}
@@ -301,7 +306,9 @@ func (e *Engine) eachVector(fn func(id uint64, v []uint16)) {
 				continue
 			}
 			if v := l.seg.Vec(row); v != nil {
-				fn(l.seg.DocID(row), v)
+				if !fn(l.seg.DocID(row), v) {
+					return
+				}
 			}
 		}
 	}

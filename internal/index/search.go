@@ -38,7 +38,10 @@ type queryEmbedding struct {
 // lexicalPhase is everything a search does before it needs the query vector:
 // analysis, the lexical candidate pass, attribute filtering and BM25.
 // Engine.mu held for reading.
-func (e *Engine) lexicalPhase(query string, f *Filter, phoneticWeight float64) (rawTokens []string, keywordScores map[uint64]float64, bm25Results []ranking.BM25Result) {
+func (e *Engine) lexicalPhase(ctx context.Context, query string, f *Filter, phoneticWeight float64) (rawTokens []string, keywordScores map[uint64]float64, bm25Results []ranking.BM25Result, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, err
+	}
 	var tokens []analysis.Token
 	if qa, ok := e.analyzer.(analysis.QueryAnalyzer); ok {
 		tokens = qa.AnalyzeQuery(query)
@@ -55,7 +58,7 @@ func (e *Engine) lexicalPhase(query string, f *Filter, phoneticWeight float64) (
 	// to whatever the fallback/embedder considers "nothing", which returned
 	// arbitrary top-N results instead of no results.
 	if len(rawTokens) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	e.inverted.RLock()
@@ -68,7 +71,7 @@ func (e *Engine) lexicalPhase(query string, f *Filter, phoneticWeight float64) (
 	// BM25 over the literal query terms is needed by every fusion below and by
 	// the weak-result check; compute it once.
 	bm25Results = e.bm25.Query(rawTokens)
-	return rawTokens, keywordScores, bm25Results
+	return rawTokens, keywordScores, bm25Results, nil
 }
 
 // Weights overrides the per-list ranking weights for a single SearchFilteredWeighted
@@ -198,7 +201,10 @@ func (e *Engine) searchUncached(ctx context.Context, query string, f *Filter, w 
 	}()
 
 	phoneticWeight := e.phoneticWeightFor(w)
-	rawTokens, keywordScores, bm25Results := e.lexicalPhase(query, f, phoneticWeight)
+	rawTokens, keywordScores, bm25Results, err := e.lexicalPhase(ctx, query, f, phoneticWeight)
+	if err != nil {
+		return cacheResult{}, err
+	}
 	if len(rawTokens) == 0 {
 		return cacheResult{}, nil
 	}
@@ -222,7 +228,10 @@ func (e *Engine) searchUncached(ctx context.Context, query string, f *Filter, w 
 				qe = <-embedded
 				e.mu.RLock()
 				locked = true
-				rawTokens, keywordScores, bm25Results = e.lexicalPhase(query, f, phoneticWeight)
+				rawTokens, keywordScores, bm25Results, err = e.lexicalPhase(ctx, query, f, phoneticWeight)
+				if err != nil {
+					return cacheResult{}, err
+				}
 				if len(rawTokens) == 0 {
 					return cacheResult{}, nil
 				}
@@ -235,11 +244,17 @@ func (e *Engine) searchUncached(ctx context.Context, query string, f *Filter, w 
 	queryVec := normalizeVector(qe.vec)
 
 	e.vectors.RLock()
-	vectorScores := e.vectorPass(queryVec, f)
+	vectorScores, err := e.vectorPass(ctx, queryVec, f)
 	e.vectors.RUnlock()
+	if err != nil {
+		return cacheResult{}, err
+	}
 
 	scorer := e.scorerFor(w)
-	ranks := e.rankAndFuse(keywordScores, bm25Results, vectorScores, scorer)
+	ranks, err := e.rankAndFuse(ctx, keywordScores, bm25Results, vectorScores, scorer)
+	if err != nil {
+		return cacheResult{}, err
+	}
 
 	// Neural expansion is meant to catch queries whose literal terms aren't
 	// in the vocabulary (typos, unusual phrasing) by pulling in embedding
@@ -267,7 +282,10 @@ func (e *Engine) searchUncached(ctx context.Context, query string, f *Filter, w 
 			expandedKeywords[id] += score
 		}
 
-		ranks = e.rankAndFuse(expandedKeywords, bm25Results, vectorScores, scorer)
+		ranks, err = e.rankAndFuse(ctx, expandedKeywords, bm25Results, vectorScores, scorer)
+		if err != nil {
+			return cacheResult{}, err
+		}
 	}
 
 	return cacheResult{Results: ranks, QueryVec: queryVec}, nil
@@ -398,10 +416,13 @@ func (e *Engine) bkTree() *analysis.BKTree {
 // once an ANN graph exists and the filter is broad, the graph returns the
 // top annK candidates instead of scoring every document. pred (may be nil)
 // is applied here, before fusion.
-func (e *Engine) vectorPass(queryVec []float32, f *Filter) map[uint64]float64 {
+func (e *Engine) vectorPass(ctx context.Context, queryVec []float32, f *Filter) (map[uint64]float64, error) {
 	scores := make(map[uint64]float64)
 	if len(queryVec) == 0 {
-		return scores
+		return scores, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	pred := f.pred()
 
@@ -422,7 +443,7 @@ func (e *Engine) vectorPass(queryVec []float32, f *Filter) map[uint64]float64 {
 						}
 					}
 				}
-				return scores
+				return scores, nil
 			}
 		}
 	}
@@ -434,19 +455,32 @@ func (e *Engine) vectorPass(queryVec []float32, f *Filter) map[uint64]float64 {
 					scores[h.ID] = h.Score
 				}
 			}
-			return scores
+			return scores, nil
 		}
 	}
 
-	e.eachVector(func(id uint64, v []uint16) {
+	count := 0
+	var canceled error
+	e.eachVector(func(id uint64, v []uint16) bool {
+		count++
+		if count%2048 == 0 {
+			if err := ctx.Err(); err != nil {
+				canceled = err
+				return false
+			}
+		}
 		if pred != nil && !pred(e.attrs[id]) {
-			return
+			return true
 		}
 		if s := ann.DotF32F16(queryVec, v); s > 0 {
 			scores[id] = s
 		}
+		return true
 	})
-	return scores
+	if canceled != nil {
+		return nil, canceled
+	}
+	return scores, nil
 }
 
 func (e *Engine) neuralExpand(expandedTokens []string) map[uint64]float64 {
@@ -466,11 +500,15 @@ func (e *Engine) neuralExpand(expandedTokens []string) map[uint64]float64 {
 }
 
 func (e *Engine) rankAndFuse(
+	ctx context.Context,
 	kwScores map[uint64]float64,
 	bm25Results []ranking.BM25Result,
 	vScores map[uint64]float64,
 	scorer ranking.Scorer,
-) []SearchResponse {
+) ([]SearchResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	bm25ByID := make(map[uint64]float64, len(bm25Results))
 	for _, r := range bm25Results {
 		bm25ByID[r.DocID] = r.Score
@@ -488,7 +526,7 @@ func (e *Engine) rankAndFuse(
 		for i, r := range scored {
 			results[i] = SearchResponse{ID: r.ID, Score: r.Score}
 		}
-		return results
+		return results, nil
 	}
 
 	// Hybrid mode: rank the lexical RRF list by kwRank (BM25-weighted, with
@@ -506,7 +544,7 @@ func (e *Engine) rankAndFuse(
 	for i, r := range scored {
 		results[i] = SearchResponse{ID: r.ID, Score: r.Score}
 	}
-	return results
+	return results, nil
 }
 
 // getSemanticNeighbors returns the topN most similar words to token by dot

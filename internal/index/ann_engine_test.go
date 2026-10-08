@@ -236,7 +236,7 @@ func BenchmarkHybridVectorPass(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				e.mu.RLock()
 				e.vectors.RLock()
-				_ = e.vectorPass(q, nil)
+				_, _ = e.vectorPass(ctx, q, nil)
 				e.vectors.RUnlock()
 				e.mu.RUnlock()
 			}

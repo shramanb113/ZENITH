@@ -307,7 +307,7 @@ func TestScale(t *testing.T) {
 		}
 		top := make([]hit, 0, 11)
 		eng.mu.RLock()
-		eng.eachVector(func(id uint64, v []uint16) {
+		eng.eachVector(func(id uint64, v []uint16) bool {
 			s := ann.DotF32F16(qv, v)
 			if len(top) < 10 || s > top[len(top)-1].s {
 				top = append(top, hit{id, s})
@@ -316,6 +316,7 @@ func TestScale(t *testing.T) {
 					top = top[:10]
 				}
 			}
+			return true
 		})
 		got, ok := eng.annSearch(qv, nil)
 		eng.mu.RUnlock()

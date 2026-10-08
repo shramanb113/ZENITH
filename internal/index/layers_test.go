@@ -119,8 +119,9 @@ func dumpVectorNeighborhood(t *testing.T, tag string, e *Engine, query string) {
 		score float64
 	}
 	var scores []sc
-	e.eachVector(func(id uint64, v []uint16) {
+	e.eachVector(func(id uint64, v []uint16) bool {
 		scores = append(scores, sc{id: id, score: ann.DotF32F16(qv, v)})
+		return true
 	})
 	sort.Slice(scores, func(i, j int) bool { return scores[i].score > scores[j].score })
 	t.Logf("--- %s: vector neighborhood for %q ---", tag, query)
@@ -138,17 +139,18 @@ func dumpBM25Detail(t *testing.T, tag string, e *Engine, query, targetName strin
 	t.Helper()
 	var targetID uint64
 	found := false
-	e.eachVector(func(id uint64, v []uint16) {
+	e.eachVector(func(id uint64, v []uint16) bool {
 		if !found && e.origID(id) == targetName {
 			targetID, found = id, true
 		}
+		return true
 	})
 	if !found {
 		t.Logf("--- %s: BM25 detail for %q against %q: document not found ---", tag, targetName, query)
 		return
 	}
 	e.mu.RLock()
-	rawTokens, _, bm25Results := e.lexicalPhase(query, nil, e.config.PhoneticWeight)
+	rawTokens, _, bm25Results, _ := e.lexicalPhase(context.Background(), query, nil, e.config.PhoneticWeight)
 	e.mu.RUnlock()
 	var full float64
 	for _, r := range bm25Results {

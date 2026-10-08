@@ -72,7 +72,7 @@ func (e *Engine) rebuildANNLocked() {
 		v  []uint16
 	}
 	items := make([]item, 0, e.vectorCount())
-	e.eachVector(func(id uint64, v []uint16) { items = append(items, item{id, v}) })
+	e.eachVector(func(id uint64, v []uint16) bool { items = append(items, item{id, v}); return true })
 	sort.Slice(items, func(i, j int) bool { return items[i].id < items[j].id })
 	g := ann.New(annM, annEFConstruction)
 	for _, it := range items {

@@ -154,7 +154,7 @@ func TestMSMARCORecallDiag(t *testing.T) {
 
 			queryVec, _ := eng.embedder.Embed(ctx, q.text)
 			eng.vectors.RLock()
-			vScores := eng.vectorPass(queryVec, nil)
+			vScores, _ := eng.vectorPass(ctx, queryVec, nil)
 			eng.vectors.RUnlock()
 
 			// Lexical ranking exactly as the hybrid branch of rankAndFuse.
@@ -183,7 +183,8 @@ func TestMSMARCORecallDiag(t *testing.T) {
 				varLex:   make([]bool, len(variants)),
 				varFused: make([]bool, len(variants)),
 			}
-			for _, r := range eng.rankAndFuse(kwScores, bm25Results, vScores, eng.scorer) {
+			fused, _ := eng.rankAndFuse(ctx, kwScores, bm25Results, vScores, eng.scorer)
+			for _, r := range fused {
 				if r.ID == qrels[q.id] {
 					res.fusedHit = true
 					break
