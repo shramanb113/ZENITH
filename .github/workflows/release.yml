@@ -41,11 +41,19 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
+      # egor-tensin/setup-mingw@v2's own cleanup script fails against current
+      # mingw-builds releases (it unconditionally removes a libpthread.dll.a
+      # that newer posix-seh-ucrt builds no longer ship) — install directly instead.
       - name: Set up MinGW (Windows)
         if: matrix.goos == 'windows'
-        uses: egor-tensin/setup-mingw@v2
-        with:
-          platform: x64
+        shell: pwsh
+        run: |
+          choco install mingw -y --no-progress --force -x64
+          $mingwBin = "C:\ProgramData\mingw64\mingw64\bin"
+          if (-not (Test-Path $mingwBin)) {
+            throw "mingw bin dir not found at $mingwBin"
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $mingwBin
 
       # Model + platform-specific onnxruntime are gitignored; fetch them for this
       # runner's OS/arch. The script also records which model it fetched
