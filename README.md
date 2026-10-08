@@ -11,7 +11,35 @@ You can use it two ways:
 - **As a CLI tool** — install once, point at directories, search from your terminal
 - **As a Go library** — `go get` it, call three methods, ship search inside your app
 
-The storage layer is a full LSM-tree (WAL → MemTable → SSTable → Bloom filters), built from scratch. The embedding model (`gte-small`, int8 ONNX; swappable, see [Choosing an embedding model](#choosing-an-embedding-model)) is baked into the binary — no Python, no server, no setup step.
+The storage layer is a crash-safe document journal and atomic multi-document transaction log backed by [Pebble](https://github.com/cockroachdb/pebble) (CockroachDB's embedded LSM store), plus a persistent, content-addressed embedding cache so the same text is never re-embedded twice across restarts — see [Storage Engine](#storage-engine). The embedding model (`gte-small`, int8 ONNX; swappable, see [Choosing an embedding model](#choosing-an-embedding-model)) is baked into the binary — no Python, no server, no setup step.
+
+---
+
+## Table of Contents
+
+- [Why ZENITH](#why-zenith)
+- [Requirements](#requirements)
+- [Use as a CLI tool](#use-as-a-cli-tool)
+- [Use as a Go library](#use-as-a-go-library)
+- [How Embedding Works](#how-embedding-works)
+- [CLI Reference](#cli-reference)
+- [Architecture](#architecture)
+- [Feature Status](#feature-status)
+- [Storage Engine](#storage-engine)
+- [Search Pipeline](#search-pipeline)
+- [File Support](#file-support)
+- [gRPC API](#grpc-api)
+- [Metadata filtering](#metadata-filtering)
+- [Per-query ranking controls](#per-query-ranking-controls)
+- [Query result caching](#query-result-caching)
+- [Observability](#observability)
+- [Project Structure](#project-structure)
+- [Configuration](#configuration)
+- [Build Roadmap](#build-roadmap)
+- [Contributing](#contributing)
+- [License](#license)
+- [HTTP server (`zenith serve --http`)](#http-server-zenith-serve---http)
+- [Docker demo (CLI + gRPC, persistent)](#docker-demo-cli--grpc-persistent)
 
 ---
 
@@ -31,7 +59,7 @@ See [DECISIONS.md](./DECISIONS.md) for the full architectural and strategic reas
 
 | Requirement | Version | Notes |
 |---|---|---|
-| Go | 1.24+ | Required |
+| Go | 1.25+ | Required |
 | C compiler | gcc / MinGW-w64 | Only to build semantic search from source (CGo). Not needed for the prebuilt release binaries, nor for the lexical-only build. See note below. |
 | Ollama | any | Optional — alternative embedder |
 
@@ -282,6 +310,7 @@ zenith index --db my-index.db ~/Projects
 ```
 --db           string   Index database file             (default: ~/.zenith/zenith.db)
 --fst          string   On-disk FST path                (default: ~/.zenith/data/index.fst)
+--storage-dir  string   Pebble document-journal + embedding-cache dir (default: <db>.pebble)
 --embedder     string   auto | local | ollama | deterministic  (default: auto)
 --ollama-url   string   Ollama server URL               (default: http://localhost:11434)
 --ollama-model string   Ollama embedding model          (default: nomic-embed-text)
@@ -328,7 +357,7 @@ zenith search --db my-index.db "query"
 --ann-threshold-band-pct float      Let measured latency pick ANN vs. exact scan within this band (default: 0, disabled)
 ```
 
-See "Query result caching" above for what each of these does.
+See "Query result caching" above for what each of these does. `search` is read-only and deliberately never opens the Pebble storage engine (no journal, no embedding-cache lookup) — so it runs concurrently with a `zenith watch`/`zenith serve` process that already holds that lock on the same `--db`, instead of contending for it.
 
 ---
 
@@ -366,6 +395,31 @@ zenith log --type INDEXED -f
 
 ---
 
+### `zenith txn` — atomic multi-document commits
+
+```bash
+# JSONL: one {"id":...,"text":...,"attrs":{...}} per line ("attrs" optional)
+zenith txn add --file docs.jsonl --db my.db
+
+# Comma-separated IDs — all removed together, or none are
+zenith txn remove --ids doc1,doc2,doc3 --db my.db
+```
+
+Every document is journaled and applied atomically (one Pebble transaction, one fsync) — a failure partway through leaves nothing applied. This is the CLI surface for `index.Engine.AddTransaction`/`RemoveBatch`, which `zenith index` itself doesn't use (it journals one document at a time).
+
+---
+
+### `zenith storage` — inspect and maintain the journal directly
+
+```bash
+zenith storage inspect doc1 --db my.db   # text, attrs, and whether a vector was journaled
+zenith storage prune --db my.db          # save + prune the journal on demand, mid-session
+```
+
+`inspect` only looks at the journal — a document already saved into a segment and pruned from the journal reports "not journaled", which is expected, not an error. `prune` runs the same snapshot → save → prune sequence that normally only happens at process exit, useful for bounding journal growth on a long-running `zenith watch`.
+
+---
+
 ### Other commands
 
 ```bash
@@ -383,50 +437,33 @@ zenith setup --clean    # remove leftover Python files from v1
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    A["zenith index &lt;path&gt;<br/>(crawler — fsnotify, recursive walk + live watching)"] --> B["Analyzer<br/>regex tokenise, camelCase-aware, lowercase,<br/>stop-word filter, Porter2 stem, FST prefix-resolve, synonym expand"]
+    B --> C["Embedder cascade (default: auto)<br/>1. ONNX gte-small (embedded, in-process)<br/>2. Ollama nomic-embed-text<br/>3. deterministic (fallback)<br/>→ []float32, 384-dim"]
+    C --> D
+
+    subgraph D["Storage Engine (Pebble)"]
+        D1["Document journal + Txn<br/>DocumentJournal.Put/Delete, atomic multi-doc commits<br/>fsync before the in-memory index ever sees a write"]
+        D2["Persistent embedding cache<br/>content-addressed: hash(model, text) → vector<br/>survives restarts — never re-embed the same text twice"]
+    end
+
+    D --> E["Index Engine<br/>immutable memory-mapped segments + a small mutable delta"]
+    E --> F["zenith txn add/remove, zenith storage inspect/prune<br/>(direct CLI access to the journal + transactions)"]
+
+    G["zenith search &lt;query&gt;"] --> H["Query Engine"]
+    H --> H1["lexical: BM25 + TF-IDF + edge n-grams + phonetic"]
+    H --> H2["fuzzy: BK-tree / FST Levenshtein automaton, O(log n)"]
+    H --> H3["semantic: vector cosine (exact below the ANN threshold, HNSW above it)"]
+    H1 --> I["RRF fusion — merges all signals"]
+    H2 --> I
+    H3 --> I
+    E -.->|reads| H
+
+    I --> J["zenith serve → gRPC server (:8080)"]
 ```
-zenith index <path>
-      │
-      ▼
-┌─────────────┐     ┌──────────────────────┐     ┌──────────────────────────────┐
-│   Crawler   │────▶│       Analyzer        │────▶│         Embedder             │
-│  (fsnotify) │     │                      │     │                              │
-│  recursive  │     │  regex tokenise      │     │  cascade (default: auto):    │
-│  dir walk   │     │  camelCase-aware     │     │  1. ONNX  gte-small          │
-│  + live     │     │  lowercase           │     │     (embedded, in-process)   │
-│  watching   │     │  stop-word filter    │     │  2. Ollama nomic-embed-text  │
-│             │     │  Porter2 stem        │     │  3. deterministic (fallback) │
-│             │     │  FST prefix-resolve  │     │                              │
-│             │     │  synonym expand      │     │  → []float32 (384-dim)       │
-└─────────────┘     └──────────────────────┘     └──────────────┬───────────────┘
-                                                                │
-                               ┌────────────────────────────────┘
-                               ▼
-                       ┌───────────────┐
-                       │  LSM Storage  │
-                       │               │
-                       │  WAL          │  crash-safe append log
-                       │  MemTable     │  skip-list, O(log n)
-                       │  SSTable      │  immutable, block-structured
-                       │  Bloom filter │  O(1) miss bypass
-                       │  Sparse index │  memory-efficient offsets
-                       │  Compaction   │  leveled, background worker
-                       └───────┬───────┘
-                               │
-zenith search <query>          ▼
-      │                ┌───────────────┐
-      ├───────────────▶│  Query Engine │
-      │  lexical       │               │
-      │  fuzzy         │  BM25 scoring │
-      │  semantic      │  TF-IDF       │
-      │                │  edge n-grams │
-      │                │  phonetic     │
-      │                │  BK-tree      │  O(log n) fuzzy
-      │                │  vector cosine│  dot product
-      │                │  RRF fusion   │  merges all signals
-      │                └───────────────┘
-      │
-      └──▶ zenith serve ──▶ gRPC server (:8080)
-```
+
+Every document mutation (`index`, `watch`, `serve`, `txn add/remove`) is durably journaled before it touches the in-memory index — a crash loses nothing acknowledged. The embedding cache sits beside that journal: the same text embedded twice, in any process, on any day, costs one ONNX call, not two.
 
 ---
 
@@ -436,8 +473,11 @@ zenith search <query>          ▼
 |---|---|---|
 | CLI (`index`, `search`, `watch`, `serve`, `version`) | Active | |
 | Go library (`pkg/zenith`) | Active | `go get` — embed search in your app |
-| LSM storage (WAL, MemTable, SSTable, Compaction) | Active | Ground-up implementation |
-| Bloom filter + sparse index | Active | Per-SSTable |
+| Pebble-backed document journal | Active | Crash-safe `Put`/`Delete` ahead of the in-memory index, for both `cmd/server` and `cmd/zenith` |
+| Atomic multi-document transactions | Active | `AddTransaction`/`RemoveBatch`, one fsync, all-or-nothing; exposed via `zenith txn add/remove` |
+| Persistent embedding cache | Active | Content-addressed (hash of model + text), survives restarts — see "Storage Engine" |
+| Journal vector carry (format v2) | Active | Replay never re-embeds a document whose vector it already journaled |
+| `zenith storage inspect`/`prune` | Active | Direct journal inspection and on-demand pruning — see "CLI Reference" |
 | BK-tree fuzzy matching | Active | O(log n) Levenshtein |
 | BM25 + TF-IDF scoring | Active | |
 | Edge n-gram prefix search | Active | |
@@ -466,18 +506,27 @@ zenith search <query>          ▼
 
 ## Storage Engine
 
-Full LSM-tree — same architecture as RocksDB and LevelDB, built from scratch.
+`internal/storage.Engine` is a thin wrapper around [Pebble](https://github.com/cockroachdb/pebble) — CockroachDB's embedded LSM key-value store — for both `cmd/server`'s and `cmd/zenith`'s raw-engine (`--db`) path. Pebble owns its own WAL, memtable, SSTables, and compaction; nothing here reimplements that.
 
 | Component | Implementation | Status |
 |---|---|---|
-| Write-Ahead Log | Append-only, CRC-framed, crash-safe | Active |
-| MemTable | Skip-list, sorted, O(log n) ops | Active |
-| SSTable | Immutable block-structured sorted files | Active |
-| Group Committer | Batches concurrent flushes into one fsync | Active |
-| Leveled Compaction | Background goroutine, tombstone pruning | Active |
-| Bloom Filter | Probabilistic O(1) disk-lookup bypass | Active |
-| Sparse Index | Memory-efficient offset map per SSTable | Active |
-| FST Dictionary | Rebuilt after every flush, prefix-resolve | Active |
+| Document journal | `Put`/`Delete` fsync a document mutation before the caller applies it to the in-memory index | Active |
+| Atomic transactions | `Txn` (one Pebble batch, one fsync) backs `AddTransaction`/`RemoveBatch` — every document visible together or none are | Active |
+| Replay / Snapshot / Prune | Full-keyspace replay on startup; snapshot-before-save, prune-after-save bounds journal growth without racing concurrent writes | Active |
+| Journal format v2 | Journal values carry the embedding vector alongside text/attrs — a replay never re-embeds a document it already embedded once; legacy entries without a vector still fall back to re-embedding | Active |
+| Persistent embedding cache | A second Pebble instance (`<dir>/embcache`) keyed by `hash(embedder identity, text)`; checked before every embed call, in both `cmd/zenith` and `cmd/server`, survives process restarts | Active |
+| FST term dictionary | Owned entirely by the Index Engine (not the storage layer) — fed by its live vocabulary, persisted via `SetFSTPath` | Active |
+
+**Two separate Pebble instances, not one keyspace.** The document journal's keys are raw caller-supplied document IDs with no reserved prefix, so the embedding cache lives in its own instance rather than risking a collision. Document-journal writes fsync (`pebble.Sync`); embedding-cache writes don't (`pebble.NoSync`) — a lost cache entry after a crash costs one re-embed, never data loss, so paying an fsync for it would undercut the whole point of caching.
+
+`--storage-dir` (default: derived from `--db`, so two different `--db` paths never share one journal) controls where both instances live:
+
+```bash
+zenith index --db my.db ~/Documents          # storage-dir defaults to my.db.pebble
+zenith txn add --file docs.jsonl --db my.db  # atomic multi-document commit
+zenith storage inspect <id> --db my.db       # see what's journaled for one document
+zenith storage prune --db my.db              # save + prune on demand, mid-session
+```
 
 ---
 
@@ -736,7 +785,7 @@ ZENITH/
 │   ├── watchlist/            # persistent watchlist (~/.zenith/watchlist.json)
 │   ├── autostart/            # OS boot auto-start (Windows/Linux/macOS)
 │   ├── embedding/            # Ollama, deterministic adapters + LRU cache
-│   ├── storage/              # WAL, MemTable, SSTable, Bloom filter, compaction
+│   ├── storage/              # Pebble-backed document journal, transactions, embedding cache
 │   ├── index/                # inverted index + vector store + search orchestrator
 │   ├── querycache/           # query-result cache: L1 in-process LRU + optional L2 Redis
 │   ├── ranking/              # RRF + BM25 tiebreak + TF-IDF
@@ -766,8 +815,6 @@ All tunable parameters live in `internal/config/config.go`.
 | `PhoneticWeight` | `0.3` | Phonetic signal blend weight |
 | `NeuralWeight` | `1.0` | Zero-result neural-expansion weight |
 | `MaxResults` | `1000` | Internal RRF candidate cap, not a page size |
-| `MemTableMaxSize` | `64 MB` | SSTable flush threshold |
-| `CommitWindow` | `4 ms` | Group-committer batch window |
 
 ---
 
@@ -783,7 +830,7 @@ Vector store, dot product, cosine similarity, deterministic embeddings, hybrid R
 Porter2 stemming, edge n-grams, phonetic matching, BK-tree fuzzy, synonym expansion, FSTs.
 
 ### Phase 4 — Storage Engine ✓
-WAL with CRC framing, MemTable skip-list, SSTables, group committer, leveled compaction, Bloom filters, sparse index.
+Pebble-backed document journal and atomic multi-document transactions (replacing an earlier hand-built WAL/MemTable/SSTable/compaction pipeline that was never load-bearing); journal format v2 carrying the embedding vector so replay never re-embeds; a persistent content-addressed embedding cache shared by `cmd/zenith` and `cmd/server`; `zenith txn add/remove` and `zenith storage inspect/prune` exposing all of it from the CLI.
 
 ### Phase 5 — Native Embeddings + Library API (current)
 - [x] ONNX in-process embeddings — Python sidecar eliminated
