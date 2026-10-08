@@ -64,8 +64,8 @@ type DB struct {
 
 	engine   *index.Engine
 	reranker *reranker.Reranker // nil unless WithReranker(true)
-	path     string    // absolute path; empty for :memory:
-	lock     *fileLock // nil for :memory:
+	path     string             // absolute path; empty for :memory:
+	lock     *fileLock          // nil for :memory:
 	opts     *options
 	docWAL   *wal.WAL      // nil for :memory:
 	ckptStop chan struct{} // closed to stop background checkpoint goroutine; nil if not running
@@ -103,6 +103,20 @@ func Open(path string, opt ...Option) (*DB, error) {
 	cfg := config.DefaultConfig()
 	cfg.FuzzyMaxDist = o.fuzzyDistance
 	cfg.WordVectors = !o.noWordVectors
+	if o.queryCacheSize >= 0 {
+		cfg.QueryCacheSize = o.queryCacheSize
+	}
+	if o.queryCacheTTL > 0 {
+		cfg.QueryCacheTTL = o.queryCacheTTL
+	}
+	if o.queryCacheRedisAddr != "" {
+		cfg.QueryCacheRedisAddr = o.queryCacheRedisAddr
+	}
+	if o.queryCacheNamespace != "" {
+		cfg.QueryCacheNamespace = o.queryCacheNamespace
+	}
+	cfg.QueryCacheSemanticThreshold = o.queryCacheSemanticThreshold
+	cfg.ANNThresholdBandPct = o.annThresholdBandPct
 
 	tkz := analysis.NewStandardAnalyzer()
 	scorer := ranking.NewWeightedRRFRanker(cfg.RRFConstant, cfg.MaxResults, 1.0, cfg.VectorWeight)

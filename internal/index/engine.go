@@ -642,6 +642,20 @@ func (e *Engine) Count() int {
 	return e.docCountLocked()
 }
 
+// Config returns a copy of the engine's configuration, for callers (e.g.
+// pkg/zenith's tests) that need to confirm an Open-time Option actually
+// reached the engine. A copy, not a pointer, so a caller can't mutate the
+// engine's live config through it.
+func (e *Engine) Config() config.Config {
+	return *e.config
+}
+
+// CacheEnabled reports whether the query-result cache is active
+// (Config.QueryCacheSize > 0 at construction time).
+func (e *Engine) CacheEnabled() bool {
+	return e.cache != nil
+}
+
 func (e *Engine) addInternal(ctx context.Context, originalID string, fullText string, preVec []float32, attrs Attrs) error {
 	if e.journal != nil {
 		if err := e.journal.Put(ctx, []byte(originalID), encodeJournalValue(fullText, attrs)); err != nil {

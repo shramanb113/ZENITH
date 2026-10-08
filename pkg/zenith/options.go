@@ -16,19 +16,27 @@ type options struct {
 	checkpointInterval time.Duration
 	noWordVectors      bool
 	memoryLimitBytes   int64
-	annMinDocs         int // -1 = engine default
+	annMinDocs         int    // -1 = engine default
 	model              string // registered embedding model id; "" = the bundled one
 	modelsDir          string
 	rerank             bool
 	rerankModel        string // registered reranker model id; "" = the default
+
+	queryCacheSize              int // -1 = engine/Config default
+	queryCacheTTL               time.Duration
+	queryCacheRedisAddr         string
+	queryCacheNamespace         string
+	queryCacheSemanticThreshold float64
+	annThresholdBandPct         float64
 }
 
 func defaultOptions() *options {
 	return &options{
-		annMinDocs:    -1,
-		cacheSize:     10_000,
-		fuzzyDistance: 2,
-		limit:         10,
+		annMinDocs:     -1,
+		cacheSize:      10_000,
+		fuzzyDistance:  2,
+		limit:          10,
+		queryCacheSize: -1,
 	}
 }
 
@@ -270,6 +278,90 @@ func WithANNThreshold(n int) Option {
 			return ErrInvalidOption
 		}
 		o.annMinDocs = n
+		return nil
+	}
+}
+
+// WithQueryCacheSize sets the in-process (L1) query-result cache's max
+// entry count. Default: 1,000. Pass 0 to disable the query-result cache
+// entirely.
+func WithQueryCacheSize(n int) Option {
+	return func(o *options) error {
+		if n < 0 {
+			return ErrInvalidOption
+		}
+		o.queryCacheSize = n
+		return nil
+	}
+}
+
+// WithQueryCacheTTL bounds how long an L2 (Redis) query-cache entry
+// survives. Default: 5 minutes. Has no effect unless WithQueryCacheRedisAddr
+// is also set.
+func WithQueryCacheTTL(d time.Duration) Option {
+	return func(o *options) error {
+		if d <= 0 {
+			return ErrInvalidOption
+		}
+		o.queryCacheTTL = d
+		return nil
+	}
+}
+
+// WithQueryCacheRedisAddr enables an optional L2 query-result cache tier
+// backed by Redis at addr (e.g. "localhost:6379"), shared across processes.
+// Unset (default) keeps the cache in-process (L1) only.
+func WithQueryCacheRedisAddr(addr string) Option {
+	return func(o *options) error {
+		if addr == "" {
+			return ErrInvalidOption
+		}
+		o.queryCacheRedisAddr = addr
+		return nil
+	}
+}
+
+// WithQueryCacheNamespace prefixes every query-cache key, so a Redis L2
+// shared by multiple DBs doesn't let one's cached results collide with
+// another's. internal/collections.Manager sets this automatically per
+// collection; set it explicitly only when sharing Redis across your own
+// multiple processes outside collections.
+func WithQueryCacheNamespace(ns string) Option {
+	return func(o *options) error {
+		o.queryCacheNamespace = ns
+		return nil
+	}
+}
+
+// WithQueryCacheSemanticThreshold enables near-duplicate query-cache
+// matching: on an exact cache-key miss, compares the incoming query's
+// embedding against recently cached queries sharing the same filter and
+// weights, returning the closest one at or above this cosine similarity.
+// Default: 0 (disabled) — a wrong near-duplicate hit is a silently wrong
+// answer, not just a slow one, so this is opt-in. 0.97 is a conservative
+// starting point.
+func WithQueryCacheSemanticThreshold(threshold float64) Option {
+	return func(o *options) error {
+		if threshold < 0 || threshold > 1 {
+			return ErrInvalidOption
+		}
+		o.queryCacheSemanticThreshold = threshold
+		return nil
+	}
+}
+
+// WithANNThresholdBand makes the ANN-vs-exact vector-search choice near the
+// WithANNThreshold boundary follow measured rolling-average latency instead
+// of always taking the static side of the line. pct is the band's half-width
+// as a fraction of the threshold (e.g. 0.2 = within ±20%). Default: 0
+// (disabled) — the static threshold alone decides, exactly as without this
+// option.
+func WithANNThresholdBand(pct float64) Option {
+	return func(o *options) error {
+		if pct < 0 || pct > 1 {
+			return ErrInvalidOption
+		}
+		o.annThresholdBandPct = pct
 		return nil
 	}
 }
