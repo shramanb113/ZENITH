@@ -21,6 +21,19 @@ type BytesCache struct {
 	ttl    time.Duration
 }
 
+// Short, fixed Redis client timeouts: a query-result cache is strictly an
+// optimization (see the type doc above), so a Redis outage or partition
+// must turn into cache misses within tens of milliseconds, never into every
+// search silently blocking for go-redis's multi-second defaults
+// (DialTimeout 5s, Read/WriteTimeout 3s) while retrying. MaxRetries: 0 for
+// the same reason — a retry only adds latency to an already-degraded path
+// that is about to be treated as a miss anyway.
+const (
+	redisDialTimeout  = 100 * time.Millisecond
+	redisReadTimeout  = 50 * time.Millisecond
+	redisWriteTimeout = 50 * time.Millisecond
+)
+
 // NewBytesCache connects (lazily — go-redis dials on first command) to the
 // Redis instance at addr. ttl is applied to every Set; 0 means "no expiry",
 // which QUERYCACHE.md deliberately avoids as a default (callers should pass
@@ -28,8 +41,14 @@ type BytesCache struct {
 // before it ever reaches here — see internal/index's cache construction).
 func NewBytesCache(addr string, ttl time.Duration) *BytesCache {
 	return &BytesCache{
-		client: redis.NewClient(&redis.Options{Addr: addr}),
-		ttl:    ttl,
+		client: redis.NewClient(&redis.Options{
+			Addr:         addr,
+			DialTimeout:  redisDialTimeout,
+			ReadTimeout:  redisReadTimeout,
+			WriteTimeout: redisWriteTimeout,
+			MaxRetries:   0,
+		}),
+		ttl: ttl,
 	}
 }
 

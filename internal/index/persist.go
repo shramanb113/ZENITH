@@ -580,6 +580,15 @@ func (e *Engine) Close() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.closeLayersLocked()
+	if e.cache != nil {
+		// Releases the L2 Redis client's connection pool, if one is
+		// configured — a no-op otherwise. See Tiered.Close's doc comment
+		// for why this matters (internal/collections idle-closes and
+		// reopens an Engine per collection).
+		if err := e.cache.Close(); err != nil {
+			slog.Warn("index: query-result cache L2 close failed", "error", err)
+		}
+	}
 	return nil
 }
 

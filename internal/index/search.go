@@ -168,8 +168,8 @@ func (e *Engine) SearchFilteredWeighted(ctx context.Context, query string, f *Fi
 	bucket := bucketKey(e.config.QueryCacheNamespace, gen, specJSON, w, e.processEpoch)
 	key := fullCacheKey(bucket, query)
 
-	if entry, ok := e.cache.Get(ctx, key); ok {
-		e.cacheObserver.ObserveQueryCacheHit("l1")
+	if entry, tier, ok := e.cache.Get(ctx, key); ok {
+		e.cacheObserver.ObserveQueryCacheHit(tier)
 		return cloneResponses(entry.Results), nil
 	}
 

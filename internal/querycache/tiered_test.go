@@ -31,9 +31,12 @@ func TestTiered_L1OnlyWhenNoL2Configured(t *testing.T) {
 	ctx := context.Background()
 
 	tr.Set(ctx, "a", 42)
-	v, ok := tr.Get(ctx, "a")
+	v, tier, ok := tr.Get(ctx, "a")
 	if !ok || v != 42 {
 		t.Fatalf("Get(a) = %v, %v; want 42, true", v, ok)
+	}
+	if tier != "l1" {
+		t.Fatalf("tier = %q, want %q", tier, "l1")
 	}
 }
 
@@ -51,9 +54,12 @@ func TestTiered_L1PreferredOverL2(t *testing.T) {
 	encoded, _ := encodeInt(999)
 	l2.Set(ctx, "a", encoded)
 
-	v, ok := tr.Get(ctx, "a")
+	v, tier, ok := tr.Get(ctx, "a")
 	if !ok || v != 1 {
 		t.Fatalf("Get(a) = %v, %v; want 1 (from L1), true", v, ok)
+	}
+	if tier != "l1" {
+		t.Fatalf("tier = %q, want %q", tier, "l1")
 	}
 }
 
@@ -69,24 +75,30 @@ func TestTiered_L2HitBackfillsL1(t *testing.T) {
 	l2.Set(ctx, "a", encoded)
 
 	tr := NewTiered[int](l1, l2, encodeInt, decodeInt)
-	v, ok := tr.Get(ctx, "a")
+	v, tier, ok := tr.Get(ctx, "a")
 	if !ok || v != 7 {
 		t.Fatalf("Get(a) = %v, %v; want 7 (from L2), true", v, ok)
+	}
+	if tier != "l2" {
+		t.Fatalf("tier = %q, want %q", tier, "l2")
 	}
 
 	// L1 must now hold it too: kill L2 and confirm the second Get still hits.
 	l2.Close()
-	v2, ok2 := tr.Get(ctx, "a")
+	v2, tier2, ok2 := tr.Get(ctx, "a")
 	if !ok2 || v2 != 7 {
 		t.Fatalf("second Get(a) after L2 died = %v, %v; want 7 (backfilled into L1), true", v2, ok2)
+	}
+	if tier2 != "l1" {
+		t.Fatalf("second Get tier = %q, want %q (backfilled, so it must now be an L1 hit)", tier2, "l1")
 	}
 }
 
 func TestTiered_MissOnBoth(t *testing.T) {
 	l1, _ := NewMemCache[int](10)
 	tr := NewTiered[int](l1, nil, encodeInt, decodeInt)
-	if _, ok := tr.Get(context.Background(), "missing"); ok {
-		t.Fatal("Get(missing) = _, true; want false")
+	if _, tier, ok := tr.Get(context.Background(), "missing"); ok || tier != "" {
+		t.Fatalf("Get(missing) = _, %q, %v; want \"\", false", tier, ok)
 	}
 }
 
@@ -123,5 +135,33 @@ func TestTiered_RangeL1(t *testing.T) {
 	})
 	if len(seen) != 2 {
 		t.Fatalf("RangeL1 visited %v, want 2 entries", seen)
+	}
+}
+
+// Review Finding (code review, 2026-10-08): Tiered had no Close, so nothing
+// ever released the L2 Redis client's connection pool — a real leak given
+// internal/collections idle-closes and reopens an Engine (and its Tiered)
+// per collection.
+func TestTiered_CloseClosesL2WhenConfigured(t *testing.T) {
+	mr := miniredis.RunT(t)
+	l1, _ := NewMemCache[int](10)
+	l2 := NewBytesCache(mr.Addr(), time.Minute)
+	tr := NewTiered[int](l1, l2, encodeInt, decodeInt)
+
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close() = %v, want nil", err)
+	}
+	// After Close, the underlying client is closed: a further call must
+	// fail (treated as a miss by BytesCache.Get, never a panic).
+	if _, ok := l2.Get(context.Background(), "a"); ok {
+		t.Fatal("Get after Close unexpectedly succeeded")
+	}
+}
+
+func TestTiered_CloseIsNoOpWhenL2Disabled(t *testing.T) {
+	l1, _ := NewMemCache[int](10)
+	tr := NewTiered[int](l1, nil, encodeInt, decodeInt)
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close() with no L2 configured = %v, want nil", err)
 	}
 }

@@ -24,18 +24,24 @@ func NewTiered[V any](l1 *MemCache[V], l2 *BytesCache, encode func(V) ([]byte, e
 	return &Tiered[V]{l1: l1, l2: l2, encode: encode, decode: decode}
 }
 
-func (t *Tiered[V]) Get(ctx context.Context, key string) (V, bool) {
+// Get reports which tier actually served a hit ("l1" or "l2"), so a caller
+// instrumenting cache metrics (e.g. Engine.cacheObserver) doesn't have to
+// guess — before this, every Get hit was reported as "l1" regardless of
+// which tier it really came from, which made zenith_query_cache_hits_total
+// unable to show whether an operator's L2 Redis tier was paying for itself.
+// tier is "" on a miss.
+func (t *Tiered[V]) Get(ctx context.Context, key string) (V, string, bool) {
 	if v, ok := t.l1.Get(ctx, key); ok {
-		return v, true
+		return v, "l1", true
 	}
 	if t.l2 == nil {
 		var zero V
-		return zero, false
+		return zero, "", false
 	}
 	raw, ok := t.l2.Get(ctx, key)
 	if !ok {
 		var zero V
-		return zero, false
+		return zero, "", false
 	}
 	v, err := t.decode(raw)
 	if err != nil {
@@ -43,10 +49,10 @@ func (t *Tiered[V]) Get(ctx context.Context, key string) (V, bool) {
 		// older version — treat as a miss, never an error; the next Set
 		// below (from the caller recomputing) overwrites it.
 		var zero V
-		return zero, false
+		return zero, "", false
 	}
 	t.l1.Set(ctx, key, v)
-	return v, true
+	return v, "l2", true
 }
 
 func (t *Tiered[V]) Set(ctx context.Context, key string, val V) {
@@ -66,4 +72,18 @@ func (t *Tiered[V]) Set(ctx context.Context, key string, val V) {
 // for why this exists (Engine's semantic near-duplicate scan).
 func (t *Tiered[V]) RangeL1(fn func(key string, val V) bool) {
 	t.l1.Range(fn)
+}
+
+// Close releases the L2 Redis client's connection pool, if one is
+// configured. A no-op (nil error) when L2 is disabled. Every Engine that
+// constructs a Tiered with a non-nil l2 must call this from its own Close —
+// internal/collections idle-closes and reopens an Engine per collection
+// (default 10m idle, up to 64 open), and each reopen builds a fresh
+// *redis.Client; without this, those connections and their file
+// descriptors leak for the life of the process.
+func (t *Tiered[V]) Close() error {
+	if t.l2 == nil {
+		return nil
+	}
+	return t.l2.Close()
 }
