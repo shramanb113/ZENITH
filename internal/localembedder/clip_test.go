@@ -75,7 +75,7 @@ func TestCLIPEmbedder_RealModelSemanticSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EmbedImage(blue): %v", err)
 	}
-	redQueryVec, err := clip.EmbedText(ctx, "a solid red image")
+	redQueryVec, err := clip.EmbedText(ctx, "the color red")
 	if err != nil {
 		t.Fatalf("EmbedText: %v", err)
 	}
