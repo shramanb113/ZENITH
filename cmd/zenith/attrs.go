@@ -38,7 +38,11 @@ func parseScalar(s string) index.AttrValue {
 	return index.AttrValue{Kind: index.AttrString, S: s}
 }
 
-// parseAttrs turns repeated key=value flags into document attributes.
+// parseAttrs turns repeated key=value flags into document attributes. A value
+// written as [a,b,c] is an array attribute (AttrArray, the same thing
+// `zenith txn add` accepts as a JSON array): each element is typed like a
+// scalar value, a double-quoted element may contain commas ("a,b"), and []
+// is an empty array. Quote the whole value ("[a]") to force a string.
 func parseAttrs(flags []string) (index.Attrs, error) {
 	if len(flags) == 0 {
 		return nil, nil
@@ -48,11 +52,61 @@ func parseAttrs(flags []string) (index.Attrs, error) {
 		k, v, ok := strings.Cut(f, "=")
 		k = strings.TrimSpace(k)
 		if !ok || k == "" {
-			return nil, fmt.Errorf("--attr %q: want key=value", f)
+			return nil, fmt.Errorf("--attr %q: want key=value or key=[a,b,c]", f)
 		}
-		out[k] = parseScalar(strings.TrimSpace(v))
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && v[0] == '[' && v[len(v)-1] == ']' {
+			elems, err := splitArrayElems(v[1 : len(v)-1])
+			if err != nil {
+				return nil, fmt.Errorf("--attr %q: %w", f, err)
+			}
+			arr := make([]index.AttrValue, len(elems))
+			for i, e := range elems {
+				arr[i] = parseScalar(e)
+			}
+			out[k] = index.AttrValue{Kind: index.AttrArray, Arr: arr}
+			continue
+		}
+		out[k] = parseScalar(v)
 	}
 	return out, nil
+}
+
+// splitArrayElems splits the inside of [a, "b,c", d] on commas outside double
+// quotes, trimming each element (quotes are kept for parseScalar to strip).
+// An empty or all-space body is an empty array; an empty element (a,,b) is an
+// error rather than a silently dropped value.
+func splitArrayElems(body string) ([]string, error) {
+	if strings.TrimSpace(body) == "" {
+		return []string{}, nil
+	}
+	var elems []string
+	start, inQuote := 0, false
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case '\\':
+			if inQuote {
+				i++ // skip the escaped character
+			}
+		case '"':
+			inQuote = !inQuote
+		case ',':
+			if !inQuote {
+				elems = append(elems, strings.TrimSpace(body[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	if inQuote {
+		return nil, fmt.Errorf("unterminated quote in array value")
+	}
+	elems = append(elems, strings.TrimSpace(body[start:]))
+	for _, e := range elems {
+		if e == "" {
+			return nil, fmt.Errorf("empty array element")
+		}
+	}
+	return elems, nil
 }
 
 // whereSpec parses one --where condition: key=value, key!=value, key>=n, key<=n.

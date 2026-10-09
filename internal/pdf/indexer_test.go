@@ -270,7 +270,7 @@ func TestIndex_RejectsPathOutsideAllowedRoot(t *testing.T) {
 		t.Fatalf("SetAllowedRoot: %v", err)
 	}
 
-	_, err := p.Index(nil, "doc1", filepath.Join(pdfDir, "..", "outside.pdf"))
+	_, err := p.Index(nil, "doc1", filepath.Join(pdfDir, "..", "outside.pdf"), nil)
 	if err == nil {
 		t.Fatalf("Index: expected error for path outside allowed root")
 	}

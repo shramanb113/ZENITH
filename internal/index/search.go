@@ -3,7 +3,10 @@ package index
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -87,6 +90,25 @@ type Weights struct {
 	RRF      float64
 }
 
+// ErrInvalidWeights is returned for a Weights override holding a NaN,
+// infinite or negative value.
+var ErrInvalidWeights = errors.New("index: ranking weights must be finite and non-negative")
+
+// Validate rejects a NaN, infinite or negative weight. Zero is valid and
+// means "engine default". A NaN would otherwise poison every fused score (and
+// the query-cache key), and a negative RRF k can make k+rank zero.
+func (w Weights) Validate() error {
+	for _, f := range [...]struct {
+		name string
+		v    float64
+	}{{"vector", w.Vector}, {"phonetic", w.Phonetic}, {"rrf_k", w.RRF}} {
+		if math.IsNaN(f.v) || math.IsInf(f.v, 0) || f.v < 0 {
+			return fmt.Errorf("%w: %s = %v", ErrInvalidWeights, f.name, f.v)
+		}
+	}
+	return nil
+}
+
 // scorer resolves the ranking.Scorer to use for a single query: the engine's
 // shared scorer when w carries no override (the common, allocation-free
 // case), or a fresh RRFRanker built from w's overrides layered onto the
@@ -139,6 +161,9 @@ func (e *Engine) SearchFiltered(ctx context.Context, query string, f *Filter) ([
 // unreachable without any active invalidation. Concurrent identical calls
 // share one real computation via searchSF.
 func (e *Engine) SearchFilteredWeighted(ctx context.Context, query string, f *Filter, w Weights) ([]SearchResponse, error) {
+	if err := w.Validate(); err != nil {
+		return nil, err
+	}
 	bypass := f != nil && f.pred() != nil && f.spec() == nil
 	if bypass || e.cache == nil {
 		entry, err := e.searchUncached(ctx, query, f, w)

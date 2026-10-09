@@ -23,12 +23,26 @@ type PDFIndexer struct {
 	engine      *index.Engine
 	logger      *activitylog.Logger
 	allowedRoot string // if set, Index rejects any path resolving outside this directory
-	attrs       index.Attrs
 }
 
-// SetAttrs attaches metadata to every chunk indexed from now on (used by
-// `zenith index --attr`); nil clears it.
-func (p *PDFIndexer) SetAttrs(a index.Attrs) { p.attrs = a }
+// WithAttrs returns a view of p whose Index(ctx, docID, filePath) attaches
+// attrs to every chunk — the three-argument shape crawler.FileIndexer expects
+// (used by `zenith index --attr`). attrs is bound to the returned value, not
+// stored on p, so concurrent callers with different attrs never interfere.
+func (p *PDFIndexer) WithAttrs(attrs index.Attrs) AttrBoundIndexer {
+	return AttrBoundIndexer{p: p, attrs: attrs}
+}
+
+// AttrBoundIndexer is a PDFIndexer with fixed per-chunk attributes.
+type AttrBoundIndexer struct {
+	p     *PDFIndexer
+	attrs index.Attrs
+}
+
+// Index is PDFIndexer.Index with the bound attributes.
+func (b AttrBoundIndexer) Index(ctx context.Context, docID, filePath string) (int, error) {
+	return b.p.Index(ctx, docID, filePath, b.attrs)
+}
 
 // NewIndexer creates a PDFIndexer. An optional logger may be supplied.
 func NewIndexer(e *index.Engine, logger ...*activitylog.Logger) *PDFIndexer {
@@ -82,9 +96,11 @@ func resolveWithinRoot(root, filePath string) (string, error) {
 	return resolved, nil
 }
 
-// Index extracts text from filePath and stores it in the engine.
-// Returns the number of chunks indexed.
-func (p *PDFIndexer) Index(ctx context.Context, docID, filePath string) (int, error) {
+// Index extracts text from filePath and stores it in the engine, attaching
+// attrs (nil for none) to every chunk. Returns the number of chunks indexed.
+// attrs is a parameter rather than indexer state so one PDFIndexer can serve
+// concurrent requests (the gRPC IndexPDF handler) with different metadata.
+func (p *PDFIndexer) Index(ctx context.Context, docID, filePath string, attrs index.Attrs) (int, error) {
 	if p.allowedRoot != "" {
 		resolved, err := resolveWithinRoot(p.allowedRoot, filePath)
 		if err != nil {
@@ -112,7 +128,7 @@ func (p *PDFIndexer) Index(ctx context.Context, docID, filePath string) (int, er
 		for chunkIdx, chunk := range splitChunks(text) {
 			docs = append(docs, index.BatchDoc{
 				ID:   fmt.Sprintf("%s||p%d||c%d||text||0.00,0.00,0.00,0.00", docID, pageNum, chunkIdx),
-				Text: chunk, Attrs: p.attrs,
+				Text: chunk, Attrs: attrs,
 			})
 		}
 	}

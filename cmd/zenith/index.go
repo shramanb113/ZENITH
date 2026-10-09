@@ -70,8 +70,7 @@ Supported formats:
 		defer w.Close()
 
 		pi := pdf.NewIndexer(engine, alog)
-		pi.SetAttrs(attrs)
-		w.RegisterFileIndexer(".pdf", pi)
+		w.RegisterFileIndexer(".pdf", pi.WithAttrs(attrs))
 
 		ii := imageindexer.NewIndexer(engine, alog)
 		ii.SetAttrs(attrs)
@@ -115,7 +114,7 @@ Supported formats:
 func init() {
 	addEngineFlags(indexCmd)
 	indexCmd.Flags().StringArrayVar(&indexFlags.attrs, "attr", nil,
-		"Attach metadata to every indexed document: key=value (repeatable), e.g. --attr tenant=acme --attr year=2024. Search with --where / --filter")
+		"Attach metadata to every indexed document: key=value or key=[a,b,c] for an array (repeatable), e.g. --attr tenant=acme --attr year=2024 --attr tags=[go,search]. Search with --where / --filter")
 }
 
 // attrIndexer indexes text with fixed attributes attached.

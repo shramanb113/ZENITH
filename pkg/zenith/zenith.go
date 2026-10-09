@@ -405,13 +405,30 @@ func (db *DB) addBatch(ctx context.Context, docs map[string]string, attrs map[st
 // Returns results sorted by score descending. Returns []Result{} (never nil)
 // when no documents match.
 func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) (results []Result, err error) {
+	results, _, err = db.search(ctx, query, nil, 0, opts)
+	return results, err
+}
+
+// SearchWithFacets is Search plus per-value document counts for each of
+// facetFields. Facets are counted over the full fused candidate list — every
+// document the query (and filter) matched, up to the engine's internal
+// candidate cap (1000 by default) — not just the page Limit returns, so they
+// describe the whole result set. An array attribute counts once per distinct
+// element. topK <= 0 keeps every value of a field; otherwise only the topK
+// highest counts. Use DB.Facets for counts with no query.
+func (db *DB) SearchWithFacets(ctx context.Context, query string, facetFields []string, topK int, opts ...SearchOption) (results []Result, facets Facets, err error) {
+	return db.search(ctx, query, facetFields, topK, opts)
+}
+
+func (db *DB) search(ctx context.Context, query string, facetFields []string, topK int, opts []SearchOption) (results []Result, facets Facets, err error) {
 	if db == nil {
-		return nil, errors.New("zenith: Search called on nil DB")
+		return nil, nil, errors.New("zenith: Search called on nil DB")
 	}
 	defer func() {
 		if r := recover(); r != nil {
 			db.closed.Store(true)
 			results = []Result{}
+			facets = nil
 			err = fmt.Errorf("zenith: internal error: %v", r)
 		}
 	}()
@@ -420,39 +437,140 @@ func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) (r
 	for _, fn := range opts {
 		fn(so)
 	}
+	if so.err != nil {
+		return nil, nil, so.err
+	}
 
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.closed.Load() {
+		return nil, nil, ErrClosed
+	}
+
+	raw, err := db.engine.SearchFilteredWeighted(ctx, query, so.indexFilter(), so.weights)
+	if err != nil {
+		return nil, nil, fmt.Errorf("zenith: %w", err)
+	}
+	if len(facetFields) > 0 {
+		ids := make([]string, len(raw))
+		for i, r := range raw {
+			ids[i] = r.ID
+		}
+		f, err := db.engine.FacetCounts(ids, facetFields, topK)
+		if err != nil {
+			return nil, nil, fmt.Errorf("zenith: %w", err)
+		}
+		facets = facetsFromIndex(f)
+	}
+
+	var out []Result
+	if so.explain {
+		terms, hits, err := db.engine.ExplainFiltered(ctx, query, so.indexFilter())
+		if err != nil {
+			return nil, nil, fmt.Errorf("zenith: %w", err)
+		}
+		out = buildExplained(terms, hits, raw, 0)
+	} else {
+		if db.reranker != nil {
+			raw = db.reranker.Rerank(ctx, query, raw, db.engine.GetText)
+		}
+		out = buildResults(raw, 0)
+	}
+	db.sortResultsByAttribute(out, so.sortField, so.sortDesc)
+	out = truncate(out, so.limit)
+	// Attributes are looked up for the returned page only, not for every
+	// candidate buildResults/buildExplained saw.
+	for i := range out {
+		out[i].Attrs = Attrs(index.AttrsToAny(db.engine.GetAttrs(out[i].ID)))
+	}
+	return out, facets, nil
+}
+
+// Facets counts, for each field, how many live documents carry each value of
+// that attribute — the no-query counterpart of SearchWithFacets, answered
+// from the attribute index's postings rather than by visiting documents.
+// topK <= 0 keeps every value; otherwise only the topK highest counts.
+func (db *DB) Facets(fields []string, topK int) (facets Facets, err error) {
+	if db == nil {
+		return nil, errors.New("zenith: Facets called on nil DB")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			db.closed.Store(true)
+			err = fmt.Errorf("zenith: internal error: %v", r)
+		}
+	}()
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 	if db.closed.Load() {
 		return nil, ErrClosed
 	}
-
-	if so.explain {
-		terms, hits, err := db.engine.ExplainFiltered(ctx, query, so.indexFilter())
-		if err != nil {
-			return nil, fmt.Errorf("zenith: %w", err)
-		}
-		raw, err := db.engine.SearchFilteredWeighted(ctx, query, so.indexFilter(), so.weights)
-		if err != nil {
-			return nil, fmt.Errorf("zenith: %w", err)
-		}
-		out := buildExplained(terms, hits, raw, 0)
-		db.sortResultsByAttribute(out, so.sortField, so.sortDesc)
-		return truncate(out, so.limit), nil
-	}
-
-	raw, err := db.engine.SearchFilteredWeighted(ctx, query, so.indexFilter(), so.weights)
+	f, err := db.engine.CorpusFacetCounts(fields, topK)
 	if err != nil {
 		return nil, fmt.Errorf("zenith: %w", err)
 	}
+	return facetsFromIndex(f), nil
+}
 
-	if db.reranker != nil {
-		raw = db.reranker.Rerank(ctx, query, raw, db.engine.GetText)
+func facetsFromIndex(f index.Facets) Facets {
+	out := make(Facets, len(f))
+	for field, list := range f {
+		vals := make([]FacetCount, len(list))
+		for i, c := range list {
+			vals[i] = FacetCount{Value: c.Value.Any(), Count: c.Count}
+		}
+		out[field] = vals
 	}
+	return out
+}
 
-	out := buildResults(raw, 0)
-	db.sortResultsByAttribute(out, so.sortField, so.sortDesc)
-	return truncate(out, so.limit), nil
+// Suggest returns up to n indexed terms starting with prefix, for
+// autocomplete (n <= 0 means 10; capped at 1000). The terms are the analysed
+// vocabulary — lowercased and Porter2-stemmed, so "running" comes back as
+// "run" — in lexicographic order, not ranked by frequency.
+func (db *DB) Suggest(prefix string, n int) (terms []string, err error) {
+	if db == nil {
+		return nil, errors.New("zenith: Suggest called on nil DB")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			db.closed.Store(true)
+			err = fmt.Errorf("zenith: internal error: %v", r)
+		}
+	}()
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.closed.Load() {
+		return nil, ErrClosed
+	}
+	terms, err = db.engine.Suggest(prefix, n)
+	if err != nil {
+		return nil, fmt.Errorf("zenith: %w", err)
+	}
+	return terms, nil
+}
+
+// GetAttrs returns the metadata stored with document id (nil if it has none
+// or does not exist). Values come back as in Result.Attrs.
+func (db *DB) GetAttrs(id string) (attrs Attrs, err error) {
+	if db == nil {
+		return nil, errors.New("zenith: GetAttrs called on nil DB")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			db.closed.Store(true)
+			err = fmt.Errorf("zenith: internal error: %v", r)
+		}
+	}()
+	if id == "" {
+		return nil, ErrInvalidID
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.closed.Load() {
+		return nil, ErrClosed
+	}
+	return Attrs(index.AttrsToAny(db.engine.GetAttrs(id))), nil
 }
 
 // estimatedBytesLocked returns the projected heap usage after adding

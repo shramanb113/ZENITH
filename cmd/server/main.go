@@ -180,6 +180,7 @@ func main() {
 	zenithproto.RegisterSearchServiceServer(grpcServer, &server.ZenithServer{
 		Engine:     engine,
 		PDFIndexer: pdfIndexer,
+		NewTxn:     func() index.Txn { return storageEng.NewTxn() },
 		Logger:     alog,
 	})
 

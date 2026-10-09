@@ -19,6 +19,7 @@ import (
 	"github.com/shramanb113/ZENITH/internal/analysis"
 	"github.com/shramanb113/ZENITH/internal/collections"
 	"github.com/shramanb113/ZENITH/internal/embedding"
+	"github.com/shramanb113/ZENITH/internal/index"
 	"github.com/shramanb113/ZENITH/internal/localembedder"
 	"github.com/shramanb113/ZENITH/internal/metrics"
 	"github.com/shramanb113/ZENITH/internal/server"
@@ -85,11 +86,10 @@ moment of a kill are still lost, same as any other crash-safe system.`,
 
 		printHeader("serve", addr)
 
-		engine, _, alog, teardown, err := buildEngine(true, true)
+		engine, storageEng, _, teardown, err := buildEngine(true, true)
 		if err != nil {
 			return fmt.Errorf("engine init: %w", err)
 		}
-		_ = alog
 
 		metrics.BuildInfo.WithLabelValues(version, cliFlags.model).Set(1)
 		metrics.RegisterIndexDocuments(func() float64 { return float64(engine.Count()) })
@@ -103,7 +103,15 @@ moment of a kill are still lost, same as any other crash-safe system.`,
 			grpc.ChainUnaryInterceptor(metrics.UnaryServerInterceptor(), server.KeyAuthUnary(serveFlags.key)),
 			grpc.ChainStreamInterceptor(metrics.StreamServerInterceptor(), server.KeyAuthStream(serveFlags.key)),
 		)
-		zenithproto.RegisterSearchServiceServer(grpcServer, &server.ZenithServer{Engine: engine})
+		srv := &server.ZenithServer{Engine: engine}
+		// IndexBatch/DeleteBatch commit through the same Pebble storage
+		// engine that journals single-document writes. No PDFIndexer is
+		// wired here, so IndexPDF answers UNIMPLEMENTED (cmd/server wires one,
+		// confined to ./data/pdfs).
+		if storageEng != nil {
+			srv.NewTxn = func() index.Txn { return storageEng.NewTxn() }
+		}
+		zenithproto.RegisterSearchServiceServer(grpcServer, srv)
 
 		stop := make(chan os.Signal, 1)
 		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
