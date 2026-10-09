@@ -28,7 +28,13 @@ The query goes through the full pipeline:
   1. Lexical scoring  (BM25 + edge n-grams + phonetic)
   2. Fuzzy matching   (BK-tree Levenshtein)
   3. Semantic scoring (vector cosine via embedder)
-  4. RRF fusion`,
+  4. RRF fusion
+
+A double-quoted part of the query is a phrase every result must contain, words
+adjacent and in order (after the same stemming and stop-word removal as the
+documents). Keep the quotes away from your shell:
+
+  zenith search '"machine learning" python'`,
 
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {

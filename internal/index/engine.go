@@ -1156,6 +1156,13 @@ func (e *Engine) ExplainFiltered(ctx context.Context, query string, f *Filter) (
 		}
 	}
 
+	// A quoted phrase is a required clause here too (phrase.go): a document
+	// without it has no business in the explanation of the results.
+	var allowed map[uint64]struct{}
+	if phrases := e.analyzePhrases(query); len(phrases) > 0 {
+		allowed = e.phraseDocs(phrases, pred)
+	}
+
 	e.inverted.RLock()
 	e.vectors.RLock()
 	defer e.vectors.RUnlock()
@@ -1165,6 +1172,11 @@ func (e *Engine) ExplainFiltered(ctx context.Context, query string, f *Filter) (
 	e.eachDocTerms(func(id uint64, has func(string) bool) {
 		if pred != nil && !pred(e.attrs[id]) {
 			return
+		}
+		if allowed != nil {
+			if _, ok := allowed[id]; !ok {
+				return
+			}
 		}
 		var terms []TermHit
 		for _, t := range base {

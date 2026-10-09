@@ -166,6 +166,9 @@ func (e *Engine) SearchFilteredWeighted(ctx context.Context, query string, f *Fi
 	gen := e.writeGen
 	e.mu.RUnlock()
 	bucket := bucketKey(e.config.QueryCacheNamespace, gen, specJSON, w, e.processEpoch)
+	if sig := e.phraseSignature(query); sig != "" {
+		bucket = phraseBucket(bucket, sig)
+	}
 	key := fullCacheKey(bucket, query)
 
 	if entry, tier, ok := e.cache.Get(ctx, key); ok {
@@ -279,8 +282,34 @@ func (e *Engine) searchUncached(ctx context.Context, query string, f *Filter, w 
 	}
 	queryVec := normalizeVector(qe.vec)
 
+	// A quoted phrase is a required clause (phrase.go): only documents that
+	// contain it may be returned. Computed here, after the final lexical phase
+	// and under the same read lock, so it sees the same index state.
+	var allowed map[uint64]struct{}
+	if phrases := e.analyzePhrases(query); len(phrases) > 0 {
+		allowed = e.phraseDocs(phrases, f.pred())
+		if len(allowed) == 0 {
+			return cacheResult{QueryVec: queryVec}, nil
+		}
+		keepOnly(keywordScores, allowed)
+		kept := bm25Results[:0:0]
+		for _, r := range bm25Results {
+			if _, ok := allowed[r.DocID]; ok {
+				kept = append(kept, r)
+			}
+		}
+		bm25Results = kept
+	}
+
 	e.vectors.RLock()
-	vectorScores, err := e.vectorPass(ctx, queryVec, f)
+	var vectorScores map[uint64]float64
+	if allowed != nil {
+		// The phrase's documents are already attribute-filtered: score exactly
+		// those, instead of a full scan or an ANN search that may miss some.
+		vectorScores = e.vectorScoresOf(queryVec, allowed)
+	} else {
+		vectorScores, err = e.vectorPass(ctx, queryVec, f)
+	}
 	e.vectors.RUnlock()
 	if err != nil {
 		return cacheResult{}, err
@@ -313,6 +342,9 @@ func (e *Engine) searchUncached(ctx context.Context, query string, f *Filter, w 
 		expandedKeywords := e.neuralExpand(expandedTokens)
 		e.inverted.RUnlock()
 		e.filterCandidates(f.pred(), expandedKeywords)
+		if allowed != nil {
+			keepOnly(expandedKeywords, allowed)
+		}
 
 		for id, score := range keywordScores {
 			expandedKeywords[id] += score
@@ -531,6 +563,24 @@ func (e *Engine) vectorPass(ctx context.Context, queryVec []float32, f *Filter) 
 		return nil, canceled
 	}
 	return scores, nil
+}
+
+// vectorScoresOf scores exactly the documents in ids by dot product with the
+// query vector, clamping negatives to 0 like vectorPass. Used for phrase
+// queries, whose candidates are already known and attribute-filtered.
+func (e *Engine) vectorScoresOf(queryVec []float32, ids map[uint64]struct{}) map[uint64]float64 {
+	scores := make(map[uint64]float64)
+	if len(queryVec) == 0 {
+		return scores
+	}
+	for id := range ids {
+		if v := e.vecOf(id); v != nil {
+			if s := ann.DotF32F16(queryVec, v); s > 0 {
+				scores[id] = s
+			}
+		}
+	}
+	return scores
 }
 
 // elapsedMs is d in fractional milliseconds. Sub-millisecond searches are
