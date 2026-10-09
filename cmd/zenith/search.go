@@ -45,6 +45,12 @@ The query goes through the full pipeline:
   3. Semantic scoring (vector cosine via embedder)
   4. RRF fusion
 
+A double-quoted part of the query is a phrase every result must contain, words
+adjacent and in order (after the same stemming and stop-word removal as the
+documents). Keep the quotes away from your shell:
+
+  zenith search '"machine learning" python'
+
 --facets counts attribute values over every match (not just the page shown).
 With --facets and no query, it counts over every document in the index.`,
 
