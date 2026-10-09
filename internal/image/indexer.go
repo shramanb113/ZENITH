@@ -21,6 +21,14 @@ const (
 // smaller amount of searchable text.
 func OCRAvailable() bool { return ocrAvailable() }
 
+// OCRFile runs OCR over the image at filePath and returns whatever text is
+// found, trimmed ("", nil when OCR support isn't compiled in — see
+// OCRAvailable). Exported for internal/pdf's embedded-image OCR feature,
+// which stages each decoded image as a temp file and reuses this same
+// extraction path rather than duplicating the ocrAvailable/build-tag
+// machinery.
+func OCRFile(filePath string) (string, error) { return extractOCRText(filePath) }
+
 // Indexer indexes image files by decomposing their file path into searchable
 // tokens and, when OCR support is compiled in, any text the pixels contain.
 // The engine's wired embedder computes vectors automatically.
@@ -45,6 +53,59 @@ func NewIndexer(e *index.Engine, logger ...*activitylog.Logger) *Indexer {
 	return &Indexer{engine: e, logger: l}
 }
 
+// Chunk is one chunk of an image's extracted text, with structured fields
+// rather than an opaque ID string — a caller indexing through the raw
+// engine wants the baked-in ID format Index has always used (see ID
+// below); a caller indexing through zenith.DB (internal/sidecar's file
+// -ingest route) cannot use that format at all for an OCR chunk (zenith.DB
+// reserves "||" for its own internal chunk-ID parsing, see
+// pkg/zenith/zenith.go's parseChunkID, and rejects any caller-supplied ID
+// containing it) and needs Kind/Index as separate values to build a safe ID
+// instead.
+type Chunk struct {
+	Kind  string // "path" (filename-only) or "ocr"
+	Index int    // 0-based chunk index within the OCR text; unused for "path"
+	Text  string
+}
+
+// ID returns docID for a "path" chunk, docID||ocr||c{index} for an "ocr"
+// chunk — the format Index has always stored chunks under.
+func (c Chunk) ID(docID string) string {
+	if c.Kind == "ocr" {
+		return fmt.Sprintf("%s||ocr||c%d", docID, c.Index)
+	}
+	return docID
+}
+
+// ExtractChunks derives chunks from filePath's name/path tokens and, when
+// OCR support is compiled in, any text found in the pixels — the same
+// decomposition Index stores under, without touching an engine. ocrErr is
+// non-nil only when OCR was attempted and failed (missing language data,
+// corrupt image, unsupported format); chunks still reflects the
+// filename-only fallback in that case. Callers should log ocrErr, never
+// treat it as fatal — Index does not.
+func ExtractChunks(filePath string) (chunks []Chunk, ocrErr error) {
+	pathText := pathToText(filePath)
+
+	ocrText, ocrErr := extractOCRText(filePath)
+	ocrText = strings.TrimSpace(ocrText)
+
+	if ocrText == "" {
+		if pathText == "" {
+			return nil, ocrErr
+		}
+		return []Chunk{{Kind: "path", Text: pathText}}, ocrErr
+	}
+
+	if pathText != "" {
+		chunks = append(chunks, Chunk{Kind: "path", Text: pathText})
+	}
+	for i, chunk := range splitOCRChunks(ocrText) {
+		chunks = append(chunks, Chunk{Kind: "ocr", Index: i, Text: chunk})
+	}
+	return chunks, ocrErr
+}
+
 // Index derives a text description from the image path — plus, when OCR
 // support is compiled in, any text found in the pixels — and stores it in
 // the engine. Returns the number of documents indexed (1 for filename-only;
@@ -53,24 +114,22 @@ func NewIndexer(e *index.Engine, logger ...*activitylog.Logger) *Indexer {
 // is logged and never fails the call: image search always falls back to
 // filename-only rather than regressing or erroring out.
 func (idx *Indexer) Index(ctx context.Context, docID, filePath string) (int, error) {
-	pathText := pathToText(filePath)
-
-	ocrText, err := extractOCRText(filePath)
-	if err != nil {
-		idx.logger.Log("IMAGE", fmt.Sprintf("%s → OCR failed, falling back to filename-only: %v", docID, err))
-		ocrText = ""
+	chunks, ocrErr := ExtractChunks(filePath)
+	if ocrErr != nil {
+		idx.logger.Log("IMAGE", fmt.Sprintf("%s → OCR failed, falling back to filename-only: %v", docID, ocrErr))
 	}
-	ocrText = strings.TrimSpace(ocrText)
+	if len(chunks) == 0 {
+		return 0, nil
+	}
 
-	if ocrText == "" {
-		if pathText == "" {
-			return 0, nil
-		}
+	// Filename-only (no OCR text found): preserve the original single-Add
+	// path rather than routing a lone document through AddBatch.
+	if len(chunks) == 1 && chunks[0].Kind == "path" {
 		var err error
 		if len(idx.attrs) > 0 {
-			err = idx.engine.AddWithVectorAttrs(ctx, docID, pathText, idx.engine.EmbedText(ctx, pathText), idx.attrs)
+			err = idx.engine.AddWithVectorAttrs(ctx, docID, chunks[0].Text, idx.engine.EmbedText(ctx, chunks[0].Text), idx.attrs)
 		} else {
-			err = idx.engine.Add(ctx, docID, pathText)
+			err = idx.engine.Add(ctx, docID, chunks[0].Text)
 		}
 		if err != nil {
 			return 0, fmt.Errorf("image: index %s: %w", docID, err)
@@ -79,19 +138,9 @@ func (idx *Indexer) Index(ctx context.Context, docID, filePath string) (int, err
 		return 1, nil
 	}
 
-	var docs []index.BatchDoc
-	if pathText != "" {
-		docs = append(docs, index.BatchDoc{ID: docID, Text: pathText, Attrs: idx.attrs})
-	}
-	for i, chunk := range splitOCRChunks(ocrText) {
-		docs = append(docs, index.BatchDoc{
-			ID:    fmt.Sprintf("%s||ocr||c%d", docID, i),
-			Text:  chunk,
-			Attrs: idx.attrs,
-		})
-	}
-	if len(docs) == 0 {
-		return 0, nil
+	docs := make([]index.BatchDoc, len(chunks))
+	for i, c := range chunks {
+		docs[i] = index.BatchDoc{ID: c.ID(docID), Text: c.Text, Attrs: idx.attrs}
 	}
 	if err := idx.engine.AddBatch(ctx, docs); err != nil {
 		return 0, fmt.Errorf("image: index %s: %w", docID, err)

@@ -7,8 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -87,6 +91,14 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body, out any)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	return c.do(req, out)
+}
+
+// do attaches auth and decodes a successful JSON response into out (nil to
+// discard the body); req's own Content-Type, if any, is left untouched, so
+// callers sending a non-JSON body (e.g. IngestFile's multipart form) set it
+// before calling this.
+func (c *Client) do(req *http.Request, out any) error {
 	if c.apiKey != "" {
 		req.Header.Set("X-Zenith-Key", c.apiKey)
 	}
@@ -224,6 +236,59 @@ func (c *Client) UpsertDocuments(ctx context.Context, collectionID string, docs 
 	return res, err
 }
 
+// IngestFile uploads the file at filePath (a .pdf or image — the same
+// extensions `zenith index` extracts: .jpg/.jpeg/.png/.gif/.bmp/.webp/.tiff/
+// .tif) to the sidecar's /v1/collections/{id}/ingest route, which runs it
+// through the server-side PDF/image extractors and upserts the resulting
+// chunks under docID (e.g. "doc1||p1||c0||text||..." for a PDF page chunk).
+// attrs (nil for none) is applied to every resulting chunk. This is the
+// counterpart to UpsertDocuments for raw files: UpsertDocuments only
+// accepts text a caller has already extracted itself. Works with the admin
+// key or the collection's own key.
+func (c *Client) IngestFile(ctx context.Context, collectionID, docID, filePath string, attrs Attrs) (UpsertResult, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return UpsertResult{}, fmt.Errorf("zenith: opening %s: %w", filePath, err)
+	}
+	defer f.Close()
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	if err := mw.WriteField("id", docID); err != nil {
+		return UpsertResult{}, fmt.Errorf("zenith: building upload: %w", err)
+	}
+	if len(attrs) > 0 {
+		b, err := json.Marshal(attrs)
+		if err != nil {
+			return UpsertResult{}, fmt.Errorf("zenith: encoding attrs: %w", err)
+		}
+		if err := mw.WriteField("attrs", string(b)); err != nil {
+			return UpsertResult{}, fmt.Errorf("zenith: building upload: %w", err)
+		}
+	}
+	fw, err := mw.CreateFormFile("file", filepath.Base(filePath))
+	if err != nil {
+		return UpsertResult{}, fmt.Errorf("zenith: building upload: %w", err)
+	}
+	if _, err := io.Copy(fw, f); err != nil {
+		return UpsertResult{}, fmt.Errorf("zenith: reading %s: %w", filePath, err)
+	}
+	if err := mw.Close(); err != nil {
+		return UpsertResult{}, fmt.Errorf("zenith: building upload: %w", err)
+	}
+
+	path := "/v1/collections/" + url.PathEscape(collectionID) + "/ingest"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, &body)
+	if err != nil {
+		return UpsertResult{}, fmt.Errorf("zenith: building request: %w", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	var res UpsertResult
+	err = c.do(req, &res)
+	return res, err
+}
+
 // GetDocument fetches one document's full text by ID.
 func (c *Client) GetDocument(ctx context.Context, collectionID, docID string) (string, error) {
 	var resp struct {
@@ -270,26 +335,45 @@ type SearchHit struct {
 	Terms    []SearchTerm `json:"terms"`
 }
 
-// SearchResult is the result of one SearchQuery.
+// SearchResult is the result of one SearchQuery. Facets is present only
+// when the request used WithSearchFacets.
 type SearchResult struct {
 	QueryTerms []string    `json:"query_terms"`
 	Hits       []SearchHit `json:"hits"`
+	Facets     Facets      `json:"facets,omitempty"`
 }
 
 // collectionSearchRequest is the wire shape of POST .../search, matching
 // the request struct decoded in internal/sidecar/collections_http.go's
-// searchCollection. Only the fields that handler currently reads are
-// included: limit, min_semantic, and filter. The sidecar does not yet
-// accept per-query ranking weights, a sort field, or an offset on this
-// endpoint (unlike pkg/zenith.Search's WithWeights/SortBy/WithFilter, which
-// are library-only); CollectionSearchOption is written so adding one later
-// (WithSearchWeights, WithSearchSort, WithSearchOffset, ...) is a pure
-// addition here with no signature break.
+// searchCollection (queries/limit/min_semantic/filter) plus the shared
+// searchExtras fields from internal/sidecar/search_opts.go (offset,
+// weights, sort, facets) — both namespace and collection search accept all
+// of these; this client only talks to the collection endpoint.
 type collectionSearchRequest struct {
 	Queries     []SearchQuery   `json:"queries"`
 	Limit       int             `json:"limit,omitempty"`
 	MinSemantic float64         `json:"min_semantic,omitempty"`
 	Filter      json.RawMessage `json:"filter,omitempty"`
+	Offset      int             `json:"offset,omitempty"`
+	Weights     *searchWeights  `json:"weights,omitempty"`
+	Sort        *searchSort     `json:"sort,omitempty"`
+	Facets      *searchFacets   `json:"facets,omitempty"`
+}
+
+type searchWeights struct {
+	Vector   float64 `json:"vector,omitempty"`
+	Phonetic float64 `json:"phonetic,omitempty"`
+	RRFK     float64 `json:"rrf_k,omitempty"`
+}
+
+type searchSort struct {
+	Field string `json:"field"`
+	Desc  bool   `json:"desc"`
+}
+
+type searchFacets struct {
+	Fields []string `json:"fields"`
+	TopK   int      `json:"top_k,omitempty"`
 }
 
 // CollectionSearchOption configures a Search call.
@@ -317,6 +401,35 @@ func WithSearchFilter(f Filter) CollectionSearchOption {
 	}
 }
 
+// WithSearchOffset skips the first n hits per query (the page is still
+// fetched as offset+limit server-side, then trimmed).
+func WithSearchOffset(n int) CollectionSearchOption {
+	return func(r *collectionSearchRequest) { r.Offset = n }
+}
+
+// WithSearchWeights overrides the per-call ranking weights (RRF vector-list
+// weight, phonetic match weight, RRF k constant); a zero argument keeps that
+// weight's collection default. Mirrors zenith.WithWeights for the
+// library-direct path.
+func WithSearchWeights(vector, phonetic, rrfK float64) CollectionSearchOption {
+	return func(r *collectionSearchRequest) {
+		r.Weights = &searchWeights{Vector: vector, Phonetic: phonetic, RRFK: rrfK}
+	}
+}
+
+// WithSearchSort orders results by the named attribute instead of score, as
+// zenith.SortBy does for the library-direct path.
+func WithSearchSort(field string, desc bool) CollectionSearchOption {
+	return func(r *collectionSearchRequest) { r.Sort = &searchSort{Field: field, Desc: desc} }
+}
+
+// WithSearchFacets requests per-value document counts over each query's
+// matches for the named attribute fields (topK <= 0 uses the sidecar's
+// default of 10). Results land in SearchResult.Facets.
+func WithSearchFacets(fields []string, topK int) CollectionSearchOption {
+	return func(r *collectionSearchRequest) { r.Facets = &searchFacets{Fields: fields, TopK: topK} }
+}
+
 // Search runs one or more named queries against a collection and returns a
 // map keyed by each query's ID. Works with the admin key or the
 // collection's own key.
@@ -336,4 +449,43 @@ func (c *Client) Search(ctx context.Context, collectionID string, queries []Sear
 		return nil, err
 	}
 	return resp.Results, nil
+}
+
+// Suggest returns indexed terms starting with prefix (analysed/stemmed,
+// lexicographic order), n <= 0 uses the sidecar's default count. Works with
+// the admin key or the collection's own key.
+func (c *Client) Suggest(ctx context.Context, collectionID, prefix string, n int) ([]string, error) {
+	q := url.Values{"q": {prefix}}
+	if n > 0 {
+		q.Set("n", strconv.Itoa(n))
+	}
+	var resp struct {
+		Terms []string `json:"terms"`
+	}
+	path := "/v1/collections/" + url.PathEscape(collectionID) + "/suggest?" + q.Encode()
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Terms, nil
+}
+
+// Facets returns per-value document counts over the whole collection (no
+// query) for the named attribute fields; topK <= 0 uses the sidecar's
+// default of 10. Works with the admin key or the collection's own key.
+func (c *Client) Facets(ctx context.Context, collectionID string, fields []string, topK int) (Facets, error) {
+	if len(fields) == 0 {
+		return nil, errors.New("zenith: Facets requires at least one field")
+	}
+	q := url.Values{"fields": {strings.Join(fields, ",")}}
+	if topK > 0 {
+		q.Set("top_k", strconv.Itoa(topK))
+	}
+	var resp struct {
+		Facets Facets `json:"facets"`
+	}
+	path := "/v1/collections/" + url.PathEscape(collectionID) + "/facets?" + q.Encode()
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Facets, nil
 }

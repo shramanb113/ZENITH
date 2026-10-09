@@ -98,6 +98,77 @@ func resolveWithinRoot(root, filePath string) (string, error) {
 	return resolved, nil
 }
 
+// Chunk is one chunk of a PDF's extracted content — either a windowed
+// slice of a page's native text (Kind "text") or OCR'd text from one of a
+// page's embedded images (Kind "image", see images.go) — with structured
+// position fields rather than an opaque ID string. A caller indexing
+// through the raw engine wants the baked-in ID format Index has always
+// used (see ID below); a caller indexing through zenith.DB
+// (internal/sidecar's file-ingest route) cannot use that format at all
+// (zenith.DB reserves "||" for its own internal chunk-ID parsing, see
+// pkg/zenith/zenith.go's parseChunkID, and rejects any caller-supplied ID
+// containing it) and needs Page/Index/Kind/BBox as separate values to
+// build a safe ID and/or attrs instead.
+type Chunk struct {
+	Page  int    // 1-based page number
+	Index int    // 0-based index within Kind on this page
+	Kind  string // "text" or "image"
+	Text  string
+	// BBox fields are only meaningful for Kind=="text" (the chunk's
+	// position on the page); an "image" chunk's bbox is not computed — no
+	// demand yet to highlight an embedded image's own page position.
+	BBoxX, BBoxY, BBoxW, BBoxH float32
+}
+
+// ID returns the format Index has always stored a chunk under:
+// docID||p{page}||c{index}||text||x,y,w,h for Kind=="text",
+// docID||p{page}||img{index}||ocr for Kind=="image".
+func (c Chunk) ID(docID string) string {
+	if c.Kind == "image" {
+		return fmt.Sprintf("%s||p%d||img%d||ocr", docID, c.Page, c.Index)
+	}
+	return fmt.Sprintf("%s||p%d||c%d||text||%.2f,%.2f,%.2f,%.2f",
+		docID, c.Page, c.Index, c.BBoxX, c.BBoxY, c.BBoxW, c.BBoxH)
+}
+
+// ExtractChunks parses filePath and returns its page-chunked native text
+// plus OCR'd text from embedded images large enough to be worth it (see
+// images.go's minImageArea) — a page with little or no native text still
+// yields its image chunks, which is the point of the feature: a
+// screenshot-only or diagram-only page is otherwise invisible to search.
+// It applies no root confinement and touches no engine — callers that need
+// SetAllowedRoot's confinement or want the result persisted do that
+// themselves (Index wraps this for the local-engine path; internal/sidecar's
+// file-ingest route wraps it for the collections path).
+func ExtractChunks(filePath string) ([]Chunk, error) {
+	f, r, err := lpdf.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("pdf: open %s: %w", filePath, err)
+	}
+	defer f.Close()
+
+	var chunks []Chunk
+	for pageNum := 1; pageNum <= r.NumPage(); pageNum++ {
+		page := r.Page(pageNum)
+		if page.V.IsNull() {
+			continue
+		}
+		if text, err := page.GetPlainText(nil); err == nil && strings.TrimSpace(text) != "" {
+			ranges := splitChunkRanges(text)
+			boxes := pageChunkBoxes(page, ranges)
+			for chunkIdx, cr := range ranges {
+				bx := boxes[chunkIdx]
+				chunks = append(chunks, Chunk{
+					Page: pageNum, Index: chunkIdx, Kind: "text", Text: cr.text,
+					BBoxX: bx.x, BBoxY: bx.y, BBoxW: bx.w, BBoxH: bx.h,
+				})
+			}
+		}
+		chunks = append(chunks, extractPageImageChunks(page, pageNum)...)
+	}
+	return chunks, nil
+}
+
 // Index extracts text from filePath and stores it in the engine, attaching
 // attrs (nil for none) to every chunk. Returns the number of chunks indexed.
 // attrs is a parameter rather than indexer state so one PDFIndexer can serve
@@ -111,36 +182,17 @@ func (p *PDFIndexer) Index(ctx context.Context, docID, filePath string, attrs in
 		filePath = resolved
 	}
 
-	f, r, err := lpdf.Open(filePath)
+	chunks, err := ExtractChunks(filePath)
 	if err != nil {
-		return 0, fmt.Errorf("pdf: open %s: %w", filePath, err)
+		return 0, err
 	}
-	defer f.Close()
-
-	var docs []index.BatchDoc
-	for pageNum := 1; pageNum <= r.NumPage(); pageNum++ {
-		page := r.Page(pageNum)
-		if page.V.IsNull() {
-			continue
-		}
-		text, err := page.GetPlainText(nil)
-		if err != nil || strings.TrimSpace(text) == "" {
-			continue
-		}
-		ranges := splitChunkRanges(text)
-		boxes := pageChunkBoxes(page, ranges)
-		for chunkIdx, cr := range ranges {
-			bx := boxes[chunkIdx]
-			docs = append(docs, index.BatchDoc{
-				ID: fmt.Sprintf("%s||p%d||c%d||text||%.2f,%.2f,%.2f,%.2f",
-					docID, pageNum, chunkIdx, bx.x, bx.y, bx.w, bx.h),
-				Text: cr.text, Attrs: attrs,
-			})
-		}
-	}
-
-	if len(docs) == 0 {
+	if len(chunks) == 0 {
 		return 0, nil
+	}
+
+	docs := make([]index.BatchDoc, len(chunks))
+	for i, c := range chunks {
+		docs[i] = index.BatchDoc{ID: c.ID(docID), Text: c.Text, Attrs: attrs}
 	}
 	if err := p.engine.AddBatch(ctx, docs); err != nil {
 		return 0, fmt.Errorf("pdf: index %s: %w", docID, err)

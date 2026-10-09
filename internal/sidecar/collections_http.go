@@ -25,6 +25,7 @@ func (s *Server) registerCollections(mux *http.ServeMux) {
 	route(mux, "POST /v1/collections/{id}/rotate-key", s.adminGuard(s.rotateKey))
 
 	route(mux, "PUT /v1/collections/{id}/docs", s.colGuard(s.putCollectionDocs))
+	route(mux, "POST /v1/collections/{id}/ingest", s.colGuard(s.ingestCollection))
 	route(mux, "GET /v1/collections/{id}/docs/{doc...}", s.colGuard(s.getCollectionDoc))
 	route(mux, "DELETE /v1/collections/{id}/docs/{doc...}", s.colGuard(s.deleteCollectionDoc))
 	route(mux, "POST /v1/collections/{id}/search", s.colGuard(s.searchCollection))

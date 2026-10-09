@@ -15,7 +15,7 @@ guarantee.
 **Define the scope before anything else — this is not "replace your database":**
 Postgres (or whatever RDBMS you already run) stays your system of record for
 transactional, relational, day-to-day application data. ZENITH doesn't touch that job
-and isn't trying to. What it replaces is the *search* stack you'd otherwise have to
+and isn't trying to. What it replaces is the _search_ stack you'd otherwise have to
 assemble on top of that database — a vector DB subscription, plus full-text search, plus
 your own code to fuse the two into one ranking.
 
@@ -29,10 +29,10 @@ your own code to fuse the two into one ranking.
 **The five things that back that up, if asked to go deeper:**
 
 1. Postgres keeps owning the data model — users, orders, relationships, transactions.
-   ZENITH owns making the *text/document content* your app has findable; it's additive,
+   ZENITH owns making the _text/document content_ your app has findable; it's additive,
    not a rip-and-replace.
 2. What it removes is the separate vector DB (Pinecone/Qdrant/Weaviate) you'd otherwise
-   provision, pay for, and keep available over a network — ZENITH *is* the storage engine
+   provision, pay for, and keep available over a network — ZENITH _is_ the storage engine
    (real WAL, memtables, SSTables, Bloom filters, leveled compaction) running in-process.
 3. It also removes the DIY work pgvector leaves you with: you'd still bolt an extension
    onto Postgres, hand-tune its ANN index, and write your own score-fusion SQL. ZENITH's
@@ -70,7 +70,7 @@ languages, never sleeps, and keeps what it has saved even if you kill it.**
 - **It speaks languages it was never explicitly told to translate.** Ask a question in
   plain English and it will reach into a document written entirely in Hindi, in a
   completely different alphabet, and hand you back the right one — with zero translation
-  step in between. It's reading *meaning*, across languages, not matching words.
+  step in between. It's reading _meaning_, across languages, not matching words.
 - **What it has saved, it keeps.** Kill the server outright — no warning, no graceful
   shutdown — and the index files it already wrote come back intact and give the same
   answers. (The Go library goes further: every write it confirms is logged first, and
@@ -158,13 +158,14 @@ the end) is fine and keeps the volume.
    the multilingual query during Q&A), copy the matching `compose run --rm zenith ...` line
    out of `demo/run.sh` — every section is a single self-contained command block.
 7. **After the meeting:** `bash demo/run.sh` already ends with a plain `docker compose
-   down` (no `-v`) — nothing further to clean up, and the models stay cached for next time.
+down` (no `-v`) — nothing further to clean up, and the models stay cached for next time.
 
 ---
 
 ## 5. Section-by-section script — what to say, what they'll see
 
 ### Section 1 — Mixed-format ingestion
+
 **Command:** indexes `demo/corpus/clinical`, `demo/corpus/misc`, `demo/corpus/images`
 (`.txt .md .csv .json .log .png`), each tagged with a `domain` attribute.
 
@@ -176,6 +177,7 @@ files, a scanned PNG — going in with one command each, tagged with metadata as
 indexed. No separate OCR step, no separate 'load into Elasticsearch' step."
 
 ### Section 2 — Typo tolerance
+
 **Command:** searches `"receive invoice"` against a document that actually contains the
 misspelling `"recieve"`.
 
@@ -186,6 +188,7 @@ full of typos like this. ZENITH's fuzzy/phonetic layer catches it without any fu
 syntax in the query. 5 milliseconds."
 
 ### Section 3 — Out-of-domain semantic search
+
 **Command:** searches `"heart attack symptoms"` — a phrase that appears nowhere, verbatim,
 in the corpus.
 
@@ -197,6 +200,7 @@ ECG findings, troponin levels — clinically related, zero shared words. This is
 neural embedding model doing real semantic matching, not a keyword trick."
 
 ### Section 4 — Metadata filtering
+
 **Command:** the same kind of query (`"server restart during import"`), scoped with
 `--where domain=misc`.
 
@@ -207,6 +211,7 @@ multi-tenant search, or 'only search this customer's documents.' The filter is a
 indexed structure, not a post-filter that throws away ranking quality."
 
 ### Section 5 — OCR'd image hit
+
 **Command:** searches `"crash recovery documents survived"` — text that exists **only**
 inside a scanned PNG, nowhere as a filename or in any other document.
 
@@ -218,16 +223,17 @@ everything else. Point this at a folder of scanned reports, screenshots, or rece
 they become searchable."
 
 ### Section 6 — Reranking (the sharpest visual moment)
+
 **Commands:** pulls the `ms-marco-MiniLM-L-6-v2` cross-encoder, then runs the same query
 twice — with and without `--rerank`.
 
 **What appears (verified this run):**
 
-| | without `--rerank` | with `--rerank` |
-|---|---|---|
-| #1 `support-tickets.csv` | 0.143 | **0.998** |
-| #2 | 0.123 | 0.000 |
-| #3 | 0.120 | 0.000 |
+|                          | without `--rerank` | with `--rerank` |
+| ------------------------ | ------------------ | --------------- |
+| #1 `support-tickets.csv` | 0.143              | **0.998**       |
+| #2                       | 0.123              | 0.000           |
+| #3                       | 0.120              | 0.000           |
 
 **Say:** "Watch the scores. Without reranking, the top few results are close together —
 0.143, 0.123, 0.120 — a soft hybrid ranking. Flip on `--rerank`, and the cross-encoder
@@ -236,14 +242,15 @@ everything else. That's a cross-encoder decisively separating the one relevant d
 from the rest — the clearest 'this actually works' moment in the whole demo."
 
 ### Section 7 — Multilingual (LaBSE) — the technical depth moment
+
 **Commands:** pulls LaBSE (768-dim, 109 languages, ~450 MB — already cached from your
 warm-up run), indexes a separate 8-document multilingual corpus, runs three queries.
 
 **What appears (verified this run):**
 
-1. `"capital of France"` → `french.txt` #1 (0.143). *(Honest caveat to say out loud: this
+1. `"capital of France"` → `french.txt` #1 (0.143). _(Honest caveat to say out loud: this
    query shares the literal word "France" with the lexical pass — it's not proof of pure
-   semantic matching by itself.)*
+   semantic matching by itself.)_
 2. `"white marble mausoleum built by a Mughal emperor in Agra"` → `taj_mahal.txt` #1
    (0.095), ahead of `hindi.txt` and `himalaya.txt`. **Zero shared vocabulary** — the
    query is English, the matched document is a real Hindi Wikipedia passage in
@@ -260,6 +267,7 @@ the top 3. I'll come back to that in a second, because I'd rather tell you about
 have you find it."
 
 ### Section 8 — Committed data survives SIGKILL
+
 **Command:** searches the saved index, starts the server (which opens those files),
 `SIGKILL`s it, searches the same files again and diffs the two outputs, then runs a
 CRC-32C pass over every segment.
@@ -311,7 +319,7 @@ process to monitor, no network hop on the hot path.
 **"So does this replace our Postgres database?"** — get ahead of this one, it's the most
 likely misread of the pitch. No. Postgres stays the system of record for your
 transactional/relational data; ZENITH doesn't do joins, transactions, or ACID multi-table
-writes, and isn't trying to. It replaces the *search* stack you'd otherwise bolt onto
+writes, and isn't trying to. It replaces the _search_ stack you'd otherwise bolt onto
 Postgres — a vector DB, full-text search, and your own fusion code — with one embedded
 engine. Think "the specialized search layer next to your database," not "a database
 replacement."
@@ -356,12 +364,12 @@ and the 1M-document scale test are deferred backlog items, not silently dropped 
 
 ## Appendix: file map for this demo
 
-| Path | Purpose |
-|---|---|
-| `demo/run.sh` | The scripted walkthrough — single source of truth for section order |
-| `demo/corpus/clinical/`, `misc/`, `images/` | Section 1–6 corpus (mixed formats + 1 scanned PNG) |
-| `demo/corpus/multilingual/` | Section 7 corpus — 8 files, 5 hand-written + 3 real Hindi Wikipedia extracts |
-| `demo/corpus/MULTILINGUAL_SOURCES.md` | Attribution for the Wikipedia extracts — deliberately **outside** the indexed `multilingual/` dir so it can't contaminate the zero-shared-vocabulary test |
-| `docker-compose.yml` | Single `zenith` service wrapping the `Dockerfile` |
-| `README.md` § "Real-world Hindi accuracy check" | The honest long-form writeup of the Section 7 investigation |
-| `ROADMAP.md` item 6 | Same investigation, roadmap framing + follow-up status |
+| Path                                            | Purpose                                                                                                                                                   |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `demo/run.sh`                                   | The scripted walkthrough — single source of truth for section order                                                                                       |
+| `demo/corpus/clinical/`, `misc/`, `images/`     | Section 1–6 corpus (mixed formats + 1 scanned PNG)                                                                                                        |
+| `demo/corpus/multilingual/`                     | Section 7 corpus — 8 files, 5 hand-written + 3 real Hindi Wikipedia extracts                                                                              |
+| `demo/corpus/MULTILINGUAL_SOURCES.md`           | Attribution for the Wikipedia extracts — deliberately **outside** the indexed `multilingual/` dir so it can't contaminate the zero-shared-vocabulary test |
+| `docker-compose.yml`                            | Single `zenith` service wrapping the `Dockerfile`                                                                                                         |
+| `README.md` § "Real-world Hindi accuracy check" | The honest long-form writeup of the Section 7 investigation                                                                                               |
+| `ROADMAP.md` item 6                             | Same investigation, roadmap framing + follow-up status                                                                                                    |

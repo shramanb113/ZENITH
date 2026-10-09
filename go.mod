@@ -56,3 +56,8 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251029180050-ab9386a59fda // indirect
 )
+
+// ZENITH fork: patches Value.Reader()'s applyFilter to pass through
+// DCTDecode/CCITTFaxDecode/JBIG2Decode/JPXDecode image-codec streams
+// instead of panicking — see third_party/ledongthuc_pdf/README.md.
+replace github.com/ledongthuc/pdf => ./third_party/ledongthuc_pdf
