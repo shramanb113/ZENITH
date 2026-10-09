@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/shramanb113/ZENITH/internal/fsx"
 )
@@ -24,26 +23,11 @@ type SyncMode int
 
 const (
 	SyncAlways SyncMode = iota
-	SyncPeriodic
-	SyncGroupCommit
-)
-
-type CompressionCodec int
-
-const (
-	CodecNone CompressionCodec = iota
-	CodecSnappy
-	CodecZstd
 )
 
 type WALConfig struct {
-	SyncMode          SyncMode
-	SyncInterval      time.Duration
-	GroupCommitWindow time.Duration
-	MaxSegmentSize    int64
-	Dir               string
-	Codec             CompressionCodec
-	ZstdLevel         int
+	SyncMode SyncMode
+	Dir      string
 }
 
 type WAL struct {
@@ -53,8 +37,6 @@ type WAL struct {
 	closed      atomic.Bool
 	file        *fsx.File
 	buf         *bufio.Writer
-	syncCh      chan struct{}
-	syncDone    chan struct{}
 	byteWritten uint64
 	path        string
 }
@@ -404,11 +386,6 @@ func OpenWAL(path string, cfg WALConfig) (*WAL, []Record, error) {
 		// entry: without this a power cut after the first acknowledged append can
 		// leave no file at all.
 		syncDir(filepath.Dir(path))
-	}
-
-	if cfg.SyncMode == SyncPeriodic || cfg.SyncMode == SyncGroupCommit {
-		file.Close()
-		return nil, nil, errors.New("SyncPeriodic and SyncGroupCommit not yet implemented")
 	}
 
 	// Recover seeks to 0 internally (Bug 6 fix), so no explicit seek needed here.

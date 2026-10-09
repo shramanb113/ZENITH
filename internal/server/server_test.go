@@ -5,19 +5,22 @@ import (
 	"testing"
 
 	"github.com/shramanb113/ZENITH/gen/go/zenithproto"
+	"github.com/shramanb113/ZENITH/internal/index"
 	"github.com/shramanb113/ZENITH/internal/server"
 )
 
 type mockPDFIndexer struct {
 	lastDocID   string
 	lastPath    string
+	lastAttrs   index.Attrs
 	returnCount int
 	returnErr   error
 }
 
-func (m *mockPDFIndexer) Index(ctx context.Context, docID, filePath string) (int, error) {
+func (m *mockPDFIndexer) Index(ctx context.Context, docID, filePath string, attrs index.Attrs) (int, error) {
 	m.lastDocID = docID
 	m.lastPath = filePath
+	m.lastAttrs = attrs
 	return m.returnCount, m.returnErr
 }
 

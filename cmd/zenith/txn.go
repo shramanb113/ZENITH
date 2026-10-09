@@ -52,60 +52,29 @@ func init() {
 	txnCmd.AddCommand(txnAddCmd, txnRemoveCmd)
 }
 
-// toAttrs converts the loosely-typed JSON attrs map into index.Attrs.
-// index.AttrValue is {Kind AttrKind, S string, N float64, Arr []AttrValue}
-// — bools are stored as Kind: AttrBool, N: 1/0, not a separate bool field.
-// A JSON array of scalars becomes an AttrArray (the type system already
-// supports this — see internal/index/attrs.go's AttrKind doc comment: "an
-// element of Arr is never itself AttrArray"). null, a nested object, or an
-// array containing anything other than a string/bool/number is an error,
-// not a silent drop: losing part of a document's metadata without telling
-// the caller is worse than refusing the whole file up front.
+// toAttrs converts the loosely-typed JSON attrs map into index.Attrs via
+// index.AttrValueFromAny — the same conversion pkg/zenith's AddWithAttrs
+// uses, so the CLI and the library accept exactly the same values: a JSON
+// string/bool/number, or an array of those (an AttrArray). null, a nested
+// object, or a nested array is an error, not a silent drop: losing part of a
+// document's metadata without telling the caller is worse than refusing the
+// whole file up front.
 func toAttrs(m map[string]any) (index.Attrs, error) {
 	if len(m) == 0 {
 		return nil, nil
 	}
 	out := make(index.Attrs, len(m))
 	for k, v := range m {
-		av, err := toAttrValue(v)
+		if k == "" {
+			return nil, fmt.Errorf("attrs: keys must not be empty")
+		}
+		av, err := index.AttrValueFromAny(v)
 		if err != nil {
 			return nil, fmt.Errorf("attrs[%q]: %w", k, err)
 		}
 		out[k] = av
 	}
 	return out, nil
-}
-
-func toAttrValue(v any) (index.AttrValue, error) {
-	switch tv := v.(type) {
-	case string:
-		return index.AttrValue{Kind: index.AttrString, S: tv}, nil
-	case bool:
-		n := 0.0
-		if tv {
-			n = 1
-		}
-		return index.AttrValue{Kind: index.AttrBool, N: n}, nil
-	case float64:
-		return index.AttrValue{Kind: index.AttrNumber, N: tv}, nil
-	case []any:
-		arr := make([]index.AttrValue, len(tv))
-		for i, elem := range tv {
-			ev, err := toAttrValue(elem)
-			if err != nil {
-				return index.AttrValue{}, fmt.Errorf("[%d]: %w", i, err)
-			}
-			if ev.Kind == index.AttrArray {
-				return index.AttrValue{}, fmt.Errorf("[%d]: nested arrays are not supported", i)
-			}
-			arr[i] = ev
-		}
-		return index.AttrValue{Kind: index.AttrArray, Arr: arr}, nil
-	case nil:
-		return index.AttrValue{}, fmt.Errorf("null is not a supported attribute value")
-	default:
-		return index.AttrValue{}, fmt.Errorf("unsupported attribute value type %T", v)
-	}
 }
 
 func runTxnAdd(cmd *cobra.Command, args []string) error {
