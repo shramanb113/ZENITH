@@ -1,7 +1,5 @@
 package analysis
 
-import "sort"
-
 // MAX_DISTANCE is the default maximum Levenshtein edit distance considered a
 // fuzzy match when a caller doesn't supply its own threshold (e.g. via
 // config.FuzzyMaxDist). It is a default, not a hard cap: Levenshtein itself
@@ -46,61 +44,4 @@ func Levenshtein(s1, s2 string) int {
 	}
 
 	return prevRow[n]
-}
-
-// -----------------------------------------------------------------------------
-// FuzzySearcher
-// -----------------------------------------------------------------------------
-
-// FuzzySearcher wraps a BKTree and exposes the fuzzy search interface used by
-// the query pipeline. The engine (index/engine.go) holds a *BKTree directly
-// for the hot lexicalPass path — FuzzySearcher is the higher-level API for
-// components that shouldn't touch BKTree internals.
-//
-// Lifecycle:
-//
-//	fs := NewFuzzySearcher()
-//	fs.Build(terms)                        // bulk load from existing index
-//	fs.Add("kubernetes")                   // incremental as docs are indexed
-//	matches := fs.Search("kubrnets", 2)    // query time
-type FuzzySearcher struct {
-	tree *BKTree
-}
-
-// NewFuzzySearcher creates an empty FuzzySearcher.
-func NewFuzzySearcher() *FuzzySearcher {
-	return &FuzzySearcher{tree: NewBKTree()}
-}
-
-// Add inserts a single term. Call this per-term during indexing.
-// Safe to call after Build — the tree grows incrementally.
-func (f *FuzzySearcher) Add(term string) {
-	f.tree.Add(term)
-}
-
-// Build populates the fuzzy index from a slice of terms.
-// Typically called once when loading an existing index from disk.
-func (f *FuzzySearcher) Build(terms []string) {
-	for _, t := range terms {
-		f.tree.Add(t)
-	}
-}
-
-// Search returns all indexed terms within maxDist edits of query,
-// sorted ascending by edit distance (closest match first).
-// Pass maxDist <= 0 to use MAX_DISTANCE.
-func (f *FuzzySearcher) Search(query string, maxDist int) []FuzzyMatch {
-	if maxDist <= 0 {
-		maxDist = MAX_DISTANCE
-	}
-	results := f.tree.Search(query, maxDist)
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Distance < results[j].Distance
-	})
-	return results
-}
-
-// Size returns the number of terms in the fuzzy index.
-func (f *FuzzySearcher) Size() int {
-	return f.tree.Size()
 }

@@ -1078,13 +1078,6 @@ func dedupe(in []string) []string {
 	return out
 }
 
-// Explain returns the analysed base query terms and, for every document with at least one term hit or
-// a positive semantic score, its raw signals. It scans every document, so it is meant for small
-// per-request namespaces (hundreds of documents), not the persistent index.
-func (e *Engine) Explain(ctx context.Context, query string) ([]string, []ExplainHit, error) {
-	return e.ExplainFiltered(ctx, query, nil)
-}
-
 // ExplainFiltered is Explain restricted to documents whose attributes satisfy
 // f (nil = no restriction).
 func (e *Engine) ExplainFiltered(ctx context.Context, query string, f *Filter) ([]string, []ExplainHit, error) {

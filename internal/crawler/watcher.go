@@ -231,11 +231,6 @@ func (w *Watcher) SetAfterFile(fn func(absPath string)) {
 	w.afterFile = fn
 }
 
-// SimulateEvent injects a synthetic fsnotify event for testing.
-func (w *Watcher) SimulateEvent(ctx context.Context, event fsnotify.Event) {
-	w.handleEvent(ctx, event)
-}
-
 // ─── Internal ──────────────────────────────────────────────────────────────────
 
 func (w *Watcher) addDir(dir string) error {

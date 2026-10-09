@@ -46,9 +46,9 @@ The search orchestrator — owns all sub-indexes and the scoring pipeline:
 - **InvertedIndex** — the delta's postings lists keyed by edge n-gram fragments and Soundex phonetic codes (segments hold the same data, delta-varint compressed)
 - **VectorStore** — document and word vectors stored as float16 to halve memory; magnitudes cached separately
 - **PhoneticIndex** — Soundex buckets for phonetic matching
-- **Fuzzy lookup** — a Levenshtein automaton walking the FST (`internal/analysis/fst.go`, cost ∝ matches). `analysis.BKTree` is only a lazily-built fallback (edit distance above 2, or FST not built yet). Allowed edit distance scales with word length when `Config.FuzzyByLength` is set — see Configuration
+- **Fuzzy lookup** — a Levenshtein automaton walking the FST (`internal/analysis/fst.go`, cost ∝ matches). `analysis.BKTree` is only a lazily-built fallback (edit distance above 3, or FST not built yet). Allowed edit distance scales with word length when `Config.FuzzyByLength` is set — see Configuration
 
-**Add pipeline** (per document): `Analyzer.Analyze` → embed (in-process ONNX call via `internal/localembedder`) → write postings to the delta's InvertedIndex + PhoneticIndex + BM25. (The BK-tree is built lazily and TF-IDF is no longer maintained.)
+**Add pipeline** (per document): `Analyzer.Analyze` → embed (in-process ONNX call via `internal/localembedder`) → write postings to the delta's InvertedIndex + PhoneticIndex + BM25. (The BK-tree is built lazily.)
 
 **Search pipeline**: lexical pass (capped n-gram prefixes + phonetic + FST fuzzy) → vector pass (exact dot-product scan below `WithANNThreshold` docs, default 20k; HNSW graph in `internal/ann` above it — persisted as the `<db>.ann` sidecar, see "Frozen layer, checkpoints, ANN sidecar" below) → `rankAndFuse` (RRF + BM25 tiebreak) → neural expansion if results are absent or weak
 
@@ -62,7 +62,6 @@ The search orchestrator — owns all sub-indexes and the scoring pipeline:
 
 - `RRFRanker` — Reciprocal Rank Fusion with k=60; input slices are copied before sorting to avoid caller mutation
 - `BM25Scorer` — used as tiebreaker when RRF scores are within epsilon (1e-6)
-- `TFIDFScorer` — no longer maintained by the engine; kept as a standalone library type
 
 ### 5. Embedding (`internal/localembedder/`)
 
@@ -95,9 +94,7 @@ All tuneable parameters live in `internal/config/config.go` (`DefaultConfig()`).
 - `FuzzyMaxDist` — BK-tree edit distance threshold (default 2)
 - `RRFConstant` — RRF k value (default 20.0; tuned on MS MARCO dev, see the comment in `DefaultConfig()`)
 - `MaxResults` — internal RRF candidate cap (default 1000), not a user-facing page size — see "Result limits" below
-- `PhoneticWeight`, `VectorWeight`, `NeuralWeight` — scoring blend weights
-- `MemTableMaxSize` — SSTable flush threshold (64MB)
-- `NerveGRPCAddr` — dead config left over from the removed Nerve sidecar; not read anywhere in the codebase
+- `PhoneticWeight`, `VectorWeight` — scoring blend weights
 
 ### Metadata filtering, file format, install
 

@@ -228,6 +228,3 @@ func parseChunkFields(id string) map[string]string {
 		"bbox":        parts[4],
 	}
 }
-
-// ParseChunkFieldsForTest exports parseChunkFields for white-box testing.
-var ParseChunkFieldsForTest = parseChunkFields

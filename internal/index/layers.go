@@ -120,18 +120,6 @@ func (e *Engine) locate(id uint64) (li, row int, ok bool) {
 	return 0, 0, false
 }
 
-// hasDoc reports whether a live document with this internal ID exists anywhere.
-func (e *Engine) hasDoc(id uint64) bool {
-	if _, ok := e.idMapping[id]; ok {
-		return true
-	}
-	if e.frozen != nil && e.frozen.live(id) {
-		return true
-	}
-	_, _, ok := e.locate(id)
-	return ok
-}
-
 // origID resolves an internal ID to the caller-supplied document ID ("" if unknown).
 func (e *Engine) origID(id uint64) string {
 	if s, ok := e.idMapping[id]; ok {

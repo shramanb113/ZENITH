@@ -10,13 +10,6 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 )
 
-// Cache is the shape a single cache tier exposes. MemCache implements it
-// directly; Tiered composes two tiers behind the same shape (see tiered.go).
-type Cache[V any] interface {
-	Get(ctx context.Context, key string) (V, bool)
-	Set(ctx context.Context, key string, val V)
-}
-
 // MemCache is an in-process LRU cache of native Go values — no
 // serialization on the hot path. ctx is accepted (to satisfy Cache[V]
 // uniformly with the Redis-backed tier) but ignored: an in-process map
