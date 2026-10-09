@@ -78,11 +78,6 @@ func (d dict) find(key string) int {
 	return -1
 }
 
-// lowerBound returns the first index whose key is >= key.
-func (d dict) lowerBound(key string) int {
-	return sort.Search(d.n(), func(i int) bool { return bytes.Compare(d.key(i), unsafeBytes(key)) >= 0 })
-}
-
 func unsafeBytes(s string) []byte {
 	if len(s) == 0 {
 		return nil
@@ -255,9 +250,6 @@ func (s *Segment) Close() error {
 	s.data, s.docIDs, s.docBlob, s.vectors, s.wordVecs = nil, nil, nil, nil, nil
 	return err
 }
-
-// Path is the file the segment was opened from.
-func (s *Segment) Path() string { return s.path }
 
 // Size is the file size in bytes.
 func (s *Segment) Size() int { return len(s.data) }

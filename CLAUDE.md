@@ -46,9 +46,9 @@ The search orchestrator — owns all sub-indexes and the scoring pipeline:
 - **InvertedIndex** — the delta's postings lists keyed by edge n-gram fragments and Soundex phonetic codes (segments hold the same data, delta-varint compressed)
 - **VectorStore** — document and word vectors stored as float16 to halve memory; magnitudes cached separately
 - **PhoneticIndex** — Soundex buckets for phonetic matching
-- **Fuzzy lookup** — a Levenshtein automaton walking the FST (`internal/analysis/fst.go`, cost ∝ matches). `analysis.BKTree` is only a lazily-built fallback (edit distance above 2, or FST not built yet). Allowed edit distance scales with word length when `Config.FuzzyByLength` is set — see Configuration
+- **Fuzzy lookup** — a Levenshtein automaton walking the FST (`internal/analysis/fst.go`, cost ∝ matches). `analysis.BKTree` is only a lazily-built fallback (edit distance above 3, or FST not built yet). Allowed edit distance scales with word length when `Config.FuzzyByLength` is set — see Configuration
 
-**Add pipeline** (per document): `Analyzer.Analyze` → embed (in-process ONNX call via `internal/localembedder`) → write postings to the delta's InvertedIndex + PhoneticIndex + BM25. (The BK-tree is built lazily and TF-IDF is no longer maintained.)
+**Add pipeline** (per document): `Analyzer.Analyze` → embed (in-process ONNX call via `internal/localembedder`) → write postings to the delta's InvertedIndex + PhoneticIndex + BM25. (The BK-tree is built lazily.)
 
 **Search pipeline**: lexical pass (capped n-gram prefixes + phonetic + FST fuzzy) → vector pass (exact dot-product scan below `WithANNThreshold` docs, default 20k; HNSW graph in `internal/ann` above it — persisted as the `<db>.ann` sidecar, see "Frozen layer, checkpoints, ANN sidecar" below) → `rankAndFuse` (RRF + BM25 tiebreak) → neural expansion if results are absent or weak
 
@@ -62,7 +62,6 @@ The search orchestrator — owns all sub-indexes and the scoring pipeline:
 
 - `RRFRanker` — Reciprocal Rank Fusion with k=60; input slices are copied before sorting to avoid caller mutation
 - `BM25Scorer` — used as tiebreaker when RRF scores are within epsilon (1e-6)
-- `TFIDFScorer` — no longer maintained by the engine; kept as a standalone library type
 
 ### 5. Embedding (`internal/localembedder/`)
 
@@ -95,9 +94,7 @@ All tuneable parameters live in `internal/config/config.go` (`DefaultConfig()`).
 - `FuzzyMaxDist` — BK-tree edit distance threshold (default 2)
 - `RRFConstant` — RRF k value (default 20.0; tuned on MS MARCO dev, see the comment in `DefaultConfig()`)
 - `MaxResults` — internal RRF candidate cap (default 1000), not a user-facing page size — see "Result limits" below
-- `PhoneticWeight`, `VectorWeight`, `NeuralWeight` — scoring blend weights
-- `MemTableMaxSize` — SSTable flush threshold (64MB)
-- `NerveGRPCAddr` — dead config left over from the removed Nerve sidecar; not read anywhere in the codebase
+- `PhoneticWeight`, `VectorWeight` — scoring blend weights
 
 ### Metadata filtering, file format, install
 
@@ -105,7 +102,7 @@ All tuneable parameters live in `internal/config/config.go` (`DefaultConfig()`).
   - A filter is data (`index.FilterSpec`, JSON ops `eq`, `in`, `range`, `prefix`, `contains`, `exists`, `and`, `or`, `not`, `none`; depth ≤ 16, ≤ 512 nodes), so the same filter works on every surface: `zenith.FilterFromJSON`, gRPC `SearchRequest.filter` (`FilterNode`, with `AttrValue`'s `array_value` oneof branch wrapping a `repeated` field in `AttrValueArray`) and `IndexRequest.attrs`, the sidecar's JSON body, and the CLI (`zenith index --attr k=v`, `zenith search --where k=v` / `--filter '<json>'`).
   - `attrIndex` (`internal/index/attrindex.go`) keeps per-field value → ordinal postings; an array attribute is indexed by posting each element separately, so `eq`/`in`/`range`/`prefix` postings lookups need no array-aware branch. A selective filter (estimate ≤ `max(2000, docs/50)`) is resolved to a candidate set and the vector pass scores only those; `prefix` is answered the same way (bounded by `rangeScanMax`, same as `range`); `contains` and `Not` always fall back to a scan (no ordering to narrow a substring search by). The index-path result equals the scan-path result (property test, extended to cover array attrs, `prefix` and `contains`).
   - Journal value format with attrs: `0xFF 'Z' 'A' '1' | uvarint(len) | attrs JSON | text` (`internal/index/journal.go`).
-- **Per-query ranking overrides**: `Search(..., WithWeights(vector, phonetic, rrfConstant float64))` overrides the RRF vector-list weight, the phonetic match weight, and the RRF `k` constant for one call only — a zero argument keeps that weight's engine default. `internal/index.Engine.SearchFilteredWeighted` builds a throwaway `ranking.RRFRanker` for the call instead of touching `e.scorer`/`Config`, and threads the resolved phonetic weight into `lexicalPass` as a parameter instead of reading `Config.PhoneticWeight`, so the override can never leak into a concurrent or later search. `SearchFiltered` is `SearchFilteredWeighted` with a zero `Weights`. Not exposed over gRPC.
+- **Per-query ranking overrides**: `Search(..., WithWeights(vector, phonetic, rrfConstant float64))` overrides the RRF vector-list weight, the phonetic match weight, and the RRF `k` constant for one call only — a zero argument keeps that weight's engine default. `internal/index.Engine.SearchFilteredWeighted` builds a throwaway `ranking.RRFRanker` for the call instead of touching `e.scorer`/`Config`, and threads the resolved phonetic weight into `lexicalPass` as a parameter instead of reading `Config.PhoneticWeight`, so the override can never leak into a concurrent or later search. `SearchFiltered` is `SearchFilteredWeighted` with a zero `Weights`. Also exposed over gRPC as `SearchRequest.vector_weight`/`phonetic_weight`/`rrf_k` (all `optional double`; unset keeps the engine default), validated by `index.Weights.Validate()` (NaN/Inf/negative rejected with `INVALID_ARGUMENT`) before reaching `SearchFilteredWeighted` — superseding an earlier "not exposed over gRPC" design note once gRPC surface parity became part of this workstream's scope.
 - **Sort-by-attribute**: `Search(..., SortBy(field, desc))` replaces score ordering entirely with a stable sort by that attribute's value — not a secondary tiebreak. `Engine.SortByAttribute` treats a document missing the field, holding an array value, or holding a differently-typed value than its peer as incomparable: it always sorts after every document with a comparable scalar, and ties (including two incomparable documents) keep their relative input order. Runs over the full candidate list before the result limit is applied, both in `pkg/zenith` (`buildResults`/`buildExplained`) and over gRPC (`SearchRequest.sort_field`/`sort_desc`, applied before `paginate`).
 
 ### Frozen layer, checkpoints, ANN sidecar

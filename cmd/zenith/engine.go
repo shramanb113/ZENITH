@@ -103,7 +103,7 @@ func buildEngine(load bool, withStorage bool) (*index.Engine, *storage.Engine, *
 	tkz := analysis.NewStandardAnalyzer()
 	scorer := ranking.NewWeightedRRFRanker(appConfig.RRFConstant, appConfig.MaxResults, 1.0, appConfig.VectorWeight)
 	engine := index.NewEngine(appConfig, emb, scorer, tkz)
-	engine.SetFSTPath(cliFlags.fstPath)
+	engine.SetFSTPath(effectiveFSTPath())
 	engine.SetCacheObserver(metrics.NewQueryCacheObserver())
 
 	_ = embedderName
@@ -231,6 +231,31 @@ func effectiveStorageDir() string {
 		return cliFlags.storageDir
 	}
 	return cliFlags.dbPath + ".pebble"
+}
+
+// effectiveFSTPath returns cliFlags.fstPath, or, when it was left unset, a
+// path derived from --db (same directory/stem as the db path, <db>.fst).
+// Tying the default to --db matters because the only guard against loading
+// the wrong FST (tryLoadFSTFromDiskLocked's term-count check) is a heuristic:
+// two different DBs with coincidentally equal vocabulary sizes could
+// otherwise silently load each other's FST under one fixed global default
+// path regardless of --db. An explicit --fst always wins.
+func effectiveFSTPath() string {
+	if cliFlags.fstPath != "" {
+		return cliFlags.fstPath
+	}
+	return cliFlags.dbPath + ".fst"
+}
+
+// effectiveFileHashPath returns the content-hash cache path for `zenith
+// index`'s/`zenith watch run --index-first`'s skip-unchanged-files
+// optimization, derived from --db (<db>.filehashes.json). Previously this
+// was one fixed path under ~/.zenith regardless of --db: two different
+// --db instances indexing the same directory would share one cache, so the
+// second instance could see a file marked up-to-date by the first and skip
+// indexing it into its own (different) index entirely.
+func effectiveFileHashPath() string {
+	return cliFlags.dbPath + ".filehashes.json"
 }
 
 // resolveEmbedder selects the embedder based on cliFlags.embedder.

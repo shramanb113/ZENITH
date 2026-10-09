@@ -813,7 +813,6 @@ All tunable parameters live in `internal/config/config.go`.
 | `RRFConstant` | `20.0` | RRF k value (tuned on MS MARCO dev; plateau k 10–30) |
 | `VectorWeight` | `2.0` | RRF weight of the semantic list (lexical list weight is 1.0) |
 | `PhoneticWeight` | `0.3` | Phonetic signal blend weight |
-| `NeuralWeight` | `1.0` | Zero-result neural-expansion weight |
 | `MaxResults` | `1000` | Internal RRF candidate cap, not a page size |
 
 ---

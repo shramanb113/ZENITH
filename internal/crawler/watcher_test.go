@@ -31,6 +31,32 @@ func (r *recordingIndexer) Remove(_ context.Context, id string) error {
 	return nil
 }
 
+// prefixRemoverIndexer additionally implements crawler.PrefixRemover, so
+// tests can tell whether the Watcher removed a chunked file by prefix
+// instead of (incorrectly) by its bare docID.
+type prefixRemoverIndexer struct {
+	recordingIndexer
+	prefixRemoved []string
+}
+
+func (r *prefixRemoverIndexer) RemoveByIDPrefix(_ context.Context, prefix string) (int, error) {
+	r.mu.Lock()
+	r.prefixRemoved = append(r.prefixRemoved, prefix)
+	r.mu.Unlock()
+	return 0, nil
+}
+
+// fakeChunkIndexer stands in for pdf.PDFIndexer/image.Indexer: it writes
+// chunk documents under "<docID>||..." rather than one document at docID.
+type fakeChunkIndexer struct {
+	indexCalls int
+}
+
+func (f *fakeChunkIndexer) Index(_ context.Context, docID, _ string) (int, error) {
+	f.indexCalls++
+	return 1, nil
+}
+
 func writeTempFileAt(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
@@ -280,6 +306,109 @@ func TestWatcher_SkipAll_IndexesNothing(t *testing.T) {
 	defer idx.mu.Unlock()
 	if len(idx.added) != 0 {
 		t.Errorf("expected 0 files indexed when all skipped, got %d", len(idx.added))
+	}
+}
+
+// ─── Chunked-file (PDF/image) orphan cleanup ─────────────────────────────────
+
+func TestWatcher_RemoveChunkedFile_UsesPrefixNotBareID(t *testing.T) {
+	dir := t.TempDir()
+	absPath := filepath.Join(dir, "doc.pdf")
+
+	idx := &prefixRemoverIndexer{}
+	w, _ := crawler.NewWatcher(idx)
+	defer w.Close()
+	w.RegisterFileIndexer(".pdf", &fakeChunkIndexer{})
+
+	w.SimulateEvent(context.Background(), fsnotify.Event{
+		Name: absPath,
+		Op:   fsnotify.Remove,
+	})
+
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if len(idx.removed) != 0 {
+		t.Errorf("expected plain Remove NOT to be called for a chunked file, got %v", idx.removed)
+	}
+	if len(idx.prefixRemoved) != 1 {
+		t.Fatalf("expected 1 RemoveByIDPrefix call, got %d", len(idx.prefixRemoved))
+	}
+	want := absPath + "||"
+	if idx.prefixRemoved[0] != want {
+		t.Errorf("RemoveByIDPrefix called with %q, want %q", idx.prefixRemoved[0], want)
+	}
+}
+
+func TestWatcher_RemoveChunkedFile_FallsBackToPlainRemove_WithoutPrefixRemover(t *testing.T) {
+	dir := t.TempDir()
+	absPath := filepath.Join(dir, "doc.pdf")
+
+	idx := &recordingIndexer{} // does NOT implement PrefixRemover
+	w, _ := crawler.NewWatcher(idx)
+	defer w.Close()
+	w.RegisterFileIndexer(".pdf", &fakeChunkIndexer{})
+
+	w.SimulateEvent(context.Background(), fsnotify.Event{
+		Name: absPath,
+		Op:   fsnotify.Remove,
+	})
+
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if len(idx.removed) != 1 || idx.removed[0] != absPath {
+		t.Errorf("expected fallback plain Remove(%q), got %v", absPath, idx.removed)
+	}
+}
+
+func TestWatcher_ReindexChunkedFile_ClearsOldChunksFirst(t *testing.T) {
+	dir := t.TempDir()
+	writeTempFileAt(t, dir, "doc.pdf", "placeholder")
+	absPath := filepath.Join(dir, "doc.pdf")
+
+	idx := &prefixRemoverIndexer{}
+	w, _ := crawler.NewWatcher(idx)
+	defer w.Close()
+	fi := &fakeChunkIndexer{}
+	w.RegisterFileIndexer(".pdf", fi)
+
+	w.SimulateEvent(context.Background(), fsnotify.Event{
+		Name: absPath,
+		Op:   fsnotify.Write,
+	})
+
+	if fi.indexCalls != 1 {
+		t.Fatalf("expected Index to be called once, got %d", fi.indexCalls)
+	}
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if len(idx.prefixRemoved) != 1 || idx.prefixRemoved[0] != absPath+"||" {
+		t.Errorf("expected old chunks cleared by prefix before re-index, got %v", idx.prefixRemoved)
+	}
+}
+
+func TestWatcher_RemovePlainTextFile_StillUsesBareID(t *testing.T) {
+	dir := t.TempDir()
+	absPath := filepath.Join(dir, "note.txt")
+
+	idx := &prefixRemoverIndexer{}
+	w, _ := crawler.NewWatcher(idx)
+	defer w.Close()
+	// No FileIndexer registered for .txt: this is the plain-text path, where
+	// id == absPath, so plain Remove is correct and prefix removal must not
+	// be used.
+
+	w.SimulateEvent(context.Background(), fsnotify.Event{
+		Name: absPath,
+		Op:   fsnotify.Remove,
+	})
+
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if len(idx.prefixRemoved) != 0 {
+		t.Errorf("expected no RemoveByIDPrefix call for a plain-text file, got %v", idx.prefixRemoved)
+	}
+	if len(idx.removed) != 1 || idx.removed[0] != absPath {
+		t.Errorf("expected plain Remove(%q), got %v", absPath, idx.removed)
 	}
 }
 

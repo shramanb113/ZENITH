@@ -580,6 +580,15 @@ func (e *Engine) Close() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.closeLayersLocked()
+	if e.fst != nil {
+		// Releases the FST's memory mapping (and, on Windows, any file handle
+		// it would otherwise keep locked) — SetFSTPath callers persist to the
+		// same path, so a dangling mmap/handle from a previous Load/Close
+		// cycle can block that write.
+		if err := e.fst.Close(); err != nil {
+			slog.Warn("index: closing FST", "error", err)
+		}
+	}
 	if e.cache != nil {
 		// Releases the L2 Redis client's connection pool, if one is
 		// configured — a no-op otherwise. See Tiered.Close's doc comment

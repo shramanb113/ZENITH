@@ -78,14 +78,6 @@ func (m *memLayer) kill(id uint64) []string {
 	return terms
 }
 
-// hasVectorLive reports whether id is live and has a stored vector.
-func (m *memLayer) vecOf(id uint64) []uint16 {
-	if !m.live(id) {
-		return nil
-	}
-	return m.vectors.GetVectors()[id].Vector
-}
-
 // freezeLocked retires the delta into e.frozen and installs empty sub-indexes.
 // Engine.mu held for writing; e.frozen must be nil.
 func (e *Engine) freezeLocked() {
@@ -110,7 +102,3 @@ func (e *Engine) freezeLocked() {
 	e.docText = make(map[uint64]string)
 	e.pendingDels = nil
 }
-
-// dropFrozenLocked discards the frozen layer without writing it (Load, legacy
-// import: the whole engine state is being replaced).
-func (e *Engine) dropFrozenLocked() { e.frozen = nil }

@@ -763,11 +763,19 @@ func (m *Manager) GetDocAttrs(ctx context.Context, id, docID string) (zenith.Att
 // the real wall clock, not cfg.Now (which exists so tests can fast-forward
 // idle/LRU timing, not to control what a real request actually took).
 func (m *Manager) Search(ctx context.Context, id, query string, opts ...zenith.SearchOption) ([]zenith.Result, error) {
+	res, _, err := m.SearchWithFacets(ctx, id, query, nil, 0, opts...)
+	return res, err
+}
+
+// SearchWithFacets is Search plus zenith.DB.SearchWithFacets' facet counts
+// (none when facetFields is empty).
+func (m *Manager) SearchWithFacets(ctx context.Context, id, query string, facetFields []string, topK int, opts ...zenith.SearchOption) ([]zenith.Result, zenith.Facets, error) {
 	start := time.Now()
 	var res []zenith.Result
+	var facets zenith.Facets
 	err := m.With(ctx, id, func(db *zenith.DB) error {
 		var err error
-		res, err = db.Search(ctx, query, opts...)
+		res, facets, err = db.SearchWithFacets(ctx, query, facetFields, topK, opts...)
 		return err
 	})
 	metrics.CollectionQueryDuration.WithLabelValues(id).Observe(time.Since(start).Seconds())
@@ -776,7 +784,7 @@ func (m *Manager) Search(ctx context.Context, id, query string, opts ...zenith.S
 		outcome = "error"
 	}
 	metrics.CollectionQueriesTotal.WithLabelValues(id, outcome).Inc()
-	return res, err
+	return res, facets, err
 }
 
 // evict closes every entry selector returns, recording reason

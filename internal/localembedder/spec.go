@@ -11,8 +11,7 @@ type (
 )
 
 const (
-	PoolMean = modelspec.PoolMean
-	PoolCLS  = modelspec.PoolCLS
+	PoolCLS = modelspec.PoolCLS
 )
 
 // Models returns every registered model, sorted by ID.
@@ -29,6 +28,3 @@ func RerankerModels() []RerankerSpec { return modelspec.RerankerModels() }
 
 // LookupReranker finds a reranker by ID (case-insensitive).
 func LookupReranker(id string) (RerankerSpec, error) { return modelspec.LookupReranker(id) }
-
-// DefaultRerankerID is used when no specific reranker model is named.
-const DefaultRerankerID = modelspec.DefaultRerankerID

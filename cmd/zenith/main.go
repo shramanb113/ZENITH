@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 
@@ -34,14 +33,12 @@ func init() {
 
 func main() {
 	autoMigrate() // one-time cleanup of Python nerve artifacts on upgrade
-	rootCmd.AddCommand(indexCmd, searchCmd, watchCmd, serveCmd, versionCmd, installCmd, uninstallCmd, doctorCmd, updateCmd, logCmd, setupCmd, migrateCmd, compactCmd, modelsCmd, txnCmd, storageCmd)
+	rootCmd.AddCommand(indexCmd, searchCmd, watchCmd, serveCmd, versionCmd, installCmd, uninstallCmd, doctorCmd, updateCmd, logCmd, setupCmd, migrateCmd, compactCmd, modelsCmd, txnCmd, storageCmd, suggestCmd)
 
 	err := rootCmd.Execute()
 	if err == nil {
 		return
 	}
-	if !errors.Is(err, errSetupRequired) {
-		fmt.Fprintln(os.Stderr, err)
-	}
+	fmt.Fprintln(os.Stderr, err)
 	os.Exit(1)
 }

@@ -129,6 +129,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 	route(mux, "GET /healthz", http.HandlerFunc(s.health))
 	route(mux, "PUT /v1/ns/{ns}/docs", s.guard(s.putDocs))
 	route(mux, "POST /v1/ns/{ns}/search", s.guard(s.search))
+	route(mux, "GET /v1/ns/{ns}/suggest", s.guard(s.suggestNS))
+	route(mux, "GET /v1/ns/{ns}/facets", s.guard(s.facetsNS))
 	route(mux, "DELETE /v1/ns/{ns}", s.guard(s.deleteNS))
 	if s.cfg.Collections != nil {
 		s.registerCollections(mux)
@@ -373,11 +375,17 @@ type hitOut struct {
 	Lexical  float64   `json:"lexical"`
 	Semantic float64   `json:"semantic"`
 	Terms    []termOut `json:"terms"`
+	// Attrs is the document's metadata, omitted when it has none.
+	Attrs map[string]any `json:"attrs,omitempty"`
 }
 
 type queryOut struct {
 	QueryTerms []string `json:"query_terms"`
 	Hits       []hitOut `json:"hits"`
+	// Facets is present only when the request asked for facets: per field,
+	// value counts over every document the query matched (not just this
+	// page), highest count first.
+	Facets map[string][]facetOut `json:"facets,omitempty"`
 }
 
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {
@@ -392,11 +400,16 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		// Filter restricts the search to documents whose attrs match; see
 		// zenith.FilterFromJSON for the format.
 		Filter json.RawMessage `json:"filter"`
+		searchExtras
 	}
 	if !decode(w, r, &req) {
 		return
 	}
-	var searchOpts []zenith.SearchOption
+	searchOpts, facetFields, facetTopK, err := req.searchExtras.options()
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if len(req.Filter) > 0 && string(req.Filter) != "null" {
 		f, err := zenith.FilterFromJSON(req.Filter)
 		if err != nil {
@@ -432,7 +445,8 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	spansFor := func(docID string) map[string]span { return n.spans[docID] }
 	for _, q := range req.Queries {
 		qStart := time.Now()
-		res, err := n.db.Search(r.Context(), q.Text, append([]zenith.SearchOption{zenith.Explain(), zenith.Limit(limit)}, searchOpts...)...)
+		res, facets, err := n.db.SearchWithFacets(r.Context(), q.Text, facetFields, facetTopK,
+			append([]zenith.SearchOption{zenith.Explain(), zenith.Limit(req.Offset + limit)}, searchOpts...)...)
 		metrics.NamespaceQueryDuration.Observe(time.Since(qStart).Seconds())
 		metrics.NamespaceQueriesTotal.Inc()
 		if err != nil {
@@ -440,10 +454,16 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 				writeErr(w, http.StatusNotFound, "namespace closed")
 				return
 			}
+			if errors.Is(err, zenith.ErrInvalidOption) {
+				writeErr(w, http.StatusBadRequest, strings.TrimPrefix(err.Error(), "zenith: "))
+				return
+			}
 			writeErr(w, http.StatusInternalServerError, "search failed")
 			return
 		}
-		out[q.ID] = buildQueryOut(res, spansFor, req.MinSemantic)
+		qo := buildQueryOut(skip(res, req.Offset), spansFor, req.MinSemantic)
+		qo.Facets = facetsOut(facets)
+		out[q.ID] = qo
 	}
 	s.cfg.Log.Info("namespace searched", "ns", name, "queries", len(req.Queries), "ms", time.Since(start).Milliseconds())
 	writeJSON(w, http.StatusOK, map[string]any{"results": out})
@@ -476,9 +496,60 @@ func buildQueryOut(res []zenith.Result, spansFor func(docID string) map[string]s
 		if len(terms) == 0 && sig.Semantic < minSemantic {
 			continue
 		}
-		qo.Hits = append(qo.Hits, hitOut{res1.ID, res1.Score, sig.Lexical, sig.Semantic, terms})
+		qo.Hits = append(qo.Hits, hitOut{res1.ID, res1.Score, sig.Lexical, sig.Semantic, terms, res1.Attrs})
 	}
 	return qo
+}
+
+// suggestNS serves GET /v1/ns/{ns}/suggest?q=<prefix>&n=<count>: indexed
+// terms starting with the prefix (analysed/stemmed, lexicographic order — see
+// zenith.DB.Suggest).
+func (s *Server) suggestNS(w http.ResponseWriter, r *http.Request) {
+	prefix, limit, err := suggestParams(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	n := s.touch(r.PathValue("ns"))
+	if n == nil {
+		writeErr(w, http.StatusNotFound, "unknown namespace")
+		return
+	}
+	terms, err := n.db.Suggest(prefix, limit)
+	if err != nil {
+		if errors.Is(err, zenith.ErrClosed) {
+			writeErr(w, http.StatusNotFound, "namespace closed")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "suggest failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"terms": terms})
+}
+
+// facetsNS serves GET /v1/ns/{ns}/facets?fields=a,b&top_k=<k>: per-value
+// document counts over the whole namespace, with no query.
+func (s *Server) facetsNS(w http.ResponseWriter, r *http.Request) {
+	fields, topK, err := facetParams(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	n := s.touch(r.PathValue("ns"))
+	if n == nil {
+		writeErr(w, http.StatusNotFound, "unknown namespace")
+		return
+	}
+	facets, err := n.db.Facets(fields, topK)
+	if err != nil {
+		if errors.Is(err, zenith.ErrClosed) {
+			writeErr(w, http.StatusNotFound, "namespace closed")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "facets failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"facets": facetsOut(facets)})
 }
 
 func (s *Server) deleteNS(w http.ResponseWriter, r *http.Request) {

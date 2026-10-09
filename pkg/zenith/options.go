@@ -1,6 +1,7 @@
 package zenith
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -54,6 +55,16 @@ type searchOptions struct {
 	weights   index.Weights
 	sortField string
 	sortDesc  bool
+	// err is the first invalid SearchOption argument seen; Search returns it
+	// instead of running the query (SearchOption itself cannot return one).
+	err error
+}
+
+// setErr records the first invalid-option error.
+func (o *searchOptions) setErr(err error) {
+	if o.err == nil {
+		o.err = err
+	}
 }
 
 // WithEmbedder replaces the default embedded ONNX embedder with a custom one.
@@ -164,10 +175,12 @@ func WithoutWordVectors() Option {
 	}
 }
 
-// Explain makes Search return, for every document with a term hit or a positive semantic score,
-// the raw per-signal evidence in Result.Signals. Results are ordered by evidence (most query terms
-// matched, then BM25, then cosine). Score keeps its usual meaning (normalised hybrid score, 0 when
-// the document is not in the hybrid result list) and must not be used as a threshold.
+// Explain makes Search return, for every document in the hybrid candidate list (at most
+// Config.MaxResults) with a term hit or a positive semantic score, the raw per-signal evidence in
+// Result.Signals. Only those candidates are examined, never the whole index, so the cost is bounded
+// by the candidate list. Results are ordered by evidence (most query terms matched, then BM25, then
+// cosine). Score keeps its usual meaning (normalised hybrid score) and must not be used as a
+// threshold.
 func Explain() SearchOption {
 	return func(o *searchOptions) { o.explain = true }
 }
@@ -186,9 +199,17 @@ func Explain() SearchOption {
 //   - rrfConstant is the k in RRF's score(d) = Σ weight/(k + rank(d)); a
 //     smaller k rewards a top rank more steeply, a larger k flattens the
 //     advantage of ranking higher.
+//
+// A NaN, infinite or negative argument makes Search return an error wrapping
+// ErrInvalidOption instead of running the query.
 func WithWeights(vector, phonetic, rrfConstant float64) SearchOption {
 	return func(o *searchOptions) {
-		o.weights = index.Weights{Vector: vector, Phonetic: phonetic, RRF: rrfConstant}
+		w := index.Weights{Vector: vector, Phonetic: phonetic, RRF: rrfConstant}
+		if err := w.Validate(); err != nil {
+			o.setErr(fmt.Errorf("%w: WithWeights: %v", ErrInvalidOption, err))
+			return
+		}
+		o.weights = w
 	}
 }
 

@@ -67,6 +67,19 @@ func bucketKey(namespace string, writeGen uint64, specJSON []byte, w Weights, ep
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// phraseBucket narrows a bucket to queries with the same phrase constraints
+// (sig is Engine.phraseSignature). Queries without a phrase keep the plain
+// bucket, so their keys are unchanged; a phrase query never shares a bucket —
+// and so never a semantic near-duplicate hit — with a query whose phrase
+// constraints differ, however close the two embeddings are.
+func phraseBucket(bucket, sig string) string {
+	h := sha256.New()
+	writeField(h, []byte(bucket))
+	writeField(h, []byte("phrase"))
+	writeField(h, []byte(sig))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // fullCacheKey extends a bucket with the query text, producing the actual
 // cache/singleflight key used for the exact-match path.
 func fullCacheKey(bucket, query string) string {
