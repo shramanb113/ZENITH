@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -145,6 +147,7 @@ func (t *clipTokenizer) byteLevelEncode(s string) []string {
 // encodeIDs returns [bos, ...content ids, eos] with no padding and no
 // truncation — the caller (encode) applies the context-length limit.
 func (t *clipTokenizer) encodeIDs(text string) []int64 {
+	text = norm.NFC.String(text)
 	text = whitespaceRunRE.ReplaceAllString(text, " ")
 	text = strings.ToLower(text)
 
