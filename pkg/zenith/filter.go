@@ -50,19 +50,6 @@ func fromAttrValue(av index.AttrValue) any {
 	}
 }
 
-// fromIndexAttrs converts the engine's internal attrs map back to the
-// public Attrs shape, or nil for an empty/absent map.
-func fromIndexAttrs(a index.Attrs) Attrs {
-	if len(a) == 0 {
-		return nil
-	}
-	out := make(Attrs, len(a))
-	for k, v := range a {
-		out[k] = fromAttrValue(v)
-	}
-	return out
-}
-
 func toIndexAttrs(a Attrs) (index.Attrs, error) {
 	if len(a) == 0 {
 		return nil, nil
