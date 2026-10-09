@@ -16,9 +16,10 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/x448/float16 v0.8.4
 	github.com/yalue/onnxruntime_go v1.25.0
+	golang.org/x/image v0.45.0
 	golang.org/x/net v0.57.0
 	golang.org/x/sync v0.22.0
-	golang.org/x/text v0.40.0
+	golang.org/x/text v0.41.0
 	google.golang.org/grpc v1.78.0
 	google.golang.org/protobuf v1.36.11
 )
