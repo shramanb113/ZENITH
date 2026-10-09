@@ -68,6 +68,19 @@ var modelsListCmd = &cobra.Command{
 		}
 		printDivider()
 		printFooter("use one with", "--model <id>  (see also: zenith models list --rerankers)")
+
+		printDivider()
+		printHeader("models", "visual (image+text) embedding model registry")
+		for _, m := range localembedder.VisualModels() {
+			status := muted("not installed  (zenith models pull " + m.ID + ")")
+			if fileExists(filepath.Join(modelsDir(), m.ID, "vision_model.onnx")) {
+				status = green("installed")
+			}
+			fmt.Printf("  %-24s %3d dims  ~%3d MB  %s\n", m.ID, m.Dims, m.SizeMB, status)
+			fmt.Printf("  %-24s %s\n", "", muted(m.Description))
+		}
+		printDivider()
+		printFooter("use one with", "--visual-model <id>  (zenith create --visual-model <id>)")
 		return nil
 	},
 }
@@ -78,6 +91,8 @@ var modelsPullCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id, sizeMB, url, vocabURL, denseURL, usage, isBundled := args[0], 0, "", "", "", "", false
+		var visualSpec localembedder.VisualSpec
+		isVisual := false
 		if spec, err := localembedder.Lookup(args[0]); err == nil {
 			id, sizeMB, url, vocabURL, denseURL = spec.ID, spec.SizeMB, spec.ModelURL, spec.VocabURL, spec.DenseURL
 			isBundled = strings.EqualFold(spec.ID, localembedder.BundledID())
@@ -85,6 +100,9 @@ var modelsPullCmd = &cobra.Command{
 		} else if rspec, rerr := localembedder.LookupReranker(args[0]); rerr == nil {
 			id, sizeMB, url = rspec.ID, rspec.SizeMB, rspec.ModelURL
 			usage = "use with --rerank --rerank-model " + rspec.ID
+		} else if vspec, verr := localembedder.LookupVisual(args[0]); verr == nil {
+			id, sizeMB, visualSpec, isVisual = vspec.ID, vspec.SizeMB, vspec, true
+			usage = "use with --visual-model " + vspec.ID
 		} else {
 			return err
 		}
@@ -97,6 +115,16 @@ var modelsPullCmd = &cobra.Command{
 			return err
 		}
 		printHeader("models pull", fmt.Sprintf("%s (~%d MB)", id, sizeMB))
+
+		if isVisual {
+			if err := pullVisualFiles(visualSpec, dir); err != nil {
+				return err
+			}
+			printDivider()
+			printFooter("installed", usage)
+			return nil
+		}
+
 		sum, n, err := downloadModel(url, filepath.Join(dir, "model.onnx"))
 		if err != nil {
 			return fmt.Errorf("download failed: %w", err)
@@ -178,4 +206,27 @@ func downloadModel(url, dest string) (sum string, n int64, err error) {
 		return "", 0, err
 	}
 	return hex.EncodeToString(h.Sum(nil)), n, nil
+}
+
+// pullVisualFiles downloads a visual model's four files (vision tower, text
+// tower, vocab, merges) into dir, using the exact filenames NewCLIPByID
+// expects. Separated from modelsPullCmd.RunE so it is testable against a
+// fake VisualSpec pointing at a local httptest.Server, instead of the real
+// registry's huggingface.co URLs.
+func pullVisualFiles(spec localembedder.VisualSpec, dir string) error {
+	files := []struct{ url, name string }{
+		{spec.VisionModelURL, "vision_model.onnx"},
+		{spec.TextModelURL, "text_model.onnx"},
+		{spec.VocabURL, "vocab.json"},
+		{spec.MergesURL, "merges.txt"},
+	}
+	for _, f := range files {
+		sum, n, err := downloadModel(f.url, filepath.Join(dir, f.name))
+		if err != nil {
+			return fmt.Errorf("download failed for %s: %w", f.name, err)
+		}
+		fmt.Printf("  %s  %s (%s)\n", green("✓"), filepath.Join(dir, f.name), formatBytes(n))
+		fmt.Printf("  %s  sha256 %s\n", muted("·"), sum)
+	}
+	return nil
 }
