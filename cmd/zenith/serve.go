@@ -21,6 +21,7 @@ import (
 	"github.com/shramanb113/ZENITH/internal/embedding"
 	"github.com/shramanb113/ZENITH/internal/localembedder"
 	"github.com/shramanb113/ZENITH/internal/metrics"
+	"github.com/shramanb113/ZENITH/internal/pdf"
 	"github.com/shramanb113/ZENITH/internal/server"
 	"github.com/shramanb113/ZENITH/internal/sidecar"
 	"github.com/shramanb113/ZENITH/pkg/zenith"
@@ -89,7 +90,22 @@ moment of a kill are still lost, same as any other crash-safe system.`,
 		if err != nil {
 			return fmt.Errorf("engine init: %w", err)
 		}
-		_ = alog
+
+		// pdfIndexer stays a nil interface (not a non-nil interface holding a
+		// nil *pdf.PDFIndexer) on failure, so server.go's s.PDFIndexer == nil
+		// guard actually works.
+		var pdfIndexer server.PDFIndexer
+		pdfRoot := zenithDataPath("pdfs")
+		if err := os.MkdirAll(pdfRoot, 0o755); err != nil {
+			slog.Warn("could not create PDF allowed-root directory; PDF indexing disabled", "dir", pdfRoot, "error", err)
+		} else {
+			pi := pdf.NewIndexer(engine, alog)
+			if err := pi.SetAllowedRoot(pdfRoot); err != nil {
+				slog.Warn("could not set PDF allowed root; PDF indexing disabled", "dir", pdfRoot, "error", err)
+			} else {
+				pdfIndexer = pi
+			}
+		}
 
 		metrics.BuildInfo.WithLabelValues(version, cliFlags.model).Set(1)
 		metrics.RegisterIndexDocuments(func() float64 { return float64(engine.Count()) })
@@ -103,7 +119,11 @@ moment of a kill are still lost, same as any other crash-safe system.`,
 			grpc.ChainUnaryInterceptor(metrics.UnaryServerInterceptor(), server.KeyAuthUnary(serveFlags.key)),
 			grpc.ChainStreamInterceptor(metrics.StreamServerInterceptor(), server.KeyAuthStream(serveFlags.key)),
 		)
-		zenithproto.RegisterSearchServiceServer(grpcServer, &server.ZenithServer{Engine: engine})
+		zenithproto.RegisterSearchServiceServer(grpcServer, &server.ZenithServer{
+			Engine:     engine,
+			PDFIndexer: pdfIndexer,
+			Logger:     alog,
+		})
 
 		stop := make(chan os.Signal, 1)
 		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
