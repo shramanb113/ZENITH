@@ -1078,13 +1078,49 @@ func dedupe(in []string) []string {
 	return out
 }
 
+// explainCand is one way a base query term can be satisfied by a document term.
+type explainCand struct {
+	tok  string
+	dist int
+	syn  bool
+}
+
 // ExplainFiltered is Explain restricted to documents whose attributes satisfy
-// f (nil = no restriction).
+// f (nil = no restriction). ExplainIDs computes the same signals for a given
+// (bounded) set of documents without the full-corpus scan; the unfiltered,
+// unbounded Explain wrapper that used to sit here had no callers and was
+// removed as dead code.
 func (e *Engine) ExplainFiltered(ctx context.Context, query string, f *Filter) ([]string, []ExplainHit, error) {
 	pred := f.pred()
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
+// explainPlan is the query-side half of Explain: everything that depends only
+// on the query, computed once and then applied per document by hit.
+type explainPlan struct {
+	base     []string                 // analysed base query terms, deduplicated
+	cands    map[string][]explainCand // per base term, its candidates in preference order
+	lexTerms []string                 // base terms plus their synonyms, deduplicated (BM25 query)
+	queryVec []float32                // nil = no semantic signal
+}
+
+// queryEmbeddingForExplain embeds query for the semantic signal; a failing
+// embedder degrades to no semantic signal rather than an error.
+func (e *Engine) queryEmbeddingForExplain(ctx context.Context, query string) []float32 {
+	if e.embedder == nil {
+		return nil
+	}
+	queryVec, err := embedding.EmbedQuery(ctx, e.embedder, query)
+	if err != nil {
+		slog.Warn("explain: semantic signal unavailable — embedder failed", "error", err)
+		return nil
+	}
+	return queryVec
+}
+
+// planExplain analyses query and resolves each base term's exact, synonym and
+// fuzzy candidates. Engine.mu held for reading.
+func (e *Engine) planExplain(query string, queryVec []float32) *explainPlan {
 	var base []string
 	if et, ok := e.analyzer.(exactTokenizer); ok {
 		base = et.TokenizeExact(query)
@@ -1095,12 +1131,7 @@ func (e *Engine) ExplainFiltered(ctx context.Context, query string, f *Filter) (
 	}
 	base = dedupe(base)
 
-	type cand struct {
-		tok  string
-		dist int
-		syn  bool
-	}
-	rank := func(c cand) int {
+	rank := func(c explainCand) int {
 		switch {
 		case c.dist == 0 && !c.syn:
 			return 0
@@ -1110,18 +1141,18 @@ func (e *Engine) ExplainFiltered(ctx context.Context, query string, f *Filter) (
 			return 1 + c.dist
 		}
 	}
-	cands := make(map[string][]cand, len(base))
+	cands := make(map[string][]explainCand, len(base))
 	all := append([]string(nil), base...)
 	for _, t := range base {
-		cs := []cand{{tok: t}}
+		cs := []explainCand{{tok: t}}
 		for _, s := range analysis.Synonyms(t) {
-			cs = append(cs, cand{tok: s, syn: true})
+			cs = append(cs, explainCand{tok: s, syn: true})
 			all = append(all, s)
 		}
 		if len([]rune(t)) >= 2 {
 			for _, m := range e.fuzzyMatches(t) {
 				if m.Distance > 0 {
-					cs = append(cs, cand{tok: m.Word, dist: m.Distance})
+					cs = append(cs, explainCand{tok: m.Word, dist: m.Distance})
 				}
 			}
 		}
@@ -1133,21 +1164,49 @@ func (e *Engine) ExplainFiltered(ctx context.Context, query string, f *Filter) (
 		})
 		cands[t] = cs
 	}
+	return &explainPlan{base: base, cands: cands, lexTerms: dedupe(all), queryVec: queryVec}
+}
 
-	lex := make(map[uint64]float64)
-	for _, r := range e.bm25.Query(dedupe(all)) {
-		lex[r.DocID] = r.Score
-	}
-
-	var queryVec []float32
-	if e.embedder != nil {
-		var err error
-		queryVec, err = embedding.EmbedQuery(ctx, e.embedder, query)
-		if err != nil {
-			slog.Warn("explain: semantic signal unavailable — embedder failed", "error", err)
-			queryVec = nil
+// hit computes one document's signals from a membership test over its terms
+// and its BM25 score; ok is false when the document has neither a term hit nor
+// a positive semantic score. Engine.mu, inverted and vectors held for reading.
+func (p *explainPlan) hit(e *Engine, id uint64, has func(string) bool, lexical float64) (ExplainHit, bool) {
+	var terms []TermHit
+	for _, t := range p.base {
+		for _, c := range p.cands[t] {
+			if has(c.tok) {
+				terms = append(terms, TermHit{Term: t, Matched: c.tok, Dist: c.dist, Synonym: c.syn})
+				break
+			}
 		}
 	}
+	sem := 0.0
+	if len(p.queryVec) > 0 {
+		if v := e.vecOf(id); v != nil {
+			if s := ranking.DotProduct(p.queryVec, Float16ToFloats(v)); s > 0 {
+				sem = s
+			}
+		}
+	}
+	if len(terms) == 0 && sem <= 0 {
+		return ExplainHit{}, false
+	}
+	return ExplainHit{ID: e.origID(id), Lexical: lexical, Semantic: sem, Terms: terms}, true
+}
+
+// ExplainFiltered is Explain restricted to documents whose attributes satisfy
+// f (nil = no restriction).
+func (e *Engine) ExplainFiltered(ctx context.Context, query string, f *Filter) ([]string, []ExplainHit, error) {
+	pred := f.pred()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	p := e.planExplain(query, nil)
+	lex := make(map[uint64]float64)
+	for _, r := range e.bm25.Query(p.lexTerms) {
+		lex[r.DocID] = r.Score
+	}
+	p.queryVec = e.queryEmbeddingForExplain(ctx, query)
 
 	e.inverted.RLock()
 	e.vectors.RLock()
@@ -1159,28 +1218,77 @@ func (e *Engine) ExplainFiltered(ctx context.Context, query string, f *Filter) (
 		if pred != nil && !pred(e.attrs[id]) {
 			return
 		}
-		var terms []TermHit
-		for _, t := range base {
-			for _, c := range cands[t] {
-				if has(c.tok) {
-					terms = append(terms, TermHit{Term: t, Matched: c.tok, Dist: c.dist, Synonym: c.syn})
-					break
-				}
-			}
+		if h, ok := p.hit(e, id, has, lex[id]); ok {
+			hits = append(hits, h)
 		}
-		sem := 0.0
-		if len(queryVec) > 0 {
-			if v := e.vecOf(id); v != nil {
-				if s := ranking.DotProduct(queryVec, Float16ToFloats(v)); s > 0 {
-					sem = s
-				}
-			}
-		}
-		if len(terms) == 0 && sem <= 0 {
-			return
-		}
-		hits = append(hits, ExplainHit{ID: e.origID(id), Lexical: lex[id], Semantic: sem, Terms: terms})
 	})
+	sortExplainHits(hits)
+	return p.base, hits, nil
+}
+
+// ExplainIDs computes exactly the signals ExplainFiltered would report, but
+// only for the listed documents (caller-supplied IDs, as SearchResponse.ID
+// carries them) instead of scanning every document: the result equals
+// ExplainFiltered's restricted to ids, in the same order. Its cost is
+// proportional to len(ids), not to the size of the index, so it is the way to
+// explain a ranked search's already-bounded result list on a large index.
+// Unknown or deleted IDs, duplicates, and documents failing f (nil = no
+// restriction) are skipped.
+func (e *Engine) ExplainIDs(ctx context.Context, query string, ids []string, f *Filter) ([]string, []ExplainHit, error) {
+	pred := f.pred()
+	// The embedder is fixed at construction, so the query can be embedded
+	// before taking the engine lock (as searchUncached does).
+	queryVec := e.queryEmbeddingForExplain(ctx, query)
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	p := e.planExplain(query, queryVec)
+
+	internal := make([]uint64, 0, len(ids))
+	seen := make(map[uint64]struct{}, len(ids))
+	for _, s := range ids {
+		h := fnv.New64a()
+		h.Write([]byte(s))
+		id := h.Sum64()
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		internal = append(internal, id)
+	}
+	// Same BM25 as ExplainFiltered's corpus-wide Query, evaluated for these
+	// documents only (identical per-document arithmetic and term order).
+	lex := e.bm25.ScoreDocsDefault(internal, p.lexTerms)
+
+	e.inverted.RLock()
+	e.vectors.RLock()
+	defer e.vectors.RUnlock()
+	defer e.inverted.RUnlock()
+
+	hits := make([]ExplainHit, 0, len(internal))
+	for _, id := range internal {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		has, ok := e.docTermsOf(id)
+		if !ok {
+			continue
+		}
+		if pred != nil && !pred(e.attrs[id]) {
+			continue
+		}
+		if h, ok := p.hit(e, id, has, lex[id]); ok {
+			hits = append(hits, h)
+		}
+	}
+	sortExplainHits(hits)
+	return p.base, hits, nil
+}
+
+// sortExplainHits orders hits by number of matched terms, then BM25, then
+// semantic score, then ID.
+func sortExplainHits(hits []ExplainHit) {
 	sort.Slice(hits, func(i, j int) bool {
 		a, b := hits[i], hits[j]
 		if len(a.Terms) != len(b.Terms) {
@@ -1194,5 +1302,4 @@ func (e *Engine) ExplainFiltered(ctx context.Context, query string, f *Filter) (
 		}
 		return a.ID < b.ID
 	})
-	return base, hits, nil
 }

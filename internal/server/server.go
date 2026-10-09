@@ -130,6 +130,10 @@ func (s *ZenithServer) IndexPDF(
 		return &zenithproto.IndexPDFResponse{Status: false, Message: "file_path must not be empty"},
 			status.Error(codes.InvalidArgument, "file_path must not be empty")
 	}
+	if s.PDFIndexer == nil {
+		return &zenithproto.IndexPDFResponse{Status: false, Message: "PDF indexing is not configured on this server"},
+			status.Error(codes.Unimplemented, "PDF indexing is not configured on this server")
+	}
 
 	count, err := s.PDFIndexer.Index(ctx, req.GetDocumentId(), req.GetFilePath())
 	if err != nil {
