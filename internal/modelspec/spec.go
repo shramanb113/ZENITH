@@ -201,3 +201,86 @@ func LookupReranker(id string) (RerankerSpec, error) {
 // DefaultRerankerID is used by WithReranker(true) / --rerank when no specific
 // reranker model is named.
 const DefaultRerankerID = "ms-marco-MiniLM-L-6-v2"
+
+// VisualSpec describes a dual-tower (image + text) embedding model that
+// shares one geometric space with no relation to Spec's text-only models —
+// CLIP's own vocabulary, tokenizer algorithm, and preprocessing are entirely
+// separate from the bert-base-uncased-vocabulary models above. Never bundled
+// (see internal/localembedder's bundle_cgo.go doc comment on why text models
+// are bundled and this is not): fetched like labse/distiluse-multilingual via
+// `zenith models pull`.
+type VisualSpec struct {
+	ID          string
+	Description string
+	// Dims is the shared output size of both towers (512 for CLIP ViT-B/32).
+	Dims int
+	// ImageSize is the square pixel size the vision tower expects after
+	// resize+center-crop (224 for CLIP ViT-B/32).
+	ImageSize int
+	// ContextLength is the fixed text-tower sequence length (77 for CLIP).
+	ContextLength int
+	// VisionModelURL / TextModelURL are the two independent ONNX graphs —
+	// CLIP exports as two separate models, not one fused graph.
+	VisionModelURL string
+	TextModelURL   string
+	// VocabURL / MergesURL are CLIP's own byte-level BPE vocabulary and merge
+	// rules (vocab.json + merges.txt) — unrelated to Spec.VocabURL's
+	// WordPiece vocab.txt format.
+	VocabURL  string
+	MergesURL string
+	// ImageMean / ImageStd are the per-channel (RGB order) normalization
+	// constants from the model's real preprocessor_config.json.
+	ImageMean [3]float32
+	ImageStd  [3]float32
+	// SizeMB is the combined approximate download size (both ONNX graphs +
+	// vocab + merges), for user-facing messages.
+	SizeMB int
+}
+
+// IndexName is the embedder identity recorded in a saved index's visual
+// embedder header field (see the visual-image-search design spec §4) — "clip:"
+// rather than Spec's "onnx:" prefix, so a visual and a text embedder mismatch
+// can never be confused with each other in an error message.
+func (s VisualSpec) IndexName() string { return "clip:" + s.ID }
+
+var visualRegistry = []VisualSpec{
+	{
+		ID:             "clip-vit-base-patch32",
+		Description:    "CLIP ViT-B/32: dual-tower image+text embedding in one shared 512-dim space, for visual/semantic image search (finds a photo with no readable text, unlike OCR). English text tower only — no claim is made about non-English query quality.",
+		Dims:           512,
+		ImageSize:      224,
+		ContextLength:  77,
+		VisionModelURL: "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_quantized.onnx",
+		TextModelURL:   "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/text_model_quantized.onnx",
+		VocabURL:       "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/vocab.json",
+		MergesURL:      "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/merges.txt",
+		ImageMean:      [3]float32{0.48145466, 0.4578275, 0.40821073},
+		ImageStd:       [3]float32{0.26862954, 0.26130258, 0.27577711},
+		SizeMB:         150,
+	},
+}
+
+// VisualModels returns every registered visual model, sorted by ID.
+func VisualModels() []VisualSpec {
+	out := append([]VisualSpec(nil), visualRegistry...)
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// LookupVisual finds a visual model by ID (case-insensitive).
+func LookupVisual(id string) (VisualSpec, error) {
+	for _, s := range visualRegistry {
+		if strings.EqualFold(s.ID, id) {
+			return s, nil
+		}
+	}
+	ids := make([]string, 0, len(visualRegistry))
+	for _, s := range visualRegistry {
+		ids = append(ids, s.ID)
+	}
+	return VisualSpec{}, fmt.Errorf("modelspec: unknown visual model %q (available: %s)", id, strings.Join(ids, ", "))
+}
+
+// DefaultVisualID is used by `zenith create --visual-model` and
+// `zenith.WithVisualModel(true)` when no specific model ID is given.
+const DefaultVisualID = "clip-vit-base-patch32"

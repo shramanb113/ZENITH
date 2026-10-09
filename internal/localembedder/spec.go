@@ -28,3 +28,17 @@ func RerankerModels() []RerankerSpec { return modelspec.RerankerModels() }
 
 // LookupReranker finds a reranker by ID (case-insensitive).
 func LookupReranker(id string) (RerankerSpec, error) { return modelspec.LookupReranker(id) }
+
+// VisualSpec describes a dual-tower (image+text) embedding model (see
+// internal/modelspec).
+type VisualSpec = modelspec.VisualSpec
+
+// VisualModels returns every registered visual model, sorted by ID.
+func VisualModels() []VisualSpec { return modelspec.VisualModels() }
+
+// LookupVisual finds a visual model by ID (case-insensitive).
+func LookupVisual(id string) (VisualSpec, error) { return modelspec.LookupVisual(id) }
+
+// DefaultVisualID is the registry ID `zenith create --visual-model` uses
+// when none is specified.
+const DefaultVisualID = modelspec.DefaultVisualID
