@@ -110,24 +110,24 @@ func newVisionPool(modelBytes []byte, libPath string, poolSize, dims int) (*visi
 	for i := 0; i < poolSize; i++ {
 		opts, err := ort.NewSessionOptions()
 		if err != nil {
-			p.closePartial()
+			p.close()
 			return nil, fmt.Errorf("clip vision session options: %w", err)
 		}
 		if err := opts.SetIntraOpNumThreads(threads); err != nil {
 			opts.Destroy()
-			p.closePartial()
+			p.close()
 			return nil, fmt.Errorf("clip vision SetIntraOpNumThreads: %w", err)
 		}
 		if err := opts.SetInterOpNumThreads(1); err != nil {
 			opts.Destroy()
-			p.closePartial()
+			p.close()
 			return nil, fmt.Errorf("clip vision SetInterOpNumThreads: %w", err)
 		}
 		session, err := ort.NewDynamicAdvancedSessionWithONNXData(
 			modelBytes, []string{"pixel_values"}, []string{"image_embeds"}, opts)
 		opts.Destroy()
 		if err != nil {
-			p.closePartial()
+			p.close()
 			return nil, fmt.Errorf("clip vision session %d: %w", i, err)
 		}
 		w := &visionWorker{session: session}
@@ -147,6 +147,13 @@ func (p *visionPool) runWorker(w *visionWorker) {
 }
 
 // embedBatch sends one batch through whichever worker is free next.
+//
+// Caller contract: embedBatch must never be called concurrently with close.
+// Sending on p.jobs after close has closed it panics ("send on closed
+// channel") — the pool does not synchronize embedBatch against close
+// itself, so the caller (Task 6's CLIPEmbedder) must ensure no in-flight
+// or new embedBatch call can race a close call, e.g. by draining/quiescing
+// callers before shutting the pool down.
 func (p *visionPool) embedBatch(pixelValues []float32, batchSize, imageSize int) ([]float32, error) {
 	resultCh := make(chan visionResult, 1)
 	p.jobs <- visionJob{pixelValues: pixelValues, batchSize: batchSize, imageSize: imageSize, resultCh: resultCh}
@@ -154,14 +161,19 @@ func (p *visionPool) embedBatch(pixelValues []float32, batchSize, imageSize int)
 	return res.embeds, res.err
 }
 
-// closePartial destroys whatever sessions were created before a mid-
-// construction error, without starting worker goroutines for them.
-func (p *visionPool) closePartial() {
-	for _, w := range p.workers {
-		_ = w.session.Destroy()
-	}
-}
-
+// close shuts the pool down: closing p.jobs causes every runWorker loop to
+// exit (range over a closed channel drains then stops), wg.Wait blocks
+// until all of them have, and only then are the sessions destroyed — so no
+// session is ever destroyed while its owning goroutine might still be
+// using it. This is also used to unwind a partially constructed pool (see
+// newVisionPool's error paths): closing an unclosed channel with no
+// readers is a no-op wait, and waiting on a zero-value (or partially
+// incremented) sync.WaitGroup with no pending Add calls outstanding
+// returns immediately, so calling close before any worker goroutine has
+// been started is safe and leaks nothing.
+//
+// Caller contract: see embedBatch — must not be called concurrently with
+// an in-flight or future embedBatch call.
 func (p *visionPool) close() {
 	close(p.jobs)
 	p.wg.Wait()
