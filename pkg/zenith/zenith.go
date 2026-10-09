@@ -428,11 +428,19 @@ func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) (r
 	}
 
 	if so.explain {
-		terms, hits, err := db.engine.ExplainFiltered(ctx, query, so.indexFilter())
+		// Run the ranked search first and explain only the documents it
+		// returned (at most Config.MaxResults), rather than ExplainFiltered's
+		// scan of every document: the signals per document are identical, but
+		// the cost is bounded by the candidate list instead of the index size.
+		raw, err := db.engine.SearchFilteredWeighted(ctx, query, so.indexFilter(), so.weights)
 		if err != nil {
 			return nil, fmt.Errorf("zenith: %w", err)
 		}
-		raw, err := db.engine.SearchFilteredWeighted(ctx, query, so.indexFilter(), so.weights)
+		ids := make([]string, len(raw))
+		for i, r := range raw {
+			ids[i] = r.ID
+		}
+		terms, hits, err := db.engine.ExplainIDs(ctx, query, ids, so.indexFilter())
 		if err != nil {
 			return nil, fmt.Errorf("zenith: %w", err)
 		}
