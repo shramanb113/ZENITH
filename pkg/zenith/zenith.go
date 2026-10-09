@@ -488,6 +488,33 @@ func (db *DB) Get(id string) (text string, found bool, err error) {
 	return text, found, nil
 }
 
+// GetAttrs returns a copy of the metadata attributes stored with id via
+// AddWithAttrs/AddBatchWithAttrs (nil, nil if the document exists but has
+// none, or if it does not exist at all — use Get to distinguish the two).
+func (db *DB) GetAttrs(id string) (attrs Attrs, err error) {
+	if db == nil {
+		return nil, errors.New("zenith: GetAttrs called on nil DB")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			db.closed.Store(true)
+			err = fmt.Errorf("zenith: internal error: %v", r)
+		}
+	}()
+
+	if id == "" {
+		return nil, ErrInvalidID
+	}
+
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.closed.Load() {
+		return nil, ErrClosed
+	}
+
+	return fromIndexAttrs(db.engine.GetAttrs(id)), nil
+}
+
 // Delete removes a document from the index. Idempotent — deleting a
 // non-existent id returns nil.
 func (db *DB) Delete(ctx context.Context, id string) (err error) {

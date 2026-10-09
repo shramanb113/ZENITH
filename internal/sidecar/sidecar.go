@@ -132,6 +132,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	route(mux, "DELETE /v1/ns/{ns}", s.guard(s.deleteNS))
 	if s.cfg.Collections != nil {
 		s.registerCollections(mux)
+		s.registerChroma(mux)
 	}
 }
 

@@ -179,6 +179,39 @@ func TestFilter_AddBatchWithAttrs(t *testing.T) {
 	sameIDs(t, rs, "c")
 }
 
+func TestGetAttrs_RoundTripsStoredMetadata(t *testing.T) {
+	db := openMem(t)
+	if err := db.AddWithAttrs(bgCtx(), "a", "some text", zenith.Attrs{"tenant": "acme", "year": 2024, "ok": true}); err != nil {
+		t.Fatal(err)
+	}
+	attrs, err := db.GetAttrs("a")
+	if err != nil {
+		t.Fatalf("GetAttrs: %v", err)
+	}
+	if attrs["tenant"] != "acme" || attrs["year"] != 2024.0 || attrs["ok"] != true {
+		t.Fatalf("GetAttrs: got %+v", attrs)
+	}
+}
+
+func TestGetAttrs_NoAttrsReturnsNil(t *testing.T) {
+	db := openMem(t)
+	if err := db.Add(bgCtx(), "a", "some text"); err != nil {
+		t.Fatal(err)
+	}
+	attrs, err := db.GetAttrs("a")
+	if err != nil || attrs != nil {
+		t.Fatalf("GetAttrs on doc without attrs: got %+v, %v", attrs, err)
+	}
+}
+
+func TestGetAttrs_UnknownDocReturnsNilNoError(t *testing.T) {
+	db := openMem(t)
+	attrs, err := db.GetAttrs("ghost")
+	if err != nil || attrs != nil {
+		t.Fatalf("GetAttrs on unknown doc: got %+v, %v", attrs, err)
+	}
+}
+
 func TestFilter_InvalidAttrs(t *testing.T) {
 	db := openMem(t)
 	for name, a := range map[string]zenith.Attrs{

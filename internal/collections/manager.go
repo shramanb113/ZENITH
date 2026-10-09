@@ -737,6 +737,28 @@ func (m *Manager) GetDoc(ctx context.Context, id, docID string) (string, error) 
 	return text, nil
 }
 
+// GetDocAttrs returns the metadata attrs stored with docID in collection
+// id (nil, nil if it has none). Pairs with GetDoc, which returns only the
+// text; split into its own method rather than widening GetDoc's signature
+// because most callers (the native /v1/collections HTTP route included)
+// never need attrs back out, only in for filtering.
+func (m *Manager) GetDocAttrs(ctx context.Context, id, docID string) (zenith.Attrs, error) {
+	e, err := m.acquire(id)
+	if err != nil {
+		return nil, err
+	}
+	defer e.life.RUnlock()
+
+	_, found, err := e.db.Get(docID)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, ErrDocNotFound
+	}
+	return e.db.GetAttrs(docID)
+}
+
 // Search runs a query against collection id. Latency is measured against
 // the real wall clock, not cfg.Now (which exists so tests can fast-forward
 // idle/LRU timing, not to control what a real request actually took).
