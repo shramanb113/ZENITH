@@ -29,6 +29,27 @@ func toAttrValue(v any) (index.AttrValue, error) {
 	return av, nil
 }
 
+// fromAttrValue is the reverse of toAttrValue, used by DB.GetAttrs to hand
+// back the stored metadata in its original Go shape.
+func fromAttrValue(av index.AttrValue) any {
+	switch av.Kind {
+	case index.AttrString:
+		return av.S
+	case index.AttrBool:
+		return av.N != 0
+	case index.AttrNumber:
+		return av.N
+	case index.AttrArray:
+		out := make([]any, len(av.Arr))
+		for i, e := range av.Arr {
+			out[i] = fromAttrValue(e)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 func toIndexAttrs(a Attrs) (index.Attrs, error) {
 	if len(a) == 0 {
 		return nil, nil
@@ -95,6 +116,23 @@ func (f Filter) JSON() ([]byte, error) {
 		return json.Marshal(index.FilterSpec{Op: "and"})
 	}
 	return json.Marshal(f.spec)
+}
+
+// Matches reports whether attrs satisfies f, testing them directly instead
+// of through Search's candidate-set narrowing. Useful for a caller (such as
+// internal/sidecar's Chroma-compatibility shim) that already has one
+// document's attrs in hand from some other lookup and needs to apply the
+// same filter semantics Search would. The zero Filter (no condition built)
+// matches everything, same as an empty And().
+func (f Filter) Matches(attrs Attrs) bool {
+	if f.pred == nil {
+		return true
+	}
+	ia, err := toIndexAttrs(attrs)
+	if err != nil {
+		return false
+	}
+	return f.pred(ia)
 }
 
 func noneSpec() *index.FilterSpec { return &index.FilterSpec{Op: "none"} }
