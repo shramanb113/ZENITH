@@ -246,7 +246,7 @@ func TestPhrase_WithAttributeFilter(t *testing.T) {
 func TestPhrase_ExplainOnlyListsPhraseDocuments(t *testing.T) {
 	e := phraseTestEngine(t, 0, 0)
 	addCorpus(t, e, phraseCorpus, nil)
-	_, hits, err := e.Explain(context.Background(), `"machine learning"`)
+	_, hits, err := e.ExplainFiltered(context.Background(), `"machine learning"`, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestPhrase_ExplainOnlyListsPhraseDocuments(t *testing.T) {
 	if want := sorted("exact", "inside", "punct", "later", "stemmed"); !sameIDs(got, want) {
 		t.Fatalf("explain hits %v, want %v", got, want)
 	}
-	_, plainHits, err := e.Explain(context.Background(), "machine learning")
+	_, plainHits, err := e.ExplainFiltered(context.Background(), "machine learning", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
