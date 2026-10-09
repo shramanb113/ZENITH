@@ -282,5 +282,7 @@ func LookupVisual(id string) (VisualSpec, error) {
 }
 
 // DefaultVisualID is used by `zenith create --visual-model` and
-// `zenith.WithVisualModel(true)` when no specific model ID is given.
+// `zenith.WithVisualModel(id)` (per the visual-image-search design spec §9,
+// WithVisualModel takes a model ID string, not a bool) when no specific
+// model ID is given.
 const DefaultVisualID = "clip-vit-base-patch32"

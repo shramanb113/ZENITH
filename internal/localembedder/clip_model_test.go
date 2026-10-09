@@ -2,15 +2,20 @@
 
 package localembedder
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // These tests need the real onnxruntime shared library extracted (via
 // extractToTemp(ortLibBytes, ortLibFilename), the same helper newEmbedder
 // already uses) plus a real small ONNX model — which this task does not
 // have without network access to the real clip-vit-base-patch32 files. They
-// are therefore structural/safety tests only (pool sizing, no deadlock on a
-// closed pool), not real-inference tests — Task 8's opt-in smoke test (gated
-// on the real model actually being pulled) covers real inference.
+// are therefore structural/safety tests only (pool sizing, plus a
+// no-real-session safety check that close() doesn't deadlock on a pool with
+// no started workers — see TestVisionPool_CloseOnEmptyPoolDoesNotDeadlock
+// below), not real-inference tests — Task 8's opt-in smoke test (gated on
+// the real model actually being pulled) covers real inference.
 
 func TestNewVisionPool_PoolSizeAtLeastOne(t *testing.T) {
 	// A pool constructed with poolSize 0 or negative must not panic from
@@ -32,5 +37,29 @@ func TestClipPoolSize_AtLeastOne(t *testing.T) {
 		if got < 1 {
 			t.Errorf("clipPoolSize(%d) = %d, want >= 1", numCPU, got)
 		}
+	}
+}
+
+// TestVisionPool_CloseOnEmptyPoolDoesNotDeadlock exercises close()'s own
+// documented claim (see visionPool.close()'s doc comment) that closing a
+// pool with no started worker goroutines is safe and returns immediately:
+// closing an unclosed channel with no readers is a no-op wait, and a
+// zero-value (or partially incremented) sync.WaitGroup with no pending Add
+// calls outstanding returns immediately from Wait. This needs no real ONNX
+// session — p.workers is left empty, so close()'s session-destroy loop never
+// runs.
+func TestVisionPool_CloseOnEmptyPoolDoesNotDeadlock(t *testing.T) {
+	p := &visionPool{jobs: make(chan visionJob)}
+
+	done := make(chan struct{})
+	go func() {
+		p.close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("visionPool.close() deadlocked on a pool with no started workers")
 	}
 }

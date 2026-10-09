@@ -4,6 +4,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"runtime"
 	"testing"
 )
 
@@ -74,6 +75,43 @@ func TestCLIPPreprocess_UpscalesSmallImages(t *testing.T) {
 	out := clipPreprocess(img, 224, mean, std)
 	if len(out) != 3*224*224 {
 		t.Errorf("len(out) = %d, want %d", len(out), 3*224*224)
+	}
+}
+
+// TestCLIPPreprocess_ExtremeAspectRatioStaysBounded proves the Fix 1 memory
+// bound: resizing the WHOLE image to shortest-edge=224 before cropping would,
+// for a 1x5000px image, allocate a ~224 x 1,120,000px intermediate (measured
+// ~1.16GB) even though only a 224x224 result is ever used. The fixed
+// clipPreprocess must compute the crop region in source coordinates first and
+// scale only that region directly, so peak allocation for this call stays
+// close to the true cost (size*size*3*4 bytes for the output slice, plus a
+// small constant number of size x size RGBA buffers) — comfortably under the
+// 50MB bound asserted here, and nowhere near the old ~1.16GB.
+func TestCLIPPreprocess_ExtremeAspectRatioStaysBounded(t *testing.T) {
+	mean := [3]float32{0.5, 0.5, 0.5}
+	std := [3]float32{0.5, 0.5, 0.5}
+
+	for _, dims := range [][2]int{{1, 5000}, {5, 5000}, {5000, 1}} {
+		img := solidImage(dims[0], dims[1], color.RGBA{10, 20, 30, 255})
+
+		runtime.GC()
+		var before runtime.MemStats
+		runtime.ReadMemStats(&before)
+
+		out := clipPreprocess(img, 224, mean, std)
+
+		var after runtime.MemStats
+		runtime.ReadMemStats(&after)
+
+		if len(out) != 3*224*224 {
+			t.Errorf("size %v: len(out) = %d, want %d", dims, len(out), 3*224*224)
+		}
+
+		const bound = 50 * 1024 * 1024 // 50MB; true cost is well under 1MB.
+		allocated := after.TotalAlloc - before.TotalAlloc
+		if allocated > bound {
+			t.Errorf("size %v: clipPreprocess allocated %d bytes, want <= %d (bounded preprocessing)", dims, allocated, bound)
+		}
 	}
 }
 

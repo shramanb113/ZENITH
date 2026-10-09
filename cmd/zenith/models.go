@@ -80,7 +80,7 @@ var modelsListCmd = &cobra.Command{
 			fmt.Printf("  %-24s %s\n", "", muted(m.Description))
 		}
 		printDivider()
-		printFooter("use one with", "--visual-model <id>  (zenith create --visual-model <id>)")
+		printFooter("visual search wiring is not yet available", "see the visual-image-search design spec")
 		return nil
 	},
 }
@@ -102,7 +102,7 @@ var modelsPullCmd = &cobra.Command{
 			usage = "use with --rerank --rerank-model " + rspec.ID
 		} else if vspec, verr := localembedder.LookupVisual(args[0]); verr == nil {
 			id, sizeMB, visualSpec, isVisual = vspec.ID, vspec.SizeMB, vspec, true
-			usage = "use with --visual-model " + vspec.ID
+			usage = "visual search wiring is not yet available (see the visual-image-search design spec)"
 		} else {
 			return err
 		}
