@@ -21,11 +21,25 @@ type Indexer interface {
 	Remove(ctx context.Context, id string) error
 }
 
+// PrefixRemover is implemented by indexers that can remove every document
+// whose ID starts with a prefix in one call (index.Engine.RemoveByIDPrefix).
+// A FileIndexer (PDF, image) stores one document per chunk as
+// "<docID>||p<page>||c<chunk>||...", not one document at id == docID, so a
+// plain Remove(docID) is a no-op for that file's content: the Watcher checks
+// for this interface to clean up chunked files correctly instead.
+type PrefixRemover interface {
+	RemoveByIDPrefix(ctx context.Context, prefix string) (int, error)
+}
+
 // FileIndexer handles files that require special extraction (PDFs, images)
 // rather than plain text via ExtractText. Both arguments are the same absolute path.
 type FileIndexer interface {
 	Index(ctx context.Context, docID, filePath string) (int, error)
 }
+
+// chunkIDPrefix is the prefix every chunk ID a FileIndexer writes for docID
+// starts with (see internal/pdf and internal/image's Index methods).
+func chunkIDPrefix(docID string) string { return docID + "||" }
 
 // Watcher walks a directory tree, indexes every supported file, then keeps
 // the index current by watching for fsnotify events (create, write, rename,
@@ -283,12 +297,28 @@ func (w *Watcher) handleEvent(ctx context.Context, event fsnotify.Event) {
 		}
 		absPath, _ := filepath.Abs(path)
 		slog.Info("crawler: removing deleted file from index", "path", path)
-		if err := w.indexer.Remove(ctx, absPath); err != nil {
+		if err := w.removeFile(ctx, absPath, ext); err != nil {
 			slog.Warn("crawler: remove failed", "path", path, "error", err)
 		} else {
 			w.logger.Log("REMOVED", absPath)
 		}
 	}
+}
+
+// removeFile removes a deleted/renamed-away file's indexed content. For a
+// plain-text file (added as a single document at id == absPath) that is an
+// ordinary Remove. For a chunked file (ext has a registered FileIndexer) the
+// actual document IDs are "<absPath>||p...||c...", so a plain Remove(absPath)
+// would be a silent no-op — it removes by prefix instead, when the indexer
+// supports it (see PrefixRemover).
+func (w *Watcher) removeFile(ctx context.Context, absPath, ext string) error {
+	if _, chunked := w.fileIndexers[ext]; chunked {
+		if pr, ok := w.indexer.(PrefixRemover); ok {
+			_, err := pr.RemoveByIDPrefix(ctx, chunkIDPrefix(absPath))
+			return err
+		}
+	}
+	return w.indexer.Remove(ctx, absPath)
 }
 
 func (w *Watcher) indexFile(ctx context.Context, path string) error {
@@ -305,6 +335,14 @@ func (w *Watcher) indexFile(ctx context.Context, path string) error {
 
 	ext := strings.ToLower(filepath.Ext(path))
 	if fi, ok := w.fileIndexers[ext]; ok {
+		// Re-indexing (file modified) can produce fewer chunks than the
+		// previous version had; clear the old ones first so a shrunk file
+		// doesn't leave stale chunks from its earlier, longer content behind.
+		if pr, ok := w.indexer.(PrefixRemover); ok {
+			if _, err := pr.RemoveByIDPrefix(ctx, chunkIDPrefix(absPath)); err != nil {
+				slog.Warn("crawler: clearing old chunks before re-index failed", "path", absPath, "error", err)
+			}
+		}
 		_, ferr := fi.Index(ctx, absPath, absPath)
 		if ferr != nil {
 			slog.Warn("crawler: rich-format index failed, skipping", "path", path, "error", ferr)

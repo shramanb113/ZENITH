@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"maps"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -592,6 +593,36 @@ func (e *Engine) embedDocs(ctx context.Context, docs []BatchDoc) [][]float32 {
 	return out
 }
 
+// RemoveByIDPrefix removes every live document whose original ID starts with
+// prefix, returning how many were removed. It exists for IDs that are
+// themselves composite — a PDF or image indexer stores one document per
+// chunk as "<docID>||p<page>||c<chunk>||...", not one document per file — so
+// removing a single ID is not enough to remove a file's indexed content.
+// Callers that index whole files as chunked IDs (see internal/crawler.Watcher)
+// must call this with "<docID>||" before re-indexing a changed file (so a new
+// version with fewer chunks doesn't leave the old extra chunks behind) and
+// when a watched file is deleted (a plain Remove(docID) would be a no-op,
+// since no chunk ID equals docID exactly).
+func (e *Engine) RemoveByIDPrefix(ctx context.Context, prefix string) (int, error) {
+	e.mu.RLock()
+	e.inverted.RLock()
+	var ids []string
+	e.eachDocTerms(func(id uint64, _ func(string) bool) {
+		if orig := e.origID(id); strings.HasPrefix(orig, prefix) {
+			ids = append(ids, orig)
+		}
+	})
+	e.inverted.RUnlock()
+	e.mu.RUnlock()
+
+	for _, id := range ids {
+		if err := e.Remove(ctx, id); err != nil {
+			return len(ids), fmt.Errorf("index: remove %q: %w", id, err)
+		}
+	}
+	return len(ids), nil
+}
+
 // Remove deletes all index entries for originalID.
 // Takes Engine.mu.Lock() for its full duration.
 func (e *Engine) Remove(ctx context.Context, originalID string) error {
@@ -1085,16 +1116,6 @@ type explainCand struct {
 	syn  bool
 }
 
-// ExplainFiltered is Explain restricted to documents whose attributes satisfy
-// f (nil = no restriction). ExplainIDs computes the same signals for a given
-// (bounded) set of documents without the full-corpus scan; the unfiltered,
-// unbounded Explain wrapper that used to sit here had no callers and was
-// removed as dead code.
-func (e *Engine) ExplainFiltered(ctx context.Context, query string, f *Filter) ([]string, []ExplainHit, error) {
-	pred := f.pred()
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-
 // explainPlan is the query-side half of Explain: everything that depends only
 // on the query, computed once and then applied per document by hit.
 type explainPlan struct {
@@ -1195,7 +1216,10 @@ func (p *explainPlan) hit(e *Engine, id uint64, has func(string) bool, lexical f
 }
 
 // ExplainFiltered is Explain restricted to documents whose attributes satisfy
-// f (nil = no restriction).
+// f (nil = no restriction). ExplainIDs computes the same signals for a given
+// (bounded) set of documents without the full-corpus scan; the unfiltered,
+// unbounded Explain wrapper that used to sit here had no callers and was
+// removed as dead code.
 func (e *Engine) ExplainFiltered(ctx context.Context, query string, f *Filter) ([]string, []ExplainHit, error) {
 	pred := f.pred()
 	e.mu.RLock()
