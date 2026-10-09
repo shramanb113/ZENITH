@@ -10,6 +10,16 @@ service SearchService {
     rpc IndexPDF(IndexPDFRequest) returns (IndexPDFResponse);
     rpc GetDocument(GetDocumentRequest) returns (GetDocumentResponse);
     rpc DeleteDocument(DeleteDocumentRequest) returns (DeleteDocumentResponse);
+    // IndexBatch indexes every document atomically (one durable commit, all
+    // or nothing). Returns UNIMPLEMENTED when the server has no transactional
+    // storage engine wired.
+    rpc IndexBatch(IndexBatchRequest) returns (IndexBatchResponse);
+    // DeleteBatch removes every id atomically (one durable commit, all or
+    // nothing). Returns UNIMPLEMENTED when the server has no transactional
+    // storage engine wired.
+    rpc DeleteBatch(DeleteBatchRequest) returns (DeleteBatchResponse);
+    // Suggest returns indexed terms starting with a prefix (autocomplete).
+    rpc Suggest(SuggestRequest) returns (SuggestResponse);
 }
 
 // AttrValue is one typed metadata value: a string, a number, a bool, or an
@@ -90,6 +100,25 @@ message SearchRequest{
     // scalar value, regardless of sort_desc.
     string sort_field = 5;
     bool sort_desc = 6;
+    // Per-query ranking overrides, for this call only. Unset (or 0) keeps the
+    // engine default for that weight; NaN, Inf and negative values are
+    // rejected with INVALID_ARGUMENT.
+    //   vector_weight:   RRF weight of the semantic list (keyword list is fixed at 1.0)
+    //   phonetic_weight: per-match weight of a Soundex phonetic hit
+    //   rrf_k:           the k in RRF's weight/(k + rank)
+    optional double vector_weight = 7;
+    optional double phonetic_weight = 8;
+    optional double rrf_k = 9;
+    // facet_fields, when non-empty, asks for per-value document counts of
+    // these attributes over the full fused candidate list (before
+    // offset/limit; at most the engine's internal candidate cap, 1000 by
+    // default). An array attribute counts once per distinct element. With an
+    // empty query, facets are counted over every live document instead and
+    // no results are returned.
+    repeated string facet_fields = 10;
+    // facet_top_k caps the values returned per field (highest count first).
+    // 0 or unset defaults to 10.
+    int32 facet_top_k = 11;
 }
 
 message SearchResult {
@@ -103,6 +132,16 @@ message SearchResult {
 
 message SearchResponse {
     repeated SearchResult results = 1;
+    // facets is filled only when SearchRequest.facet_fields is set: one entry
+    // per (field, value), grouped by field in request order, highest count
+    // first within a field.
+    repeated FacetResult facets = 2;
+}
+
+message FacetResult {
+    string field = 1;
+    AttrValue value = 2;
+    int64 count = 3;
 }
 
 message DocumentProto {
@@ -123,6 +162,8 @@ message Vector {
 message IndexPDFRequest {
     string document_id = 1;
     string file_path   = 2;
+    // attrs is metadata attached to every chunk indexed from this PDF.
+    map<string, AttrValue> attrs = 3;
 }
 
 message IndexPDFResponse {
@@ -139,6 +180,8 @@ message GetDocumentResponse {
     bool   found = 1;
     string id    = 2;
     string text  = 3;
+    // attrs are the document's metadata (empty if it has none).
+    map<string, AttrValue> attrs = 4;
 }
 
 message DeleteDocumentRequest {
@@ -148,4 +191,38 @@ message DeleteDocumentRequest {
 message DeleteDocumentResponse {
     bool   status  = 1;
     string message = 2;
+}
+
+message IndexBatchRequest {
+    repeated IndexRequest docs = 1;
+}
+
+message IndexBatchResponse {
+    bool   status  = 1;
+    string message = 2;
+    int32  indexed = 3;
+}
+
+message DeleteBatchRequest {
+    repeated string ids = 1;
+}
+
+message DeleteBatchResponse {
+    bool   status  = 1;
+    string message = 2;
+    int32  deleted = 3;
+}
+
+// SuggestRequest asks for indexed terms starting with prefix. Terms are the
+// analysed (lowercased, Porter2-stemmed) vocabulary, returned in
+// lexicographic order — not ranked by frequency, and not surface forms
+// ("running" is indexed, and suggested, as "run").
+message SuggestRequest {
+    string prefix = 1;
+    // limit caps the number of terms returned. 0 or unset defaults to 10.
+    int32 limit = 2;
+}
+
+message SuggestResponse {
+    repeated string terms = 1;
 }

@@ -278,7 +278,7 @@ func TestIndex_RejectsPathOutsideAllowedRoot(t *testing.T) {
 		t.Fatalf("SetAllowedRoot: %v", err)
 	}
 
-	_, err := p.Index(nil, "doc1", filepath.Join(pdfDir, "..", "outside.pdf"))
+	_, err := p.Index(nil, "doc1", filepath.Join(pdfDir, "..", "outside.pdf"), nil)
 	if err == nil {
 		t.Fatalf("Index: expected error for path outside allowed root")
 	}
@@ -303,7 +303,7 @@ func TestIndex_RealPDF_ChunkBBoxesArePlausible(t *testing.T) {
 	defer eng.Close()
 
 	idx := NewIndexer(eng)
-	n, err := idx.Index(context.Background(), "doc1", filepath.Join("testdata", "multipage.pdf"))
+	n, err := idx.Index(context.Background(), "doc1", filepath.Join("testdata", "multipage.pdf"), nil)
 	if err != nil {
 		t.Fatalf("Index: %v", err)
 	}

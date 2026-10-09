@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"reflect"
 	"strings"
 
 	"github.com/shramanb113/ZENITH/internal/index"
@@ -19,49 +18,15 @@ type Attrs map[string]any
 // unsupported type.
 var ErrInvalidAttrs = errors.New("zenith: invalid attributes: keys must be non-empty and values a string, bool or number")
 
+// toAttrValue is index.AttrValueFromAny with the error wrapped in
+// ErrInvalidAttrs (the conversion itself lives in internal/index so that the
+// CLI's JSONL input and this package share one implementation).
 func toAttrValue(v any) (index.AttrValue, error) {
-	switch x := v.(type) {
-	case string:
-		return index.AttrValue{Kind: index.AttrString, S: x}, nil
-	case bool:
-		n := 0.0
-		if x {
-			n = 1
-		}
-		return index.AttrValue{Kind: index.AttrBool, N: n}, nil
+	av, err := index.AttrValueFromAny(v)
+	if err != nil {
+		return index.AttrValue{}, fmt.Errorf("%w: %v", ErrInvalidAttrs, err)
 	}
-	rv := reflect.ValueOf(v)
-	switch rv.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return index.AttrValue{Kind: index.AttrNumber, N: float64(rv.Int())}, nil
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return index.AttrValue{Kind: index.AttrNumber, N: float64(rv.Uint())}, nil
-	case reflect.Float32, reflect.Float64:
-		f := rv.Float()
-		if math.IsNaN(f) || math.IsInf(f, 0) {
-			return index.AttrValue{}, fmt.Errorf("%w: non-finite number", ErrInvalidAttrs)
-		}
-		return index.AttrValue{Kind: index.AttrNumber, N: f}, nil
-	case reflect.Slice, reflect.Array:
-		// Never nested: an element that is itself a slice/array fails here,
-		// since toAttrValue on it would recurse into this same case and
-		// produce an AttrArray no AttrKind variant below accepts as Arr's
-		// element type — rejected explicitly instead of a confusing one.
-		n := rv.Len()
-		arr := make([]index.AttrValue, n)
-		for i := 0; i < n; i++ {
-			elem, err := toAttrValue(rv.Index(i).Interface())
-			if err != nil {
-				return index.AttrValue{}, err
-			}
-			if elem.Kind == index.AttrArray {
-				return index.AttrValue{}, fmt.Errorf("%w: nested arrays are not supported", ErrInvalidAttrs)
-			}
-			arr[i] = elem
-		}
-		return index.AttrValue{Kind: index.AttrArray, Arr: arr}, nil
-	}
-	return index.AttrValue{}, fmt.Errorf("%w: unsupported type %T", ErrInvalidAttrs, v)
+	return av, nil
 }
 
 func toIndexAttrs(a Attrs) (index.Attrs, error) {

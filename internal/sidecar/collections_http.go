@@ -28,6 +28,8 @@ func (s *Server) registerCollections(mux *http.ServeMux) {
 	route(mux, "GET /v1/collections/{id}/docs/{doc...}", s.colGuard(s.getCollectionDoc))
 	route(mux, "DELETE /v1/collections/{id}/docs/{doc...}", s.colGuard(s.deleteCollectionDoc))
 	route(mux, "POST /v1/collections/{id}/search", s.colGuard(s.searchCollection))
+	route(mux, "GET /v1/collections/{id}/suggest", s.colGuard(s.suggestCollection))
+	route(mux, "GET /v1/collections/{id}/facets", s.colGuard(s.facetsCollection))
 	route(mux, "GET /v1/collections/{id}/stats", s.colGuard(s.statCollection))
 }
 
@@ -64,7 +66,8 @@ func (s *Server) colErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, collections.ErrShuttingDown), errors.Is(err, zenith.ErrLocked), errors.Is(err, zenith.ErrClosed):
 		writeColErr(w, http.StatusServiceUnavailable, "unavailable", err.Error())
 	case errors.Is(err, zenith.ErrInvalidID), errors.Is(err, zenith.ErrIDTooLong),
-		errors.Is(err, zenith.ErrEmptyDocument), errors.Is(err, zenith.ErrInvalidAttrs):
+		errors.Is(err, zenith.ErrEmptyDocument), errors.Is(err, zenith.ErrInvalidAttrs),
+		errors.Is(err, zenith.ErrInvalidOption):
 		writeColErr(w, http.StatusBadRequest, "invalid_request", err.Error())
 	default:
 		s.cfg.Log.Error("collections: request failed", "error", err)
@@ -249,12 +252,72 @@ func (s *Server) putCollectionDocs(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getCollectionDoc(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	docID := r.PathValue("doc")
-	text, err := s.cfg.Collections.GetDoc(r.Context(), id, docID)
+	var text string
+	var attrs zenith.Attrs
+	err := s.cfg.Collections.With(r.Context(), id, func(db *zenith.DB) error {
+		t, found, err := db.Get(docID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return collections.ErrDocNotFound
+		}
+		text = t
+		attrs, err = db.GetAttrs(docID)
+		return err
+	})
 	if err != nil {
 		s.colErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"id": docID, "text": text})
+	out := map[string]any{"id": docID, "text": text}
+	if len(attrs) > 0 {
+		out["attrs"] = attrs
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// suggestCollection serves GET /v1/collections/{id}/suggest?q=<prefix>&n=<count>:
+// indexed terms starting with the prefix (analysed/stemmed, lexicographic
+// order — see zenith.DB.Suggest).
+func (s *Server) suggestCollection(w http.ResponseWriter, r *http.Request) {
+	prefix, n, err := suggestParams(r)
+	if err != nil {
+		writeColErr(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	var terms []string
+	err = s.cfg.Collections.With(r.Context(), r.PathValue("id"), func(db *zenith.DB) error {
+		var err error
+		terms, err = db.Suggest(prefix, n)
+		return err
+	})
+	if err != nil {
+		s.colErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"terms": terms})
+}
+
+// facetsCollection serves GET /v1/collections/{id}/facets?fields=a,b&top_k=<k>:
+// per-value document counts over the whole collection, with no query.
+func (s *Server) facetsCollection(w http.ResponseWriter, r *http.Request) {
+	fields, topK, err := facetParams(r)
+	if err != nil {
+		writeColErr(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	var facets zenith.Facets
+	err = s.cfg.Collections.With(r.Context(), r.PathValue("id"), func(db *zenith.DB) error {
+		var err error
+		facets, err = db.Facets(fields, topK)
+		return err
+	})
+	if err != nil {
+		s.colErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"facets": facetsOut(facets)})
 }
 
 func (s *Server) deleteCollectionDoc(w http.ResponseWriter, r *http.Request) {
@@ -277,11 +340,16 @@ func (s *Server) searchCollection(w http.ResponseWriter, r *http.Request) {
 		Limit       int             `json:"limit"`
 		MinSemantic float64         `json:"min_semantic"`
 		Filter      json.RawMessage `json:"filter"`
+		searchExtras
 	}
 	if !decodeCol(w, r, &req) {
 		return
 	}
-	var searchOpts []zenith.SearchOption
+	searchOpts, facetFields, facetTopK, err := req.searchExtras.options()
+	if err != nil {
+		writeColErr(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	if len(req.Filter) > 0 && string(req.Filter) != "null" {
 		f, err := zenith.FilterFromJSON(req.Filter)
 		if err != nil {
@@ -315,13 +383,15 @@ func (s *Server) searchCollection(w http.ResponseWriter, r *http.Request) {
 	out := make(map[string]queryOut, len(req.Queries))
 	spansFor := memoSpans(r.Context(), s.cfg.Collections, id, s.ana)
 	for _, q := range req.Queries {
-		res, err := s.cfg.Collections.Search(r.Context(), id, q.Text,
-			append([]zenith.SearchOption{zenith.Explain(), zenith.Limit(limit)}, searchOpts...)...)
+		res, facets, err := s.cfg.Collections.SearchWithFacets(r.Context(), id, q.Text, facetFields, facetTopK,
+			append([]zenith.SearchOption{zenith.Explain(), zenith.Limit(req.Offset + limit)}, searchOpts...)...)
 		if err != nil {
 			s.colErr(w, err)
 			return
 		}
-		out[q.ID] = buildQueryOut(res, spansFor, req.MinSemantic)
+		qo := buildQueryOut(skip(res, req.Offset), spansFor, req.MinSemantic)
+		qo.Facets = facetsOut(facets)
+		out[q.ID] = qo
 	}
 	s.cfg.Log.Info("collection searched", "id", id, "queries", len(req.Queries), "ms", time.Since(start).Milliseconds())
 	writeJSON(w, http.StatusOK, map[string]any{"results": out})

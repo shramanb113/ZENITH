@@ -24,6 +24,9 @@ const (
 	SearchService_IndexPDF_FullMethodName       = "/zenith.SearchService/IndexPDF"
 	SearchService_GetDocument_FullMethodName    = "/zenith.SearchService/GetDocument"
 	SearchService_DeleteDocument_FullMethodName = "/zenith.SearchService/DeleteDocument"
+	SearchService_IndexBatch_FullMethodName     = "/zenith.SearchService/IndexBatch"
+	SearchService_DeleteBatch_FullMethodName    = "/zenith.SearchService/DeleteBatch"
+	SearchService_Suggest_FullMethodName        = "/zenith.SearchService/Suggest"
 )
 
 // SearchServiceClient is the client API for SearchService service.
@@ -35,6 +38,16 @@ type SearchServiceClient interface {
 	IndexPDF(ctx context.Context, in *IndexPDFRequest, opts ...grpc.CallOption) (*IndexPDFResponse, error)
 	GetDocument(ctx context.Context, in *GetDocumentRequest, opts ...grpc.CallOption) (*GetDocumentResponse, error)
 	DeleteDocument(ctx context.Context, in *DeleteDocumentRequest, opts ...grpc.CallOption) (*DeleteDocumentResponse, error)
+	// IndexBatch indexes every document atomically (one durable commit, all
+	// or nothing). Returns UNIMPLEMENTED when the server has no transactional
+	// storage engine wired.
+	IndexBatch(ctx context.Context, in *IndexBatchRequest, opts ...grpc.CallOption) (*IndexBatchResponse, error)
+	// DeleteBatch removes every id atomically (one durable commit, all or
+	// nothing). Returns UNIMPLEMENTED when the server has no transactional
+	// storage engine wired.
+	DeleteBatch(ctx context.Context, in *DeleteBatchRequest, opts ...grpc.CallOption) (*DeleteBatchResponse, error)
+	// Suggest returns indexed terms starting with a prefix (autocomplete).
+	Suggest(ctx context.Context, in *SuggestRequest, opts ...grpc.CallOption) (*SuggestResponse, error)
 }
 
 type searchServiceClient struct {
@@ -95,6 +108,36 @@ func (c *searchServiceClient) DeleteDocument(ctx context.Context, in *DeleteDocu
 	return out, nil
 }
 
+func (c *searchServiceClient) IndexBatch(ctx context.Context, in *IndexBatchRequest, opts ...grpc.CallOption) (*IndexBatchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IndexBatchResponse)
+	err := c.cc.Invoke(ctx, SearchService_IndexBatch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *searchServiceClient) DeleteBatch(ctx context.Context, in *DeleteBatchRequest, opts ...grpc.CallOption) (*DeleteBatchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteBatchResponse)
+	err := c.cc.Invoke(ctx, SearchService_DeleteBatch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *searchServiceClient) Suggest(ctx context.Context, in *SuggestRequest, opts ...grpc.CallOption) (*SuggestResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SuggestResponse)
+	err := c.cc.Invoke(ctx, SearchService_Suggest_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SearchServiceServer is the server API for SearchService service.
 // All implementations must embed UnimplementedSearchServiceServer
 // for forward compatibility.
@@ -104,6 +147,16 @@ type SearchServiceServer interface {
 	IndexPDF(context.Context, *IndexPDFRequest) (*IndexPDFResponse, error)
 	GetDocument(context.Context, *GetDocumentRequest) (*GetDocumentResponse, error)
 	DeleteDocument(context.Context, *DeleteDocumentRequest) (*DeleteDocumentResponse, error)
+	// IndexBatch indexes every document atomically (one durable commit, all
+	// or nothing). Returns UNIMPLEMENTED when the server has no transactional
+	// storage engine wired.
+	IndexBatch(context.Context, *IndexBatchRequest) (*IndexBatchResponse, error)
+	// DeleteBatch removes every id atomically (one durable commit, all or
+	// nothing). Returns UNIMPLEMENTED when the server has no transactional
+	// storage engine wired.
+	DeleteBatch(context.Context, *DeleteBatchRequest) (*DeleteBatchResponse, error)
+	// Suggest returns indexed terms starting with a prefix (autocomplete).
+	Suggest(context.Context, *SuggestRequest) (*SuggestResponse, error)
 	mustEmbedUnimplementedSearchServiceServer()
 }
 
@@ -128,6 +181,15 @@ func (UnimplementedSearchServiceServer) GetDocument(context.Context, *GetDocumen
 }
 func (UnimplementedSearchServiceServer) DeleteDocument(context.Context, *DeleteDocumentRequest) (*DeleteDocumentResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteDocument not implemented")
+}
+func (UnimplementedSearchServiceServer) IndexBatch(context.Context, *IndexBatchRequest) (*IndexBatchResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method IndexBatch not implemented")
+}
+func (UnimplementedSearchServiceServer) DeleteBatch(context.Context, *DeleteBatchRequest) (*DeleteBatchResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteBatch not implemented")
+}
+func (UnimplementedSearchServiceServer) Suggest(context.Context, *SuggestRequest) (*SuggestResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Suggest not implemented")
 }
 func (UnimplementedSearchServiceServer) mustEmbedUnimplementedSearchServiceServer() {}
 func (UnimplementedSearchServiceServer) testEmbeddedByValue()                       {}
@@ -240,6 +302,60 @@ func _SearchService_DeleteDocument_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SearchService_IndexBatch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IndexBatchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SearchServiceServer).IndexBatch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SearchService_IndexBatch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SearchServiceServer).IndexBatch(ctx, req.(*IndexBatchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SearchService_DeleteBatch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteBatchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SearchServiceServer).DeleteBatch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SearchService_DeleteBatch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SearchServiceServer).DeleteBatch(ctx, req.(*DeleteBatchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SearchService_Suggest_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SuggestRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SearchServiceServer).Suggest(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SearchService_Suggest_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SearchServiceServer).Suggest(ctx, req.(*SuggestRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SearchService_ServiceDesc is the grpc.ServiceDesc for SearchService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -266,6 +382,18 @@ var SearchService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteDocument",
 			Handler:    _SearchService_DeleteDocument_Handler,
+		},
+		{
+			MethodName: "IndexBatch",
+			Handler:    _SearchService_IndexBatch_Handler,
+		},
+		{
+			MethodName: "DeleteBatch",
+			Handler:    _SearchService_DeleteBatch_Handler,
+		},
+		{
+			MethodName: "Suggest",
+			Handler:    _SearchService_Suggest_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
