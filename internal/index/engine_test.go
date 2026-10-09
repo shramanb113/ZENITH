@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/shramanb113/ZENITH/internal/analysis"
@@ -404,6 +405,56 @@ func TestEngine_Remove_ReAdd(t *testing.T) {
 	}
 	if !found {
 		t.Error("doc1 not found after Remove + re-Add")
+	}
+}
+
+// ─── RemoveByIDPrefix ────────────────────────────────────────────────────────
+
+func TestEngine_RemoveByIDPrefix_RemovesOnlyMatchingChunks(t *testing.T) {
+	cfg := config.DefaultConfig()
+	eng := NewEngine(cfg, embedding.NewDeterministicEmbedder(384), ranking.NewRRFRanker(0, 0), analysis.NewStandardAnalyzer())
+	ctx := context.Background()
+
+	_ = eng.Add(ctx, "report.pdf||p1||c0||text||0,0,0,0", "alpha chunk one")
+	_ = eng.Add(ctx, "report.pdf||p1||c1||text||0,0,0,0", "alpha chunk two")
+	_ = eng.Add(ctx, "other.pdf||p1||c0||text||0,0,0,0", "unrelated document")
+
+	n, err := eng.RemoveByIDPrefix(ctx, "report.pdf||")
+	if err != nil {
+		t.Fatalf("RemoveByIDPrefix: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2 chunks removed, got %d", n)
+	}
+
+	results, _ := eng.Search(ctx, "alpha")
+	for _, r := range results {
+		if strings.HasPrefix(r.ID, "report.pdf||") {
+			t.Errorf("chunk %q still searchable after RemoveByIDPrefix", r.ID)
+		}
+	}
+	results, _ = eng.Search(ctx, "unrelated")
+	found := false
+	for _, r := range results {
+		if r.ID == "other.pdf||p1||c0||text||0,0,0,0" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("unrelated document was wrongly removed by an unrelated prefix")
+	}
+}
+
+func TestEngine_RemoveByIDPrefix_NoMatches(t *testing.T) {
+	cfg := config.DefaultConfig()
+	eng := NewEngine(cfg, embedding.NewDeterministicEmbedder(384), ranking.NewRRFRanker(0, 0), analysis.NewStandardAnalyzer())
+
+	n, err := eng.RemoveByIDPrefix(context.Background(), "nothing-matches||")
+	if err != nil {
+		t.Errorf("RemoveByIDPrefix of no matches returned error: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 removed, got %d", n)
 	}
 }
 

@@ -10,10 +10,8 @@ import (
 type TokenType int
 
 const (
-	WORD     TokenType = iota
-	NGRAM              // produced by edge n-gram expansion
-	PHONETIC           // produced by Soundex/Metaphone
-	SYNONYM            // produced by synonym expansion
+	WORD    TokenType = iota
+	SYNONYM           // produced by synonym expansion
 )
 
 // Token is a single unit of analysis with position and type metadata.
@@ -199,7 +197,7 @@ func spanTerms(spans []Span) []string {
 }
 
 // Tokenize returns stemmed, filtered string tokens from text. It never applies FST
-// resolution — see analyseSpans. Used at index time and by the BM25/TF-IDF scorers.
+// resolution — see analyseSpans. Used at index time and by the BM25 scorer.
 func (a *StandardAnalyzer) Tokenize(text string) []string {
 	return spanTerms(a.analyseSpans(text))
 }

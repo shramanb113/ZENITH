@@ -35,20 +35,6 @@ func normPathEntry(p string) string {
 	return p
 }
 
-// pathWithout returns list with every entry equal to dir removed.
-func pathWithout(list, dir string) string {
-	sep := string(os.PathListSeparator)
-	want := normPathEntry(dir)
-	var keep []string
-	for _, e := range strings.Split(list, sep) {
-		if e == "" || normPathEntry(e) == want {
-			continue
-		}
-		keep = append(keep, e)
-	}
-	return strings.Join(keep, sep)
-}
-
 // rcBlock is the marked block written to a shell rc file.
 func rcBlock(dir string) string {
 	return fmt.Sprintf("%s\nexport PATH=\"%s:$PATH\"\n%s\n", rcBeginMarker, dir, rcEndMarker)

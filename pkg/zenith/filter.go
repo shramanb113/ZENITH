@@ -306,13 +306,6 @@ func WithFilter(f Filter) SearchOption {
 	return func(o *searchOptions) { o.filter = &f }
 }
 
-func (o *searchOptions) predicate() index.Predicate {
-	if o.filter == nil {
-		return nil
-	}
-	return o.filter.pred
-}
-
 func (o *searchOptions) indexFilter() *index.Filter {
 	if o.filter == nil {
 		return nil

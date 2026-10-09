@@ -40,7 +40,7 @@ func TestRemoveRCBlock_NoBlockIsNoop(t *testing.T) {
 	}
 }
 
-func TestPathContainsAndWithout(t *testing.T) {
+func TestPathContains(t *testing.T) {
 	sep := string(os.PathListSeparator)
 	list := strings.Join([]string{"/a/bin", "/b/bin", "/c/bin"}, sep)
 	if !pathContains(list, "/b/bin") || pathContains(list, "/x") {
@@ -48,10 +48,6 @@ func TestPathContainsAndWithout(t *testing.T) {
 	}
 	if !pathContains(list, "/b/bin/") {
 		t.Error("trailing separator should be ignored")
-	}
-	got := pathWithout(list, "/b/bin")
-	if pathContains(got, "/b/bin") || !pathContains(got, "/a/bin") || !pathContains(got, "/c/bin") {
-		t.Errorf("pathWithout = %q", got)
 	}
 }
 
