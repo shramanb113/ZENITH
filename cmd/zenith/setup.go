@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,10 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 )
-
-// errSetupRequired is kept as a named error for backward compatibility with
-// any existing code that checks errors.Is(err, errSetupRequired).
-var errSetupRequired = errors.New("setup required")
 
 var setupFlags struct {
 	clean bool

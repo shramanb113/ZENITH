@@ -150,7 +150,7 @@ so the package stays reusable and has no cyclic-import risk):
 
 **`internal/index` additions:**
 
-- `Engine.cache querycache.Cache` (always a `Tiered` with at least an L1; nil only when
+- `Engine.cache *querycache.Tiered[cacheResult]` (always a `Tiered` with at least an L1; nil only when
   `Config.QueryCacheSize <= 0` disables caching entirely — a nil check short-circuits
   `Get`/`Set` to zero overhead).
 - `Engine.writeGen uint64`, protected by the existing `e.mu` (no new lock, no atomic

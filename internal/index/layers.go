@@ -120,18 +120,6 @@ func (e *Engine) locate(id uint64) (li, row int, ok bool) {
 	return 0, 0, false
 }
 
-// hasDoc reports whether a live document with this internal ID exists anywhere.
-func (e *Engine) hasDoc(id uint64) bool {
-	if _, ok := e.idMapping[id]; ok {
-		return true
-	}
-	if e.frozen != nil && e.frozen.live(id) {
-		return true
-	}
-	_, _, ok := e.locate(id)
-	return ok
-}
-
 // origID resolves an internal ID to the caller-supplied document ID ("" if unknown).
 func (e *Engine) origID(id uint64) string {
 	if s, ok := e.idMapping[id]; ok {
@@ -471,22 +459,14 @@ func (e *Engine) liveTerms() []string {
 // the document's distinct terms (used by Explain).
 func (e *Engine) eachDocTerms(fn func(id uint64, has func(term string) bool)) {
 	for id, toks := range e.inverted.GetDocTokens() {
-		set := make(map[string]struct{}, len(toks))
-		for _, t := range toks {
-			set[t] = struct{}{}
-		}
-		fn(id, func(t string) bool { _, ok := set[t]; return ok })
+		fn(id, tokenSet(toks))
 	}
 	if f := e.frozen; f != nil {
 		for id, toks := range f.inverted.GetDocTokens() {
 			if _, gone := f.dead[id]; gone {
 				continue
 			}
-			set := make(map[string]struct{}, len(toks))
-			for _, t := range toks {
-				set[t] = struct{}{}
-			}
-			fn(id, func(t string) bool { _, ok := set[t]; return ok })
+			fn(id, tokenSet(toks))
 		}
 	}
 	for _, l := range e.segs {
@@ -494,11 +474,46 @@ func (e *Engine) eachDocTerms(fn func(id uint64, has func(term string) bool)) {
 			if l.isDead(row) {
 				continue
 			}
-			set := make(map[string]struct{})
-			l.seg.Forward(row, func(term, _ int) { set[string(l.seg.TermKey(term))] = struct{}{} })
-			fn(l.seg.DocID(row), func(t string) bool { _, ok := set[t]; return ok })
+			fn(l.seg.DocID(row), segRowTermSet(l, row))
 		}
 	}
+}
+
+// docTermsOf is eachDocTerms for a single document: the same membership test
+// eachDocTerms would pass for id, and false exactly when eachDocTerms would not
+// visit id at all (unknown, deleted, or — in a memory layer — without a token
+// entry). Cost is that one document's term count, not the index size.
+func (e *Engine) docTermsOf(id uint64) (func(term string) bool, bool) {
+	if toks, ok := e.inverted.GetDocTokens()[id]; ok {
+		return tokenSet(toks), true
+	}
+	if f := e.frozen; f != nil {
+		if toks, ok := f.inverted.GetDocTokens()[id]; ok {
+			if _, gone := f.dead[id]; !gone {
+				return tokenSet(toks), true
+			}
+		}
+	}
+	if li, row, ok := e.locate(id); ok {
+		return segRowTermSet(e.segs[li], row), true
+	}
+	return nil, false
+}
+
+// tokenSet is a membership test over a memory-layer document's tokens.
+func tokenSet(toks []string) func(term string) bool {
+	set := make(map[string]struct{}, len(toks))
+	for _, t := range toks {
+		set[t] = struct{}{}
+	}
+	return func(t string) bool { _, ok := set[t]; return ok }
+}
+
+// segRowTermSet is a membership test over a segment row's distinct terms.
+func segRowTermSet(l *segLayer, row int) func(term string) bool {
+	set := make(map[string]struct{})
+	l.seg.Forward(row, func(term, _ int) { set[string(l.seg.TermKey(term))] = struct{}{} })
+	return func(t string) bool { _, ok := set[t]; return ok }
 }
 
 // sampleVectorIDs returns up to n live document IDs that have vectors, spread

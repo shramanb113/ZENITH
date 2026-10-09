@@ -210,8 +210,8 @@ func (s *ZenithServer) IndexPDF(
 			status.Error(codes.InvalidArgument, "file_path must not be empty")
 	}
 	if s.PDFIndexer == nil {
-		return &zenithproto.IndexPDFResponse{Status: false, Message: "PDF indexing is not enabled on this server"},
-			status.Error(codes.Unimplemented, "PDF indexing is not enabled on this server")
+		return &zenithproto.IndexPDFResponse{Status: false, Message: "PDF indexing is not configured on this server"},
+			status.Error(codes.Unimplemented, "PDF indexing is not configured on this server")
 	}
 	attrs, err := attrsFromProto(req.GetAttrs())
 	if err != nil {
@@ -418,6 +418,3 @@ func parseChunkFields(id string) map[string]string {
 		"bbox":        parts[4],
 	}
 }
-
-// ParseChunkFieldsForTest exports parseChunkFields for white-box testing.
-var ParseChunkFieldsForTest = parseChunkFields

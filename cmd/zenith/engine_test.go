@@ -33,6 +33,32 @@ func withTestCLIFlags(t *testing.T) (dir string) {
 	return dir
 }
 
+// TestEffectiveFileHashPath_TiedToDBPath is a regression test for a real
+// bug: the content-hash dedup cache used by `zenith index` and `zenith
+// watch run --index-first` used to be one fixed path under ~/.zenith
+// regardless of --db. Two different --db instances indexing the same
+// directory would then share one cache: the second instance would see a
+// file marked up-to-date by the first and skip indexing it into its own,
+// different index entirely. The path must be derived from --db (like
+// effectiveFSTPath and effectiveStorageDir already are) so two different
+// --db instances never collide, and an explicit override is still honored.
+func TestEffectiveFileHashPath_TiedToDBPath(t *testing.T) {
+	withTestCLIFlags(t)
+
+	cliFlags.dbPath = filepath.Join("some", "dir", "a.db")
+	got := effectiveFileHashPath()
+	want := filepath.Join("some", "dir", "a.db") + ".filehashes.json"
+	if got != want {
+		t.Errorf("effectiveFileHashPath() = %q, want %q", got, want)
+	}
+
+	cliFlags.dbPath = filepath.Join("other", "dir", "b.db")
+	got2 := effectiveFileHashPath()
+	if got2 == got {
+		t.Error("two different --db paths produced the same file-hash cache path")
+	}
+}
+
 // TestBuildEngine_IndexSurvivesSaveLoadCycle proves buildEngine's storage
 // wiring doesn't break the ordinary Save/Load round trip. It uses the
 // deterministic embedder, which always fails to embed (returns

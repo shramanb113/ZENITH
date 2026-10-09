@@ -451,11 +451,14 @@ func (db *DB) search(ctx context.Context, query string, facetFields []string, to
 	if err != nil {
 		return nil, nil, fmt.Errorf("zenith: %w", err)
 	}
-	if len(facetFields) > 0 {
-		ids := make([]string, len(raw))
+	var ids []string
+	if len(facetFields) > 0 || so.explain {
+		ids = make([]string, len(raw))
 		for i, r := range raw {
 			ids[i] = r.ID
 		}
+	}
+	if len(facetFields) > 0 {
 		f, err := db.engine.FacetCounts(ids, facetFields, topK)
 		if err != nil {
 			return nil, nil, fmt.Errorf("zenith: %w", err)
@@ -465,7 +468,11 @@ func (db *DB) search(ctx context.Context, query string, facetFields []string, to
 
 	var out []Result
 	if so.explain {
-		terms, hits, err := db.engine.ExplainFiltered(ctx, query, so.indexFilter())
+		// Explain only the documents the ranked search already returned (at
+		// most Config.MaxResults), rather than ExplainFiltered's scan of
+		// every document: the signals per document are identical, but the
+		// cost is bounded by the candidate list instead of the index size.
+		terms, hits, err := db.engine.ExplainIDs(ctx, query, ids, so.indexFilter())
 		if err != nil {
 			return nil, nil, fmt.Errorf("zenith: %w", err)
 		}

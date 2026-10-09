@@ -227,8 +227,7 @@ Use 'zenith watch add' + 'zenith watch start' for persistent watching.`,
 
 		if watchRunFlags.indexFirst {
 			fmt.Printf("  Bulk-indexing %s ...\n", dir)
-			home, _ := os.UserHomeDir()
-			if fi, err := fileindex.Open(filepath.Join(home, ".zenith", "file_hashes.json")); err == nil {
+			if fi, err := fileindex.Open(effectiveFileHashPath()); err == nil {
 				w.SetSkipFile(fi.IsUpToDate)
 				w.SetAfterFile(func(path string) { _ = fi.Mark(path) })
 				defer fi.Save()

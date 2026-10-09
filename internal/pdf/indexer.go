@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	lpdf "github.com/ledongthuc/pdf"
 	"github.com/shramanb113/ZENITH/internal/activitylog"
@@ -125,10 +127,14 @@ func (p *PDFIndexer) Index(ctx context.Context, docID, filePath string, attrs in
 		if err != nil || strings.TrimSpace(text) == "" {
 			continue
 		}
-		for chunkIdx, chunk := range splitChunks(text) {
+		ranges := splitChunkRanges(text)
+		boxes := pageChunkBoxes(page, ranges)
+		for chunkIdx, cr := range ranges {
+			bx := boxes[chunkIdx]
 			docs = append(docs, index.BatchDoc{
-				ID:   fmt.Sprintf("%s||p%d||c%d||text||0.00,0.00,0.00,0.00", docID, pageNum, chunkIdx),
-				Text: chunk, Attrs: attrs,
+				ID: fmt.Sprintf("%s||p%d||c%d||text||%.2f,%.2f,%.2f,%.2f",
+					docID, pageNum, chunkIdx, bx.x, bx.y, bx.w, bx.h),
+				Text: cr.text, Attrs: attrs,
 			})
 		}
 	}
@@ -143,22 +149,238 @@ func (p *PDFIndexer) Index(ctx context.Context, docID, filePath string, attrs in
 	return len(docs), nil
 }
 
-func splitChunks(text string) []string {
+// chunkRange is one chunk's text together with the half-open [Start, End)
+// word-index range (indexing into strings.Fields(text) of the page the
+// chunk came from) it was built from. The index range lets pageChunkBoxes
+// line up each chunk with the same slice of the page's position-tagged
+// word stream.
+type chunkRange struct {
+	text       string
+	start, end int
+}
+
+// splitChunkRanges implements the 300-word/50-overlap windowing and also
+// records, for each chunk, the word-index range it was built from.
+func splitChunkRanges(text string) []chunkRange {
 	words := strings.Fields(text)
 	if len(words) == 0 {
 		return nil
 	}
-	var chunks []string
+	var ranges []chunkRange
 	for i := 0; i < len(words); {
 		end := i + chunkWords
 		if end > len(words) {
 			end = len(words)
 		}
-		chunks = append(chunks, strings.Join(words[i:end], " "))
+		ranges = append(ranges, chunkRange{text: strings.Join(words[i:end], " "), start: i, end: end})
 		if end == len(words) {
 			break
 		}
 		i += chunkWords - chunkOverlap
 	}
+	return ranges
+}
+
+func splitChunks(text string) []string {
+	ranges := splitChunkRanges(text)
+	if ranges == nil {
+		return nil
+	}
+	chunks := make([]string, len(ranges))
+	for i, r := range ranges {
+		chunks[i] = r.text
+	}
 	return chunks
+}
+
+// bbox is a chunk's bounding box on its page, in the same units emitted in
+// the chunk ID: top-left origin, Y increasing downward (see pageChunkBoxes).
+// The zero value is the "no position data" box ("0.00,0.00,0.00,0.00"),
+// used whenever real coordinates can't be computed for a chunk.
+type bbox struct{ x, y, w, h float32 }
+
+// contentWord is one word reconstructed from the page's content stream
+// (lpdf.Page.Content(), which — unlike GetPlainText — exposes one Text
+// entry per decoded character, each with its own X/Y/width/font size),
+// together with the union box of the characters that made it up. Boxes are
+// in the PDF's native coordinate space: bottom-left origin, Y increasing
+// upward (see lpdf.Text's doc comment).
+type contentWord struct {
+	minX, minY, maxX, maxY float64
+}
+
+// contentWords walks a page's Content() character stream and groups
+// consecutive non-whitespace characters into words, splitting purely on
+// literal whitespace characters — the same rule GetPlainText uses to
+// separate words in its own output (it never inserts whitespace for a
+// position gap between runs). Using the same rule here is what lets
+// pageChunkBoxes line this word list up 1:1 with strings.Fields(text) from
+// GetPlainText: both merge or split words identically, including PDF
+// quirks like two words on adjacent content-stream lines running together
+// with no space when the text operator between them is a bare position
+// move (Td) rather than a newline op (T*/BT).
+func contentWords(c lpdf.Content) []contentWord {
+	var words []contentWord
+	var cur contentWord
+	open := false
+	flush := func() {
+		if open {
+			words = append(words, cur)
+			open = false
+		}
+	}
+	for _, t := range c.Text {
+		if t.S == "" {
+			continue
+		}
+		r, _ := utf8.DecodeRuneInString(t.S)
+		if unicode.IsSpace(r) {
+			flush()
+			continue
+		}
+		// Approximate each character's height as its font size: Content()
+		// gives only a baseline Y and a width, no ascent/descent metrics.
+		h := t.FontSize
+		if h <= 0 {
+			h = 1
+		}
+		x0, y0, x1, y1 := t.X, t.Y, t.X+t.W, t.Y+h
+		if !open {
+			cur = contentWord{x0, y0, x1, y1}
+			open = true
+			continue
+		}
+		if x0 < cur.minX {
+			cur.minX = x0
+		}
+		if y0 < cur.minY {
+			cur.minY = y0
+		}
+		if x1 > cur.maxX {
+			cur.maxX = x1
+		}
+		if y1 > cur.maxY {
+			cur.maxY = y1
+		}
+	}
+	flush()
+	return words
+}
+
+// mediaBoxHeight returns a page's MediaBox height in PDF points, walking
+// the inherited /Parent chain the way lpdf's own (unexported)
+// Page.findInherited does — MediaBox is commonly set once on the Pages
+// root and inherited by every leaf page rather than repeated per page.
+// Returns 0 if no usable MediaBox is found.
+func mediaBoxHeight(v lpdf.Value) float64 {
+	for ; !v.IsNull(); v = v.Key("Parent") {
+		mb := v.Key("MediaBox")
+		if mb.IsNull() || mb.Len() != 4 {
+			continue
+		}
+		if h := mb.Index(3).Float64() - mb.Index(1).Float64(); h > 0 {
+			return h
+		}
+	}
+	return 0
+}
+
+// unionBox merges a contiguous slice of a page's content-stream words into
+// one box and converts it from PDF's native bottom-left-origin, Y-up space
+// to a top-left-origin, Y-down space.
+//
+// Coordinate-system choice: lpdf.Text documents its X/Y as PDF-native
+// (origin bottom-left, Y increasing upward — the PDF spec's default user
+// space). That's the wrong space for this feature's actual consumer: a
+// bbox exists so a UI can draw a highlight rectangle over a *rendered*
+// page image, and every common rendering/display surface (HTML, canvas,
+// browser PDF viewers' overlay coordinates) places (0,0) at the top-left
+// with Y increasing downward. Flipping once here, at the one place that
+// has both the raw box and the page height needed to flip it, means every
+// downstream consumer (server.go, zenith.go, result.go) can treat bbox.y
+// as "distance down from the top of the page" with no further conversion.
+func unionBox(words []contentWord, pageHeight float64) bbox {
+	if len(words) == 0 {
+		return bbox{}
+	}
+	minX, minY, maxX, maxY := words[0].minX, words[0].minY, words[0].maxX, words[0].maxY
+	for _, w := range words[1:] {
+		if w.minX < minX {
+			minX = w.minX
+		}
+		if w.minY < minY {
+			minY = w.minY
+		}
+		if w.maxX > maxX {
+			maxX = w.maxX
+		}
+		if w.maxY > maxY {
+			maxY = w.maxY
+		}
+	}
+	x := minX
+	y := pageHeight - maxY
+	w := maxX - minX
+	h := maxY - minY
+	if y < 0 {
+		// Font-size-based height is an estimate, not real glyph ascent, so
+		// it can push a box's top very slightly above the page edge for
+		// text near the top margin; clamp rather than emit a negative
+		// coordinate a consumer wouldn't expect.
+		y = 0
+	}
+	return bbox{float32(x), float32(y), float32(w), float32(h)}
+}
+
+// pageChunkBoxes computes a real union bounding box for every chunk range
+// on a page, falling back to the zero bbox (same "0.00,0.00,0.00,0.00" a
+// chunk got unconditionally before this feature existed) for every chunk
+// on that page whenever the computation can't be trusted:
+//
+//   - no MediaBox (or a degenerate one) — can't convert to top-left space.
+//   - the word count contentWords(page.Content()) produces doesn't match
+//     the word count GetPlainText/strings.Fields produced (the word list
+//     splitChunkRanges actually chunked). A mismatch means some PDF quirk
+//     made the two extraction paths disagree on where word boundaries
+//     fall, and lining chunk index ranges up against the wrong word
+//     stream would silently attach a plausible-looking but wrong box to a
+//     chunk — worse than an honest zero.
+//   - page.Content() panics on a malformed content stream. Unlike
+//     GetPlainText, Content() has no built-in recover(), so one is applied
+//     here: a bad page degrades to zero boxes for that page rather than
+//     aborting indexing of the rest of the PDF.
+//
+// The returned slice is always len(ranges) long and index-aligned with it.
+func pageChunkBoxes(page lpdf.Page, ranges []chunkRange) []bbox {
+	zero := make([]bbox, len(ranges))
+	if len(ranges) == 0 {
+		return zero
+	}
+
+	boxes := zero
+	func() {
+		defer func() {
+			if recover() != nil {
+				boxes = zero
+			}
+		}()
+
+		height := mediaBoxHeight(page.V)
+		if height <= 0 {
+			return
+		}
+		words := contentWords(page.Content())
+		// ranges is non-empty and built so its last entry's end is always
+		// the total word count from strings.Fields(text); comparing
+		// against it is equivalent to recomputing that count.
+		if len(words) != ranges[len(ranges)-1].end {
+			return
+		}
+		out := make([]bbox, len(ranges))
+		for i, cr := range ranges {
+			out[i] = unionBox(words[cr.start:cr.end], height)
+		}
+		boxes = out
+	}()
+	return boxes
 }

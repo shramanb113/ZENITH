@@ -84,7 +84,10 @@ func main() {
 	scorer := ranking.NewWeightedRRFRanker(appConfig.RRFConstant, appConfig.MaxResults, 1.0, appConfig.VectorWeight)
 	engine := index.NewEngine(appConfig, emb, scorer, tkz)
 
-	engine.SetFSTPath("./data/index.fst")
+	// <db>.fst — same directory/stem as the db path, so a different zenith.db
+	// (a different working directory) never loads this one's FST or vice
+	// versa; see cmd/zenith's effectiveFSTPath for the same reasoning.
+	engine.SetFSTPath("zenith.db.fst")
 	engine.SetCacheObserver(metrics.NewQueryCacheObserver())
 
 	// A cheap dry pass just to know whether the journal has anything to

@@ -58,7 +58,6 @@ func cc(s, code string) string {
 
 func bold(s string) string   { return cc(s, ansiBold) }
 func dim(s string) string    { return cc(s, cDim) }
-func cyan(s string) string   { return cc(s, ansiBold+cBrand) }
 func green(s string) string  { return cc(s, cSuccess) }
 func yellow(s string) string { return cc(s, cWarn) }
 func muted(s string) string  { return cc(s, cMuted) }
@@ -193,25 +192,6 @@ func scoreColor(ratio float64) string {
 	return cLo
 }
 
-// ─── setup steps ─────────────────────────────────────────────────────────────
-
-// printStep prints a numbered setup step header.
-//
-//	[1/4]  Python environment
-func printStep(n, total int, label string) {
-	step := cc(fmt.Sprintf("[%d/%d]", n, total), cAccent)
-	fmt.Printf("\n  %s  %s\n", step, cc(label, ansiBold+cFile))
-}
-
-// ─── nerve / status lines ────────────────────────────────────────────────────
-
-func printNerveStatus(msg string, ok bool) {
-	icon := cc("✓", cSuccess)
-	if !ok {
-		icon = cc("!", cWarn)
-	}
-	fmt.Printf("  %s  %s\n", icon, muted(msg))
-}
 
 // ─── live index progress ─────────────────────────────────────────────────────
 

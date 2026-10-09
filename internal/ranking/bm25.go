@@ -336,6 +336,17 @@ func (s *BM25Scorer) ScoreDocs(docIDs []uint64, queryTerms []string, k1, b float
 	return out
 }
 
+// ScoreDocsDefault is ScoreDocs with the scorer's own k1/b. For deduplicated,
+// sorted queryTerms each returned score is bit-identical to the one Query
+// reports for the same document (same per-term arithmetic, same summation
+// order), at O(len(docIDs) × len(queryTerms)) instead of the query terms'
+// posting-list lengths.
+func (s *BM25Scorer) ScoreDocsDefault(docIDs []uint64, queryTerms []string) map[uint64]float64 {
+	terms := append([]string(nil), queryTerms...)
+	sort.Strings(terms)
+	return s.ScoreDocs(docIDs, terms, s.k1, s.b)
+}
+
 // BM25Result is a scored document from a BM25 query.
 type BM25Result struct {
 	DocID uint64
